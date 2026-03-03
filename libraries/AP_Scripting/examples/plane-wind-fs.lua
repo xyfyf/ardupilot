@@ -300,7 +300,7 @@ function update()
   end
 
   -- check airspeed
-  local air_speed_in = ahrs:airspeed_EAS()
+  local air_speed_in = ahrs:airspeed_estimate()
   if not air_speed_in then
     error("Could not read airspeed")
   end

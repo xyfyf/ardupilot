@@ -1,0 +1,290 @@
+<?xml version="1.0"?>
+<mavlink>
+  <include>ardupilotmega.xml</include>
+  <messages>
+	  <message id="501" name="DEVICE_STATUS_ARRAY">
+      <description>Report current status information for multiple devices (up to 6 devices)</description>
+      <field type="uint8_t" name="fault_status_0">Device 0 fault status flags</field>
+      <field type="uint8_t" name="control_mode_0">Device 0 control mode</field>
+      <field type="uint16_t" name="baud_rate_0">Device 0 CAN bus baud rate</field>
+      <field type="uint16_t" name="speed_0">Device 0 rotation speed</field>
+      <field type="uint8_t" name="reserved_0">Device 0 reserved field</field>
+      <field type="uint8_t" name="life_signal_0">Device 0 life signal counter</field>
+      <field type="uint8_t" name="fault_status_1">Device 1 fault status flags</field>
+      <field type="uint8_t" name="control_mode_1">Device 1 control mode</field>
+      <field type="uint16_t" name="baud_rate_1">Device 1 CAN bus baud rate</field>
+      <field type="uint16_t" name="speed_1">Device 1 rotation speed</field>
+      <field type="uint8_t" name="reserved_1">Device 1 reserved field</field>
+      <field type="uint8_t" name="life_signal_1">Device 1 life signal counter</field>
+      <field type="uint8_t" name="fault_status_2">Device 2 fault status flags</field>
+      <field type="uint8_t" name="control_mode_2">Device 2 control mode</field>
+      <field type="uint16_t" name="baud_rate_2">Device 2 CAN bus baud rate</field>
+      <field type="uint16_t" name="speed_2">Device 2 rotation speed</field>
+      <field type="uint8_t" name="reserved_2">Device 2 reserved field</field>
+      <field type="uint8_t" name="life_signal_2">Device 2 life signal counter</field>
+      <field type="uint8_t" name="fault_status_3">Device 3 fault status flags</field>
+      <field type="uint8_t" name="control_mode_3">Device 3 control mode</field>
+      <field type="uint16_t" name="baud_rate_3">Device 3 CAN bus baud rate</field>
+      <field type="uint16_t" name="speed_3">Device 3 rotation speed</field>
+      <field type="uint8_t" name="reserved_3">Device 3 reserved field</field>
+      <field type="uint8_t" name="life_signal_3">Device 3 life signal counter</field>
+      <field type="uint8_t" name="fault_status_4">Device 4 fault status flags</field>
+      <field type="uint8_t" name="control_mode_4">Device 4 control mode</field>
+      <field type="uint16_t" name="baud_rate_4">Device 4 CAN bus baud rate</field>
+      <field type="uint16_t" name="speed_4">Device 4 rotation speed</field>
+      <field type="uint8_t" name="reserved_4">Device 4 reserved field</field>
+      <field type="uint8_t" name="life_signal_4">Device 4 life signal counter</field>
+      <field type="uint8_t" name="fault_status_5">Device 5 fault status flags</field>
+      <field type="uint8_t" name="control_mode_5">Device 5 control mode</field>
+      <field type="uint16_t" name="baud_rate_5">Device 5 CAN bus baud rate</field>
+      <field type="uint16_t" name="speed_5">Device 5 rotation speed</field>
+      <field type="uint8_t" name="reserved_5">Device 5 reserved field</field>
+      <field type="uint8_t" name="life_signal_5">Device 5 life signal counter</field>
+	  </message>
+
+	  <message id="502" name="DEVICE_INFO1_ARRAY">
+      <description>Report detailed information for multiple devices (up to 6 devices)</description>
+      <field type="uint8_t" name="type_0">Device 0 type identifier (A-E)</field>
+      <field type="uint8_t" name="year_0">Device 0 manufacturing year</field>
+      <field type="uint8_t" name="month_0">Device 0 manufacturing month (1-12)</field>
+      <field type="uint8_t" name="day_0">Device 0 manufacturing day (1-31)</field>
+      <field type="uint8_t" name="number_0">Device 0 serial number</field>
+      <field type="uint8_t" name="hw_major_0">Device 0 hardware major version</field>
+      <field type="uint8_t" name="hw_minor_0">Device 0 hardware minor version</field>
+      <field type="uint8_t" name="sw_major_0">Device 0 software major version</field>
+      <field type="uint8_t" name="sw_minor_0">Device 0 software minor version</field>
+      <field type="uint8_t" name="minutes_0">Device 0 runtime minutes (0-59)</field>
+      <field type="uint16_t" name="hours_0">Device 0 total runtime hours</field>
+      <field type="uint16_t" name="pwm_lost_count_0">Device 0 PWM signal loss count</field>
+      <field type="uint8_t" name="type_1">Device 1 type identifier (A-E)</field>
+      <field type="uint8_t" name="year_1">Device 1 manufacturing year</field>
+      <field type="uint8_t" name="month_1">Device 1 manufacturing month (1-12)</field>
+      <field type="uint8_t" name="day_1">Device 1 manufacturing day (1-31)</field>
+      <field type="uint8_t" name="number_1">Device 1 serial number</field>
+      <field type="uint8_t" name="hw_major_1">Device 1 hardware major version</field>
+      <field type="uint8_t" name="hw_minor_1">Device 1 hardware minor version</field>
+      <field type="uint8_t" name="sw_major_1">Device 1 software major version</field>
+      <field type="uint8_t" name="sw_minor_1">Device 1 software minor version</field>
+      <field type="uint8_t" name="minutes_1">Device 1 runtime minutes (0-59)</field>
+      <field type="uint16_t" name="hours_1">Device 1 total runtime hours</field>
+      <field type="uint16_t" name="pwm_lost_count_1">Device 1 PWM signal loss count</field>
+      <field type="uint8_t" name="type_2">Device 2 type identifier (A-E)</field>
+      <field type="uint8_t" name="year_2">Device 2 manufacturing year</field>
+      <field type="uint8_t" name="month_2">Device 2 manufacturing month (1-12)</field>
+      <field type="uint8_t" name="day_2">Device 2 manufacturing day (1-31)</field>
+      <field type="uint8_t" name="number_2">Device 2 serial number</field>
+      <field type="uint8_t" name="hw_major_2">Device 2 hardware major version</field>
+      <field type="uint8_t" name="hw_minor_2">Device 2 hardware minor version</field>
+      <field type="uint8_t" name="sw_major_2">Device 2 software major version</field>
+      <field type="uint8_t" name="sw_minor_2">Device 2 software minor version</field>
+      <field type="uint8_t" name="minutes_2">Device 2 runtime minutes (0-59)</field>
+      <field type="uint16_t" name="hours_2">Device 2 total runtime hours</field>
+      <field type="uint16_t" name="pwm_lost_count_2">Device 2 PWM signal loss count</field>
+	  </message>
+	
+	  <message id="503" name="DEVICE_INFO2_ARRAY">
+	  <description>Report detailed information for multiple devices (up to 6 devices)</description>
+      <field type="uint8_t" name="type_3">Device 3 type identifier (A-E)</field>
+      <field type="uint8_t" name="year_3">Device 3 manufacturing year</field>
+      <field type="uint8_t" name="month_3">Device 3 manufacturing month (1-12)</field>
+      <field type="uint8_t" name="day_3">Device 3 manufacturing day (1-31)</field>
+      <field type="uint8_t" name="number_3">Device 3 serial number</field>
+      <field type="uint8_t" name="hw_major_3">Device 3 hardware major version</field>
+      <field type="uint8_t" name="hw_minor_3">Device 3 hardware minor version</field>
+      <field type="uint8_t" name="sw_major_3">Device 3 software major version</field>
+      <field type="uint8_t" name="sw_minor_3">Device 3 software minor version</field>
+      <field type="uint8_t" name="minutes_3">Device 3 runtime minutes (0-59)</field>
+      <field type="uint16_t" name="hours_3">Device 3 total runtime hours</field>
+      <field type="uint16_t" name="pwm_lost_count_3">Device 3 PWM signal loss count</field>
+      <field type="uint8_t" name="type_4">Device 4 type identifier (A-E)</field>
+      <field type="uint8_t" name="year_4">Device 4 manufacturing year</field>
+      <field type="uint8_t" name="month_4">Device 4 manufacturing month (1-12)</field>
+      <field type="uint8_t" name="day_4">Device 4 manufacturing day (1-31)</field>
+      <field type="uint8_t" name="number_4">Device 4 serial number</field>
+      <field type="uint8_t" name="hw_major_4">Device 4 hardware major version</field>
+      <field type="uint8_t" name="hw_minor_4">Device 4 hardware minor version</field>
+      <field type="uint8_t" name="sw_major_4">Device 4 software major version</field>
+      <field type="uint8_t" name="sw_minor_4">Device 4 software minor version</field>
+      <field type="uint8_t" name="minutes_4">Device 4 runtime minutes (0-59)</field>
+      <field type="uint16_t" name="hours_4">Device 4 total runtime hours</field>
+      <field type="uint16_t" name="pwm_lost_count_4">Device 4 PWM signal loss count</field>
+      <field type="uint8_t" name="type_5">Device 5 type identifier (A-E)</field>
+      <field type="uint8_t" name="year_5">Device 5 manufacturing year</field>
+      <field type="uint8_t" name="month_5">Device 5 manufacturing month (1-12)</field>
+      <field type="uint8_t" name="day_5">Device 5 manufacturing day (1-31)</field>
+      <field type="uint8_t" name="number_5">Device 5 serial number</field>
+      <field type="uint8_t" name="hw_major_5">Device 5 hardware major version</field>
+      <field type="uint8_t" name="hw_minor_5">Device 5 hardware minor version</field>
+      <field type="uint8_t" name="sw_major_5">Device 5 software major version</field>
+      <field type="uint8_t" name="sw_minor_5">Device 5 software minor version</field>
+      <field type="uint8_t" name="minutes_5">Device 5 runtime minutes (0-59)</field>
+      <field type="uint16_t" name="hours_5">Device 5 total runtime hours</field>
+      <field type="uint16_t" name="pwm_lost_count_5">Device 5 PWM signal loss count</field>
+	  </message>
+    
+	  <message id="504" name="SINGLE_RADAR_DATA">
+     <description>Single radar sensor data message containing ground, forward and backward distance measurements</description>
+     <field type="uint16_t" name="ground_distance" units="cm">Ground radar distance measurement in centimeters</field>
+     <field type="uint16_t" name="forward_distance" units="cm">Forward radar distance measurement in centimeters</field>
+     <field type="uint16_t" name="backward_distance" units="cm">Backward radar distance measurement in centimeters</field>
+    </message>
+
+    <message id="505" name="WEIGHT_CALIBRATION">
+     <description>Weight sensor calibration message for LED control, tare, weight and K-value calibration</description>
+     <field type="uint8_t" name="led_control">LED control flag (0: no control, 1: start control)</field>
+     <field type="uint8_t" name="right_led_brightness">Right front LED brightness (0-100: 0% to 100%)</field>
+     <field type="uint8_t" name="left_led_brightness">Left front LED brightness (0-100: 0% to 100%)</field>
+     <field type="uint8_t" name="tare_calibration">Tare calibration flag (0: no calibration, 1: start calibration)</field>
+     <field type="uint8_t" name="weight_calibration">Weight calibration flag (0: no calibration, 1: start calibration)</field>
+     <field type="uint16_t" name="calibration_weight">Calibration weight value in grams</field>
+     <field type="uint8_t" name="k_calibration">K-value calibration flag (0: no calibration, 1: start calibration)</field>
+     <field type="uint16_t[3]" name="k_values">K values for three weight sensors</field>
+    </message>
+  
+    <message id="506" name="WEIGH_DATA_EFT">
+        <description>Data from Z20 front board of EFT device.Contains liquid level sensor status, weight sensor data, LED status and device information.</description>
+        <field type="uint8_t" name="liquid_level">Liquid level sensor status (0: No liquid, 1: Liquid detected)</field>
+        <field type="uint8_t" name="sensor_status">Arm lock sensor status:- bit 0-3: Arm1-4 status (0: Locked, 1: Unlocked)- bit 4-7: Reserved</field>
+        <field type="uint16_t" name="weight">Current weight value in grams</field>
+        <!-- LED and Temperature -->
+        <field type="uint8_t" name="right_led_temp">Right LED temperature</field>
+        <field type="uint8_t" name="left_led_temp">Left LED temperature</field>
+        <field type="uint8_t" name="led_status">LED status (bit0-1: over temp, bit2-3: switch status)</field>
+        <field type="uint8_t" name="battery_temp">Battery connector temperature</field>
+        <!-- Device Information -->
+        <field type="uint8_t" name="device_type">Device type (EB)</field>
+        <field type="uint8_t" name="year">Manufacturing year</field>
+        <field type="uint8_t" name="month">Manufacturing month</field>
+        <field type="uint8_t" name="day">Manufacturing day</field>
+        <field type="uint8_t" name="number">Device serial number</field>
+        <field type="uint8_t" name="hw_major">Hardware major version</field>
+        <field type="uint8_t" name="hw_minor">Hardware minor version</field>
+        <field type="uint8_t" name="sw_major">Software major version</field>
+        <field type="uint8_t" name="sw_minor">Software minor version</field>
+        <field type="uint8_t" name="minutes">Runtime minutes</field>
+        <field type="uint16_t" name="hours">Runtime hours</field>
+        <field type="uint16_t" name="sensor1_k">Weight sensor 1 K value</field>
+        <field type="uint16_t" name="sensor2_k">Weight sensor 2 K value</field>
+        <field type="uint16_t" name="sensor3_k">Weight sensor 3 K value</field>
+    </message>
+
+    <message id="507" name="PUMP_CALIBRATION_CMD">
+      <description>Pump calibration command for EFT device. Used to start/stop calibration of pump1 and pump2.</description>
+      <field type="uint8_t" name="calibration_cmd">Calibration command:11: Start pump1 calibration 12: Stop pump1 calibration 
+      21: Start pump2 calibration 22: Stop pump2 calibration 31: Start spreader calibration 32: Stop spreader calibration</field>
+    </message>
+    
+    <message id="508" name="PUMP_CALIBRATION_RESULTS">
+      <description>Upload pump calibration results (6 groups, each: PWM(1050-1950), Speed(0-20000rpm), Flow(L/min))</description>
+      <field type="uint16_t[6]" name="pwm">PWM value for each pump (1050-1950)</field>
+      <field type="uint16_t[6]" name="speed">Motor speed in RPM (0-20000)</field>
+      <field type="uint16_t[6]" name="flow">Flow rate in L/min</field>
+    </message>
+
+    <message id="509" name="SPRAY_SYSTEM_PARAMS">
+      <description>Parameters sent to PMU for controlling pump speed, used for speed-based spraying during waypoint missions</description>
+      <field type="uint16_t" name="spray_rate" units="mL/mu">Spray rate in liters per mu</field>
+      <field type="uint16_t" name="spray_width" units="cm">Spray width in meters</field>
+    </message>
+    
+    <message id="510" name="BATTERY_DATA">
+      <description>Battery data message containing voltage, current, temperature and capacity information</description>
+      <field type="uint16_t" name="voltage" units="mV">Battery voltage in millivolts</field>
+      <field type="uint32_t" name="current" units="mA">Battery current in milliamps</field>
+      <field type="uint16_t" name="cell_temp" units="degC">Battery cell temperature in degrees Celsius</field>
+      <field type="uint16_t" name="mosfet_temp" units="degC">Battery MOSFET temperature in degrees Celsius</field>
+      <field type="uint16_t" name="capacity_percent" units="%">Battery capacity percentage (0-100)</field>
+    </message>
+
+    <message id="511" name="SPREADER_CONTROL">
+    <description>Control message for agricultural spreader device with command identification</description>
+    <field type="uint8_t" name="motor_control_cmd">Motor control command identifier (0xF1)</field>
+    <field type="uint16_t" name="spreader_motor_pwm">Spreader motor control PWM width (1000-2000)</field>
+    <field type="uint16_t" name="spreader_valve_pwm">Spreader valve control PWM width (1000-2000)</field>
+    <field type="uint8_t" name="signal_source_cmd">Signal source command identifier (0xF2)</field>
+    <field type="uint8_t" name="spreader_signal_source">Signal source selection (00: PWM, 01: CANBUS)</field>
+    <field type="uint8_t" name="alarm_config_cmd">Alarm configuration command identifier (0xF3)</field>
+    <field type="uint8_t[3]" name="spreader_alarm_config">
+        Alarm configuration array:
+        [0] Material shortage alarm (00: OFF, 01: ON)
+        [1] Disk stall alarm (00: OFF, 01: ON) 
+        [2] Hall sensor fault alarm (00: OFF, 01: ON)
+        </field>
+    <field type="uint8_t" name="spreader_factory_reset">Factory reset control (0xF5). 
+        Default settings: PWM signal source, Material shortage and Disk stall alarms enabled, Baudrate 1000Kbps
+        </field>
+    </message>
+
+    <message id="512" name="SPREADER_STATUS">
+    <description>Status message for agricultural spreader device</description>
+    <field type="uint8_t" name="spreader_servo_angle" >Servo angle (0-100%, 0x00-0x64)</field>
+    <field type="uint8_t" name="spreader_sensor_status">
+        Sensor status bitmap:
+        bit0: Material sensor (0: Not detected, 1: Detected)
+        bit1: Disk rotation (0: Not detected, 1: Detected)
+        bit2: Servo fault (0: Not detected, 1: Detected)
+        bit3: Temperature (0: Not detected, 1: Detected)
+        bit4: Power rate (0: Not detected, 1: Detected)
+        bit5: Hall sensor (0: Not detected, 1: Detected)
+        bit6-7: Reserved
+        </field>
+    <field type="uint8_t" name="spreader_can_enable">CAN function status (0: Disabled, 1: Enabled)</field>
+    <field type="uint16_t" name="spreader_can_baudrate">CAN baudrate</field>
+    <field type="uint8_t" name="spreader_speed" >Spreader actual speed (Value = 0-256, actual speed = Value * 10)</field>
+    <field type="uint8_t" name="spreader_function_status">
+        Function status bitmap:
+        bit0: Material shortage alarm (0: OFF, 1: ON)
+        bit1: spreader stall alarm (0: OFF, 1: ON)
+        bit2-7: Reserved
+        </field>
+    <field type="uint8_t" name="spreader_life_signal">Life signal cycling from 0x00 to 0xFF</field>
+    <field type="uint8_t" name="spreader_year">Manufacturing year</field>
+    <field type="uint8_t" name="spreader_month">Manufacturing month</field>
+    <field type="uint8_t" name="spreader_day">Manufacturing day</field>
+    <field type="uint16_t" name="spreader_sequence">Spreader sequence number</field>
+    <field type="uint16_t" name="spreader_firmware_version">Firmware version number</field>
+    </message>
+
+    <message id="513" name="SPREADER_CALIBRATION_RESULTS">
+      <description>Upload spreader calibration results (6 groups, each: PWM(1000-2000), Angle(0-100), Flow(kg/min))</description>
+      <field type="uint16_t[6]" name="pwm">PWM value for each spreader (1000-2000)</field>
+      <field type="uint16_t[6]" name="angle">Spreader angle (0-100)</field>
+      <field type="uint16_t[6]" name="flow">Flow rate in kg/min</field>
+    </message>
+    
+    <message id="514" name="MULTI_RADAR_DATA">
+      <description>Multi-point radar sensor data message containing ground, forward and backward distance measurements with raw data conversion</description>
+      <field type="uint16_t" name="ground_distance" units="cm">Ground radar distance in centimeters</field>
+      <field type="uint16_t" name="forward_distance" units="cm">Forward radar distance in centimeters</field>
+      <field type="uint16_t" name="backward_distance" units="cm">Backward radar distance in centimeters</field>
+    </message>
+
+    <message id="515" name="FMU_PMU_UART_MESSAGE">
+    <description>Custom message for agricultural flight controller (FMU) and power module (PMU) communication, encapsulating various control and calibration commands.</description>
+      <field type="uint16_t" name="pump_control" display="bitmask">Pump control bitmask. bit0 for pump 1, bit1 for pump 2. (0: OFF, 1: ON)</field>
+      <field type="uint32_t" name="nozzle_control" display="bitmask">Nozzle control bitmask. bit0 for nozzle 1, bit1 for nozzle 2, etc. (0: OFF, 1: ON)</field>
+      <field type="uint8_t" name="control_mode">Control mode. Fixed value 0x00 for PWM mode.</field>
+      <field type="uint16_t" name="horizontal_speed" units="cm/s">Horizontal speed calculated from sqrt(vel.x^2 + vel.y^2).</field>
+      <field type="uint16_t" name="spray_rate" units="mL/mu">Spray rate, e.g., 3000 for 3000mL/mu (Chinese acre).</field>
+      <field type="uint16_t" name="spray_width" units="cm">Spray width, e.g., 600 for 600cm.</field>
+      <field type="uint8_t" name="pump_calibration_cmd">Pump calibration command. 0x11 for pump 1, 0x31 for pump 2, 0x00 otherwise.</field>
+      <field type="uint8_t" name="led_control_cmd">LED control command identifier (e.g., 0xE1).</field>
+      <field type="uint8_t" name="led_brightness_right" units="%">Right front LED brightness (0-100).</field>
+      <field type="uint8_t" name="led_brightness_left" units="%">Left front LED brightness (0-100).</field>
+      <field type="uint8_t" name="tare_calibration_cmd">Tare calibration command. 0xF6 to execute, 0x00 otherwise.</field>
+      <field type="uint8_t" name="weight_calibration_cmd">Weight calibration command identifier (e.g., 0xF7).</field>
+      <field type="uint16_t" name="calibration_weight">Calibration weight value.</field>
+      <field type="uint8_t" name="k_value_calibration_cmd">K-value calibration command identifier (e.g., 0xFC).</field>
+      <field type="uint16_t[3]" name="k_values">Array of 3 K-values.</field>
+      <field type="uint8_t" name="spreader_control_cmd">Spreader motor control command identifier (e.g., 0xF1).</field>
+      <field type="uint16_t" name="spreader_motor_pwm">Spreader motor PWM value (default 1000).</field>
+      <field type="uint16_t" name="spreader_valve_pwm">Spreader valve PWM value (default 1000).</field>
+      <field type="uint8_t" name="signal_source_cmd">Signal source selection command identifier (e.g., 0xF2).</field>
+      <field type="uint8_t" name="signal_source">Signal source selection (0: PWM, 1: CANBUS).</field>
+      <field type="uint8_t" name="alarm_config_cmd">Alarm configuration command identifier (e.g., 0xF3).</field>
+      <field type="uint8_t[3]" name="alarm_config">Alarm configuration array for material shortage, motor stall, and hall sensor fault alarms.</field>
+      <field type="uint8_t" name="factory_reset_cmd">Factory reset command. 0xF5 to execute, 0x00 otherwise.</field>
+      <field type="uint8_t" name="spray_spreader_mode">Spray/Spreader mode switch. 0x01 to toggle, 0x00 otherwise.</field>
+    </message>
+  </messages>
+</mavlink>

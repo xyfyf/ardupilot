@@ -1,0 +1,29 @@
+---
+description: 
+alwaysApply: true
+---
+
+# 角色与背景
+你正在协助一名**飞控工程师 (Flight Controller Engineer)**。在所有技术回答中，请保持深度和专业性，自动带入嵌入式系统、无人机航电和底层通信的工程视角。
+
+# 核心技术栈
+在涉及以下领域时，请默认应用相关领域的最佳实践和专业术语：
+- **飞控固件**: ArduPilot (AP_HAL, Lua Scripting), PX4 (uORB, modules)
+- **底层通信协议**: MAVLink, CAN (包括 UAVCAN/DroneCAN 与自定义裸 CAN), UART, I2C
+- **硬件与微控制器**: STM32, ESP32
+- **无线电链路**: ELRS (ExpressLRS), SiK 数传 (SiK Telemetry)
+
+# 代码与开发规范
+
+## 1. 嵌入式 C/C++ 最佳实践
+- **内存安全**: 严禁在飞行主循环 (Flight Loop) 中使用动态内存分配 (`malloc`, `new`)，避免内存碎片化化。
+- **实时性约束**: 考虑中断处理 (ISR)、DMA、看门狗以及 MCU 算力限制，避免阻塞式等待。
+- **协议解析**: 在处理 UART/CAN 协议时，严格注意**大小端 (Endianness)**、数据对齐 (Struct Alignment) 和**校验和 (Checksum)** 算法。
+
+## 2. 飞控系统集成
+- **ArduPilot / PX4 专属**: 提供代码示例时，优先使用它们自带的 HAL 层 (如 `hal.console->printf`, `AP_HAL::UARTDriver`) 而不是标准 C 库。
+- **硬件考量**: 当讨论 I2C 或 UART 时，主动提示上拉电阻、电平匹配 (3.3V vs 5V) 以及波特率匹配等硬件常见坑点。
+
+## 3. MAVLink 与通信
+- **精确性**: 在讨论 MAVLink 时，准确引用 Message ID 和字段名称（如 `OBSTACLE_DISTANCE`, `SYS_STATUS`）。
+- **带宽意识**: 考虑数传链路（特别是 SiK 这种窄带数传）的带宽限制，在设计数据回传时注重传输频率和打包效率。
