@@ -1,0 +1,75 @@
+---
+description: ArduPilot Git Workflow & Contribution Rules
+globs: "**/*"
+---
+
+# ArduPilot Git Workflow Rules
+
+This project follows a strict Git workflow to maintain synchronization with the upstream ArduPilot repository while managing custom EFT flight controller modifications.
+
+## 1. Branch Strategy
+
+- **`master`**: 
+  - **READ-ONLY**. Must always mirror `upstream/master` (Official ArduPilot).
+  - NEVER commit directly to `master`.
+  - Used only for fetching updates from upstream.
+
+- **`dev-eft`** (Current Working Branch):
+  - **MAIN DEVELOPMENT BRANCH**. All custom modifications (EFT hwdef, Lua scripts, etc.) reside here.
+  - Based on `master`.
+  - Push to `origin/dev-eft` (Your GitHub Fork).
+
+- **Feature Branches**:
+  - Create new branches from `dev-eft` for major new features (e.g., `feature/new-radar-driver`).
+  - Merge back into `dev-eft` when complete.
+
+## 2. Synchronization Workflow (How to update)
+
+To update your local code with the latest official ArduPilot changes:
+
+1.  **Update Master**:
+    ```bash
+    git checkout master
+    git pull upstream master
+    git push origin master
+    ```
+
+2.  **Rebase/Merge into Dev**:
+    ```bash
+    git checkout dev-eft
+    git merge master  # Or git rebase master
+    # Resolve conflicts if any
+    git push origin dev-eft
+    ```
+
+## 3. Commit & Push Rules
+
+- **NEVER push to `upstream`** (You don't have permission, but don't even try).
+- **ALWAYS push to `origin`** (Your fork: `xyfyf/ardupilot`).
+- **Before Pushing**:
+  - Ensure you are on `dev-eft` (Check with `git branch`).
+  - Clean up temporary files (`tmp_build/`, `*.tmp`, `assets/`).
+  - Do NOT commit large binary files or personal config files.
+
+## 4. Submodules
+
+- ArduPilot relies heavily on submodules (`modules/mavlink`, `modules/ChibiOS`, etc.).
+- **DO NOT modify submodule content** directly unless you know exactly what you are doing.
+- If `git status` shows submodules as modified (dirty), be careful not to commit them unless intended.
+- To clean/reset submodules: `git submodule update --init --recursive`.
+
+## 5. File Locations for Custom Code
+
+- **Hardware Definitions**: `libraries/AP_HAL_ChibiOS/hwdef/EFT*`
+- **Lua Scripts**: `libraries/AP_Scripting/examples/` (Prefix with `1` if needed for ordering)
+- **Lua MAVLink Definitions**: `libraries/AP_Scripting/eft_mini_lua/`
+
+## 6. Windows/WSL2 Specifics
+
+- **Editing**: Use Windows Cursor on the Windows file system.
+- **Compiling**: Use WSL2.
+- **Do not mix**: Do not run `git` commands in WSL2 on the Windows-mounted repo if possible, to avoid line-ending (CRLF/LF) issues. Stick to Windows Git for version control operations.
+
+---
+**AI Assistant Instruction**: 
+When asked to perform Git operations, ALWAYS verify the current branch is `dev-eft` before committing. If the user asks to push, ensure the target is `origin dev-eft`. Warn the user if they attempt to modify `master`.
