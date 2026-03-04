@@ -117,7 +117,7 @@ local function update()
     end
 
     -- 第三步: 设置距离范围 (只需调用一次, docs 说明: Only need to do it once)
-    if not min_max_set then
+    if not min_max_set and lua_prx_backend then
         lua_prx_backend:set_distance_min_max(PRX_MIN_M, PRX_MAX_M)
         min_max_set = true
     end
@@ -165,7 +165,7 @@ local function update()
                         local dist_m  = dist_cm / 100.0
 
                         -- 仅推送在官方量程 (1m~25m) 内的有效距离数据
-                        if dist_m >= PRX_MIN_M and dist_m <= PRX_MAX_M then
+                        if dist_m >= PRX_MIN_M and dist_m <= PRX_MAX_M and lua_prx_backend then
                             -- update_boundary=true: 每次直接更新避障边界 (适合单波束雷达)
                             lua_prx_backend:handle_script_distance_msg(dist_m, RADAR_YAW_DEG, RADAR_PITCH_DEG, true)
                             last_dist_m = dist_m
@@ -178,6 +178,7 @@ local function update()
     end
 
     -- 每 5s 向 GCS 输出一次当前距离 (便于调试, 无论避障是否开启都输出)
+    ---@diagnostic disable-next-line: cast-local-type
     local now_ms = millis()
     if (now_ms - last_log_ms) >= LOG_INTERVAL_MS then
         last_log_ms = now_ms
