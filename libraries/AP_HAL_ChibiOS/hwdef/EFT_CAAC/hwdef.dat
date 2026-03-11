@@ -59,7 +59,7 @@ PB9 I2C1_SDA I2C1
 I2C_ORDER I2C1
 
 # I2C1: Compass (QMC5883P) and Baro (SPL06)
-COMPASS QMC5883P I2C:0:0x2C false ROTATION_NONE
+COMPASS QMC5883P I2C:0:0x2C false ROTATION_ROLL_180
 BARO SPL06 I2C:0:0x77
 
 # CAN Buses
@@ -126,6 +126,9 @@ PC11 SDMMC1_D3  SDMMC1
 PC12 SDMMC1_CK  SDMMC1
 PD2  SDMMC1_CMD SDMMC1
 
+# Enable FAT filesystem for SD card support
+define HAL_OS_FATFS_IO 1
+
 # PWM Output (根据原理图完全重映射)
 # Main (D1-D8)
 PA8  TIM1_CH1 TIM1 PWM(1)  GPIO(50)
@@ -166,8 +169,8 @@ SPIDEV bmi088_a SPI1 DEVID2 BMI088_ACC_CS MODE3 10*MHZ 10*MHZ
 SPIDEV icm42688 SPI2 DEVID3 ICM42688_CS   MODE3  2*MHZ  8*MHZ
 
 # Sensors
-IMU     BMI088       SPI:bmi088_g SPI:bmi088_a ROTATION_NONE
-IMU     Invensensev3 SPI:icm42688              ROTATION_NONE
+IMU     BMI088       SPI:bmi088_a SPI:bmi088_g ROTATION_NONE
+IMU     Invensensev3 SPI:icm42688              ROTATION_YAW_180
 
 # Enable OpenDroneID (Remote ID) support for drone identification and tracking
 define AP_OPENDRONEID_ENABLED 1
