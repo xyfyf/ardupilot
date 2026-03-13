@@ -1,0 +1,54 @@
+# EFT_CAAC 默认参数
+# 串口映射 (对应板载丝印):
+# SERIAL1 = RSV1
+# SERIAL2 = RSV2
+# SERIAL3 = GPS1 (默认空闲/副GPS)
+# SERIAL4 = LINK
+# SERIAL5 = SBUS/RC
+# SERIAL6 = REMOTEID (UART8)
+# SERIAL7 = RTK (UART7, 用于 UM982 主GPS)
+
+# ========== OpenDroneID (Remote ID) ==========
+DID_ENABLE 1
+DID_OPTIONS 1
+DID_MAVPORT 6
+DID_CANDRIVER 0
+AHRS_EKF_TYPE 3
+
+# ========== GPS ==========
+# 为了兼容只插RTK口(此时算GPS1)，或者插满双GPS(此时RTK算GPS2)的两种情况，把两个TYPE都设为24
+GPS1_TYPE 24
+GPS2_TYPE 24
+
+# 防卡死：禁用 GPS 自动配置和保存
+GPS_AUTO_CONFIG 0
+GPS_SAVE_CFG 0
+
+# ========== 机架类型 (Hexa) ==========
+FRAME_CLASS 2
+FRAME_TYPE 13
+
+# ========== 电机输出配置 (Motor 1 ~ Motor 6) ==========
+SERVO1_FUNCTION 33
+SERVO2_FUNCTION 34
+SERVO3_FUNCTION 35
+SERVO4_FUNCTION 36
+SERVO5_FUNCTION 37
+SERVO6_FUNCTION 38
+SERVO13_FUNCTION 120
+
+# ========== CAN 总线 (启用 CAN1 和 DroneCAN) ==========
+CAN_P1_DRIVER 1
+CAN_D1_PROTOCOL 1
+CAN_SLCAN_CPORT 1
+CAN_SLCAN_TIMOUT 2
+
+# ========== 避障与测距仪 ==========
+PRX1_TYPE 4
+RNGFND1_TYPE 34
+AVOID_ENABLE 7
+AVOID_MARGIN 3
+AVOID_BEHAVE 1
+
+# ========== LED 灯设置 ==========
+NTF_LED_TYPES 257
