@@ -16,9 +16,13 @@ DID_CANDRIVER 0
 AHRS_EKF_TYPE 3
 
 # ========== GPS ==========
-# 为了兼容只插RTK口(此时算GPS1)，或者插满双GPS(此时RTK算GPS2)的两种情况，把两个TYPE都设为24
-GPS1_TYPE 24
+# GPS1 (SERIAL3/USART1/丝印GPS1) = M9N u-blox (带 IST8310 磁力计)
+# GPS2 (SERIAL7/UART7/丝印RTK)   = UM982 RTK (UnicoreNMEA)
+GPS1_TYPE 1
 GPS2_TYPE 24
+
+# 使用 GPS2 (UM982 RTK) 作为主 GPS
+GPS_PRIMARY 1
 
 # 防卡死：禁用 GPS 自动配置和保存
 GPS_AUTO_CONFIG 0

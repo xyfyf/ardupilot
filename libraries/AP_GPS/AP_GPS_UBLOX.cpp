@@ -33,6 +33,10 @@
 #include "RTCM3_Parser.h"
 #include <stdio.h>
 
+#if AP_COMPASS_UBLOX_GPS_ENABLED
+#include <AP_Compass/AP_Compass_UBLOX_GPS.h>
+#endif
+
 #ifndef UBLOX_SPEED_CHANGE
     #define UBLOX_SPEED_CHANGE 0
 #endif
@@ -1101,6 +1105,31 @@ void AP_GPS_UBLOX::unexpected_message(void)
     }
 }
 
+#if AP_COMPASS_UBLOX_GPS_ENABLED
+/*
+  解析厂商自定义 UBX VENDOR-MAG (0xF2/0x01) 消息，
+  将 IST8310 磁力计数据转发给罗盘后端
+ */
+void AP_GPS_UBLOX::_handle_vendor_mag(void)
+{
+    const ubx_vendor_mag &mag = _buffer.vendor_mag;
+
+    // dataValid 位 (bit 0) 为 0 表示数据无效
+    if ((mag.flags & 0x01) == 0) {
+        return;
+    }
+
+    // saturation 位 (bit 3) 为 1 表示传感器饱和
+    if (mag.flags & 0x08) {
+        return;
+    }
+
+    // 协议中磁场值已经是 mGauss 单位，与 ArduPilot 罗盘一致
+    const Vector3f field(float(mag.magX), float(mag.magY), float(mag.magZ));
+    AP_Compass_UBLOX_GPS::handle_mag(state.instance, field);
+}
+#endif // AP_COMPASS_UBLOX_GPS_ENABLED
+
 // return size of a config key, or 0 if unknown
 uint8_t AP_GPS_UBLOX::config_key_size(ConfigKey key) const
 {
@@ -1636,6 +1665,16 @@ AP_GPS_UBLOX::_parse_gps(void)
         return false;
     }
 #endif // UBLOX_TIM_TM2_LOGGING
+
+#if AP_COMPASS_UBLOX_GPS_ENABLED
+    if (_class == CLASS_VENDOR) {
+        if (_msg_id == MSG_VENDOR_MAG &&
+            _payload_length == sizeof(ubx_vendor_mag)) {
+            _handle_vendor_mag();
+        }
+        return false;
+    }
+#endif
 
     if (_class != CLASS_NAV) {
         unexpected_message();

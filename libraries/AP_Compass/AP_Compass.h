@@ -496,6 +496,7 @@ private:
 #endif
 #if AP_COMPASS_LIS2MDL_ENABLED
         DRIVER_LIS2MDL  =23,
+        DRIVER_UBLOX_GPS =24,
 #endif
 
 };

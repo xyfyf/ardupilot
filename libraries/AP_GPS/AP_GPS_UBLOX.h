@@ -28,6 +28,7 @@
 #include "GPS_Backend.h"
 
 #include <AP_HAL/AP_HAL.h>
+#include <AP_Compass/AP_Compass_config.h>
 #if AP_GPS_UBLOX_CFGV2_ENABLED
 #include "AP_GPS_UBLOX_CFGv2.h"
 #endif
@@ -653,6 +654,18 @@ private:
     };
 #endif
 
+    // 厂商自定义扩展消息 VENDOR-MAG (CLASS=0xF2, ID=0x01)
+    // IST8310 三轴磁力计数据，14 字节 payload
+    struct PACKED ubx_vendor_mag {
+        uint32_t iTOW;        // GPS 周内时间 (ms)
+        int16_t  magX;        // X 轴磁场 (mGauss)
+        int16_t  magY;        // Y 轴磁场 (mGauss)
+        int16_t  magZ;        // Z 轴磁场 (mGauss)
+        int16_t  temperature; // 温度 (0.01°C)，IST8310 固定填 0
+        uint8_t  accuracy;    // 精度估计
+        uint8_t  flags;       // 状态标志位
+    };
+
     struct PACKED ubx_ack_ack {
         uint8_t clsID;
         uint8_t msgID;
@@ -744,6 +757,7 @@ private:
         ubx_rxm_raw rxm_raw;
         ubx_rxm_rawx rxm_rawx;
 #endif
+        ubx_vendor_mag vendor_mag;
         ubx_ack_ack ack;
         ubx_ack_nack nack;
         ubx_tim_tm2 tim_tm2;
@@ -776,6 +790,7 @@ private:
         CLASS_MON = 0x0A,
         CLASS_RXM = 0x02,
         CLASS_TIM = 0x0d,
+        CLASS_VENDOR = 0xF2,
         MSG_ACK_NACK = 0x00,
         MSG_ACK_ACK = 0x01,
         MSG_POSLLH = 0x2,
@@ -812,7 +827,8 @@ private:
         MSG_NAV_SVINFO = 0x30,
         MSG_RXM_RAW = 0x10,
         MSG_RXM_RAWX = 0x15,
-        MSG_TIM_TM2 = 0x03
+        MSG_TIM_TM2 = 0x03,
+        MSG_VENDOR_MAG = 0x01,
     };
 
     enum ubx_gnss_identifier {
@@ -1004,6 +1020,9 @@ private:
     void        _check_new_itow(uint32_t itow);
 
     void unexpected_message(void);
+#if AP_COMPASS_UBLOX_GPS_ENABLED
+    void _handle_vendor_mag(void);
+#endif
     void log_mon_hw(void);
     void log_mon_hw2(void);
 #if HAL_LOGGING_ENABLED && AP_GPS_UBLOX_CFGV2_ENABLED

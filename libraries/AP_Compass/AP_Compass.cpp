@@ -47,6 +47,9 @@
 #if AP_COMPASS_EXTERNALAHRS_ENABLED
 #include "AP_Compass_ExternalAHRS.h"
 #endif
+#if AP_COMPASS_UBLOX_GPS_ENABLED
+#include "AP_Compass_UBLOX_GPS.h"
+#endif
 #include "AP_Compass.h"
 #include "Compass_learn.h"
 #include <stdio.h>
@@ -1406,6 +1409,11 @@ void Compass::_detect_backends(void)
         add_backend(DRIVER_EXTERNALAHRS, AP_Compass_ExternalAHRS::probe(serial_port));
         RETURN_IF_NO_SPACE;
     }
+#endif
+
+#if AP_COMPASS_UBLOX_GPS_ENABLED
+    add_backend(DRIVER_UBLOX_GPS, AP_Compass_UBLOX_GPS::probe(AP_COMPASS_UBLOX_GPS_INSTANCE));
+    RETURN_IF_NO_SPACE;
 #endif
     
 #if AP_FEATURE_BOARD_DETECT
