@@ -1,8 +1,8 @@
-# EFT_CAAC 默认参数
+# EFT_CAAC 默认参数 (4.0)
 # 串口映射 (对应板载丝印):
 # SERIAL1 = RSV1
 # SERIAL2 = RSV2
-# SERIAL3 = GPS1
+# SERIAL3 = GPS1 (禁用)
 # SERIAL4 = LINK
 # SERIAL5 = SBUS/RC
 # SERIAL6 = REMOTEID (UART8)
@@ -17,8 +17,8 @@ SERIAL1_BAUD 57
 SERIAL2_PROTOCOL 2
 SERIAL2_BAUD 57
 
-# SERIAL3 (GPS1) - 禁用
-SERIAL3_PROTOCOL 1
+# SERIAL3 (GPS1) - 禁用 (GPS1 改走 CAN 总线)
+SERIAL3_PROTOCOL -1
 SERIAL3_BAUD 115
 
 # SERIAL4 (LINK) - MAVLink2
@@ -29,34 +29,28 @@ SERIAL4_BAUD 57
 SERIAL5_PROTOCOL 23
 SERIAL5_BAUD 57
 
-# SERIAL6 (REMOTEID) - MAVLink2 (用于给RID模块发数据)
+# SERIAL6 (REMOTEID) - MAVLink2
 SERIAL6_PROTOCOL 2
 SERIAL6_BAUD 57
 
-# SERIAL7 (RTK) - GPS
+# SERIAL7 (RTK) - GPS (用于 UM982 双天线)
 SERIAL7_PROTOCOL 5
 SERIAL7_BAUD 230
 
-# ========== 电池配置 ==========
-BATT_ARM_VOLT 43
+# ========== 电池配置 (6S LiPo) ==========
+BATT_ARM_VOLT 20
+BATT_LOW_VOLT 22
+BATT_CRT_VOLT 21
 BATT_CAPACITY 20000
-
-# ========== OpenDroneID (Remote ID) ==========
-DID_ENABLE 0
-DID_OPTIONS 0
-DID_MAVPORT 6
-DID_CANDRIVER 0
 
 # ========== AHRS / EKF ==========
 AHRS_EKF_TYPE 3
 EK3_SRC1_YAW 3
-INS_ACCEL_FILTER 20
-INS_GYRO_FILTER 20
 
-# ========== GPS (双天线定向配置) ==========
-# 禁用 GPS1
-GPS1_TYPE 0
-# 启用 GPS2 作为双天线 RTK (UM982)
+# ========== GPS ==========
+# GPS1 走 DroneCAN 总线
+GPS1_TYPE 9
+# GPS2 (UM982 双天线 RTK，走 SERIAL7)
 GPS2_TYPE 25
 GPS2_MB_TYPE 1
 GPS2_MB_OFS_Y 0.3
@@ -70,8 +64,8 @@ GPS_SAVE_CFG 0
 FRAME_CLASS 2
 FRAME_TYPE 13
 
-# ========== 飞行模式与返航 ==========
-FLTMODE1 2
+# ========== 飞行模式 ==========
+FLTMODE1 0
 FLTMODE2 2
 FLTMODE3 2
 FLTMODE4 16
@@ -88,35 +82,37 @@ SERVO5_FUNCTION 37
 SERVO6_FUNCTION 38
 SERVO13_FUNCTION 120
 
-# ========== 电机与油门调参 ==========
+# ========== 电机与动力模型 (6S) ==========
+MOT_BAT_VOLT_MAX 25.2
+MOT_BAT_VOLT_MIN 19.8
 MOT_SPIN_ARM 0.1
 MOT_SPIN_MIN 0.15
 MOT_SPIN_MAX 0.95
 
-# ========== CAN 总线 (启用 CAN1 和 DroneCAN) ==========
+# ========== CAN 总线 (双 CAN, DroneCAN, 1M) ==========
 CAN_P1_DRIVER 1
+CAN_P1_BITRATE 1000000
+CAN_P2_DRIVER 1
+CAN_P2_BITRATE 1000000
 CAN_D1_PROTOCOL 1
+CAN_D2_PROTOCOL 1
 CAN_SLCAN_CPORT 1
 CAN_SLCAN_TIMOUT 2
 
-# ========== 避障与测距仪 ==========
-PRX1_TYPE 4
-RNGFND1_TYPE 34
-AVOID_ENABLE 7
-AVOID_MARGIN 3
-AVOID_BEHAVE 1
-
-# ========== LED 与蜂鸣器配置 ==========
-NTF_LED_TYPES 257
+# ========== LED 与蜂鸣器 ==========
+NTF_LED_TYPES 487
 NTF_LED_BRIGHT 3
 NTF_LED_LEN 1
 NTF_BUZZ_ON_LVL 1
 NTF_BUZZ_TYPES 5
 
-# ========== ELRS / RC 接收机配置 ==========
+# ========== ELRS / RC 接收机 ==========
 RC_PROTOCOLS 1
 RC_OPTIONS 32
-RSSI_TYPE 0
+
+# ========== 传感器滤波 ==========
+INS_ACCEL_FILTER 20
+INS_GYRO_FILTER 20
 
 # ========== PID 控制参数 ==========
 # --- ATC 姿态角速度 PID (Pitch / Roll / Yaw) ---
