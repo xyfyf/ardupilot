@@ -43,6 +43,12 @@ BATT_LOW_VOLT 22
 BATT_CRT_VOLT 21
 BATT_CAPACITY 20000
 
+# ========== OpenDroneID (Remote ID) ==========
+# DID_ENABLE 0
+# DID_OPTIONS 0
+# DID_MAVPORT 6
+# DID_CANDRIVER 0
+
 # ========== AHRS / EKF ==========
 AHRS_EKF_TYPE 3
 EK3_SRC1_YAW 3
