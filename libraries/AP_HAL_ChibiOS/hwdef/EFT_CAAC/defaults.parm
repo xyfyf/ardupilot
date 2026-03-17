@@ -1,14 +1,14 @@
-# EFT_CAAC 默认参数 (4.0)
-# 串口映射 (对应板载丝印):
+# EFT_CAAC Default Parameters
+# Serial mapping:
 # SERIAL1 = RSV1
 # SERIAL2 = RSV2
-# SERIAL3 = GPS1 (禁用)
+# SERIAL3 = GPS1 (Disabled)
 # SERIAL4 = LINK
 # SERIAL5 = SBUS/RC
 # SERIAL6 = REMOTEID (UART8)
-# SERIAL7 = RTK (UART7, 用于 UM982)
+# SERIAL7 = RTK (UART7, for UM982)
 
-# ========== 串口配置 (功能与波特率) ==========
+# Serial ports
 # SERIAL1 (RSV1) - MAVLink2
 SERIAL1_PROTOCOL 2
 SERIAL1_BAUD 57
@@ -17,7 +17,7 @@ SERIAL1_BAUD 57
 SERIAL2_PROTOCOL 2
 SERIAL2_BAUD 57
 
-# SERIAL3 (GPS1) - 禁用 (GPS1 改走 CAN 总线)
+# SERIAL3 (GPS1) - Disabled (GPS1 on CAN)
 SERIAL3_PROTOCOL -1
 SERIAL3_BAUD 115
 
@@ -25,7 +25,7 @@ SERIAL3_BAUD 115
 SERIAL4_PROTOCOL 2
 SERIAL4_BAUD 57
 
-# SERIAL5 (SBUS/RC) - RCIN (用于接收ELRS)
+# SERIAL5 (SBUS/RC) - RCIN (ELRS)
 SERIAL5_PROTOCOL 23
 SERIAL5_BAUD 57
 
@@ -33,30 +33,30 @@ SERIAL5_BAUD 57
 SERIAL6_PROTOCOL 2
 SERIAL6_BAUD 57
 
-# SERIAL7 (RTK) - GPS (用于 UM982 双天线)
+# SERIAL7 (RTK) - GPS (UM982 dual antenna)
 SERIAL7_PROTOCOL 5
 SERIAL7_BAUD 230
 
-# ========== 电池配置 (6S LiPo) ==========
+# Battery (6S LiPo)
 BATT_ARM_VOLT 20
 BATT_LOW_VOLT 22
 BATT_CRT_VOLT 21
 BATT_CAPACITY 20000
 
-# ========== OpenDroneID (Remote ID) ==========
-# DID_ENABLE 0
+# Remote ID
+# DID_ENABLE 1
 # DID_OPTIONS 0
 # DID_MAVPORT 6
 # DID_CANDRIVER 0
 
-# ========== AHRS / EKF ==========
+# AHRS / EKF
 AHRS_EKF_TYPE 3
 EK3_SRC1_YAW 3
 
-# ========== GPS ==========
-# GPS1 走 DroneCAN 总线
+# GPS
+# GPS1 on DroneCAN
 GPS1_TYPE 9
-# GPS2 (UM982 双天线 RTK，走 SERIAL7)
+# GPS2 UM982 dual antenna RTK on SERIAL7
 GPS2_TYPE 25
 GPS2_MB_TYPE 1
 GPS2_MB_OFS_Y 0.3
@@ -66,11 +66,11 @@ GPS_AUTO_SWITCH 1
 GPS_BLEND_MASK 5
 GPS_SAVE_CFG 0
 
-# ========== 机架类型 (Hexa) ==========
+# Frame (Hexa)
 FRAME_CLASS 2
 FRAME_TYPE 13
 
-# ========== 飞行模式 ==========
+# Flight modes
 FLTMODE1 0
 FLTMODE2 2
 FLTMODE3 2
@@ -79,7 +79,7 @@ FLTMODE5 16
 FLTMODE6 16
 RTL_ALT 3000
 
-# ========== 电机输出配置 (Motor 1 ~ Motor 6) ==========
+# Motor output
 SERVO1_FUNCTION 33
 SERVO2_FUNCTION 34
 SERVO3_FUNCTION 35
@@ -88,14 +88,14 @@ SERVO5_FUNCTION 37
 SERVO6_FUNCTION 38
 SERVO13_FUNCTION 120
 
-# ========== 电机与动力模型 (6S) ==========
+# Motor and power model (6S)
 MOT_BAT_VOLT_MAX 25.2
 MOT_BAT_VOLT_MIN 19.8
 MOT_SPIN_ARM 0.1
 MOT_SPIN_MIN 0.15
 MOT_SPIN_MAX 0.95
 
-# ========== CAN 总线 (双 CAN, DroneCAN, 1M) ==========
+# CAN Bus (Dual CAN, DroneCAN, 1M)
 CAN_P1_DRIVER 1
 CAN_P1_BITRATE 1000000
 CAN_P2_DRIVER 1
@@ -105,23 +105,23 @@ CAN_D2_PROTOCOL 1
 CAN_SLCAN_CPORT 1
 CAN_SLCAN_TIMOUT 2
 
-# ========== LED 与蜂鸣器 ==========
+# LED and Buzzer
 NTF_LED_TYPES 487
 NTF_LED_BRIGHT 3
 NTF_LED_LEN 1
 NTF_BUZZ_ON_LVL 1
 NTF_BUZZ_TYPES 5
 
-# ========== ELRS / RC 接收机 ==========
+# ELRS / RC Receiver
 RC_PROTOCOLS 1
 RC_OPTIONS 32
 
-# ========== 传感器滤波 ==========
+# Sensor filtering
 INS_ACCEL_FILTER 20
 INS_GYRO_FILTER 20
 
-# ========== PID 控制参数 ==========
-# --- ATC 姿态角速度 PID (Pitch / Roll / Yaw) ---
+# PID control
+# ATC rate PID (Pitch / Roll / Yaw)
 ATC_RAT_PIT_P 0.175
 ATC_RAT_PIT_I 0.24177
 ATC_RAT_PIT_D 0.025
@@ -143,7 +143,7 @@ ATC_RAT_YAW_IMAX 0.5
 ATC_RAT_YAW_FLTE 2
 ATC_RAT_YAW_FLTT 13
 
-# --- ATC 姿态控制参数 ---
+# ATC angle control
 ATC_ANG_PIT_P 5
 ATC_ANG_RLL_P 5
 ATC_ANG_YAW_P 4.5
@@ -151,7 +151,7 @@ ATC_ACCEL_P_MAX 60300
 ATC_ACCEL_R_MAX 60300
 ATC_ACCEL_Y_MAX 19800
 
-# --- PSC 位置与高度 PID ---
+# PSC position and height PID
 PSC_POSXY_P 1.5
 PSC_POSZ_P 1.0
 
