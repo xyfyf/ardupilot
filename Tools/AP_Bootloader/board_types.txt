@@ -318,7 +318,6 @@ AP_HW_AEDROXH7                       1198
 AP_HW_NarinX3                        1199
 AP_HW_JFB200                         1200
 AP_HW_SKYSTARSF405V2                 1201
-EFT_CAAC                             1202
 
 AP_HW_ESP32_PERIPH                   1205
 AP_HW_ESP32S3_PERIPH                 1206
@@ -513,6 +512,8 @@ AP_HW_Accton_Godwit_GA1        7120
 
 # please fill gaps in the above ranges rather than adding past ID #7199
 
+# IDs 7120-7129 reserved for EFT
+AP_HW_EFT_CAAC                      8000
 
 # OpenDroneID enabled boards. Use 10000 + the base board ID
 AP_HW_CubeOrange_ODID               10140
