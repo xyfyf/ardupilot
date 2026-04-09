@@ -155,7 +155,6 @@ IMU     Invensensev3 SPI:icm42688              ROTATION_NONE
 
 # Enable IST8310 over u-blox GPS serial
 define AP_COMPASS_UBLOX_GPS_ENABLED 1
-define AP_COMPASS_UBLOX_GPS_INSTANCE 0
 
 # Enable OpenDroneID (Remote ID) support for drone identification and tracking
 define AP_OPENDRONEID_ENABLED 1
