@@ -1,6 +1,5 @@
 # EFT_CAAC Default Parameters
 # Aligned with 1号caac-eft-fmu参数-allok9.0-增加日志-接gps1-烧录定制固件后参数7.param
-# (excludes airframe calibration: COMPASS_*, INS_ACC/GYRO offsets, RC trim, STAT_*)
 
 # Serial mapping:
 # SERIAL1 = RSV1
