@@ -30,6 +30,10 @@
 #include <AP_Notify/AP_Notify.h>
 #include <AP_OSD/AP_OSD.h>
 #include <AP_Frsky_Telem/AP_Frsky_SPort_Passthrough.h>
+#if AP_RANGEFINDER_ENABLED
+#include <AP_RangeFinder/AP_RangeFinder.h>
+#include <AP_RangeFinder/AP_RangeFinder_Backend.h>
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <AP_HAL/AP_HAL.h>
@@ -104,6 +108,7 @@ void AP_CRSF_Telem::setup_wfq_scheduler(void)
     add_scheduler_entry(5, 20);     // command          50Hz (generally not active unless requested by the TX)
     add_scheduler_entry(5, 500);    // version ping      2Hz (only active at startup)
     add_scheduler_entry(5, 100);    // device ping      10Hz (only active during TX loss, also see CRSF_RX_TIMEOUT)
+    add_scheduler_entry(50, 50);    // RADAR_DATA       20Hz max（雷达距离 + 低电量）
     disable_scheduler_entry(DEVICE_PING);
 }
 
@@ -173,6 +178,8 @@ void AP_CRSF_Telem::update_custom_telemetry_rates(AP_RCProtocol_CRSF::RFMode rf_
         set_scheduler_entry(GPS, 550, 500);            // 2.0Hz
         set_scheduler_entry(PASSTHROUGH, 100, 100);    // 8Hz
         set_scheduler_entry(STATUS_TEXT, 200, 750);    // 1.5Hz
+        // 高速链路（ELRS 500Hz 1:2）雷达 20Hz
+        set_scheduler_entry(RADAR_DATA, 50, 50);       // 20Hz
     } else {
         // standard telemetry for low data rates
         set_scheduler_entry(BATTERY, 1000, 2000);       // 0.5Hz
@@ -184,11 +191,14 @@ void AP_CRSF_Telem::update_custom_telemetry_rates(AP_RCProtocol_CRSF::RFMode rf_
             set_scheduler_entry(GPS, 550, 1000);            // 1.0Hz
             set_scheduler_entry(PASSTHROUGH, 350, 500);     // 2.0Hz
             set_scheduler_entry(STATUS_TEXT, 500, 2000);    // 0.5Hz
+            // 低速链路（ELRS 250Hz 1:4）雷达 10Hz
+            set_scheduler_entry(RADAR_DATA, 50, 100);      // 10Hz
         } else {
             // CRSF custom telemetry for low data rates
             set_scheduler_entry(GPS, 550, 1000);              // 1.0Hz
             set_scheduler_entry(PASSTHROUGH, 500, 3000);      // 0.3Hz
             set_scheduler_entry(STATUS_TEXT, 600, 2000);      // 0.5Hz
+            set_scheduler_entry(RADAR_DATA, 50, 100);         // 10Hz
         }
     }
 }
@@ -346,6 +356,7 @@ void AP_CRSF_Telem::disable_tx_entries()
     disable_scheduler_entry(FLIGHT_MODE);
     disable_scheduler_entry(PASSTHROUGH);
     disable_scheduler_entry(STATUS_TEXT);
+    disable_scheduler_entry(RADAR_DATA);
     // GENERAL_COMMAND and PARAMETERS will only be sent under very specific circumstances
 }
 
@@ -362,6 +373,7 @@ void AP_CRSF_Telem::enable_tx_entries()
     enable_scheduler_entry(FLIGHT_MODE);
     enable_scheduler_entry(PASSTHROUGH);
     enable_scheduler_entry(STATUS_TEXT);
+    enable_scheduler_entry(RADAR_DATA);
 
     update_custom_telemetry_rates(_telem_rf_mode);
 }
@@ -488,6 +500,9 @@ void AP_CRSF_Telem::process_packet(uint8_t idx)
             break;
         case STATUS_TEXT:
             calc_status_text();
+            break;
+        case RADAR_DATA:
+            calc_radar_data();
             break;
         case GENERAL_COMMAND:
             if (_bind_request_pending) {
@@ -1912,6 +1927,100 @@ void AP_CRSF_Telem::ScriptedMenu::dump_structure(uint8_t indent)
 #endif
 
 #endif //AP_CRSF_SCRIPTING_ENABLED
+
+/*
+  前向雷达距离 + 低电量标志，打包为 FrSky passthrough 0x5010 单包帧直接注入 CRSF 调度器。
+  数据格式（与 1crsf_radar_battwarn.lua 的 pack_forward_telem 完全相同）：
+    bits[15:0]  = 前向距离，单位 cm（无效时为 0）
+    bits[19:16] = AVOID_MARGIN 参数值（4-bit，0~15m）
+    bits[23:20] = AVOID_DIST_MAX 参数值（4-bit，0~15m）
+    bit[28]     = 低电量标志（1 = 飞控已触发低电量/临界保护）
+*/
+void AP_CRSF_Telem::calc_radar_data()
+{
+    // --- 1. 读取前向测距仪距离（instance 0）---
+    bool dist_valid = false;
+    float dist_m = 0.0f;
+
+#if AP_RANGEFINDER_ENABLED
+    RangeFinder *rf = AP::rangefinder();
+    if (rf != nullptr) {
+        AP_RangeFinder_Backend *backend = rf->get_backend(0);
+        if (backend != nullptr && backend->status() == RangeFinder::Status::Good) {
+            dist_m = backend->distance();
+            dist_valid = true;
+        }
+    }
+#endif
+
+    // --- 2. 低电量检测 ---
+    const AP_BattMonitor &battery = AP::battery();
+    bool low_batt = battery.has_failsafed();
+    if (!low_batt) {
+        // 每 1s 查一次 BATT_LOW_VOLT 参数，避免高频 O(n) 查找
+        static float s_low_volt_threshold = 0.0f;
+        static uint32_t s_volt_check_ms = 0;
+        const uint32_t now_ms = AP_HAL::millis();
+        if (now_ms - s_volt_check_ms >= 1000U) {
+            s_volt_check_ms = now_ms;
+            enum ap_var_type ptype;
+            AP_Param *p = AP_Param::find("BATT_LOW_VOLT", &ptype);
+            if (p != nullptr && ptype == AP_PARAM_FLOAT) {
+                s_low_volt_threshold = ((AP_Float *)p)->get();
+            }
+        }
+        if (s_low_volt_threshold > 0.5f) {
+            float voltage = battery.voltage(0);
+            if (voltage > 0.5f && voltage < s_low_volt_threshold) {
+                low_batt = true;
+            }
+        }
+    }
+
+    // --- 3. 避障参数（每 1s 缓存）---
+    static float s_avoid_dist_max = 0.0f;
+    static float s_avoid_margin = 0.0f;
+    static uint32_t s_avoid_check_ms = 0;
+    const uint32_t now_ms2 = AP_HAL::millis();
+    if (now_ms2 - s_avoid_check_ms >= 1000U) {
+        s_avoid_check_ms = now_ms2;
+        enum ap_var_type ptype;
+        AP_Param *p = AP_Param::find("AVOID_DIST_MAX", &ptype);
+        if (p != nullptr && ptype == AP_PARAM_FLOAT) {
+            s_avoid_dist_max = ((AP_Float *)p)->get();
+        }
+        p = AP_Param::find("AVOID_MARGIN", &ptype);
+        if (p != nullptr && ptype == AP_PARAM_FLOAT) {
+            s_avoid_margin = ((AP_Float *)p)->get();
+        }
+    }
+
+    // --- 4. 打包 dword（与 Lua pack_forward_telem 格式完全一致）---
+    uint32_t dword = 0;
+    if (dist_valid && dist_m >= 0.0f) {
+        uint32_t cm = (uint32_t)(dist_m * 100.0f + 0.5f);
+        if (cm > 0xFFFFU) {
+            cm = 0xFFFFU;
+        }
+        dword = cm & 0xFFFFU;
+    }
+    const uint8_t margin_4  = (uint8_t)constrain_int16((int16_t)s_avoid_margin,   0, 15);
+    const uint8_t distmax_4 = (uint8_t)constrain_int16((int16_t)s_avoid_dist_max, 0, 15);
+    dword |= ((uint32_t)margin_4  << 16);
+    dword |= ((uint32_t)distmax_4 << 20);
+    if (low_batt) {
+        dword |= (1U << 28);
+    }
+
+    // --- 5. 填入 CRSF 单包 passthrough 帧（AppID = 0x5010）---
+    _telem.bcast.custom_telem.single_packet_passthrough.sub_type =
+        AP_RCProtocol_CRSF::CustomTelemSubTypeID::CRSF_AP_CUSTOM_TELEM_SINGLE_PACKET_PASSTHROUGH;
+    _telem.bcast.custom_telem.single_packet_passthrough.appid = 0x5010;
+    _telem.bcast.custom_telem.single_packet_passthrough.data = dword;
+    _telem_size = sizeof(AP_CRSF_Telem::PassthroughSinglePacketFrame);
+    _telem_type = get_custom_telem_frame_id();
+    _telem_pending = true;
+}
 
 // get status text data
 void AP_CRSF_Telem::calc_status_text()

@@ -4883,6 +4883,16 @@ MAV_RESULT GCS_MAVLINK::_handle_command_preflight_calibration(const mavlink_comm
         return AP::ins().simple_accel_cal();
     }
 
+    if (packet.x == 5) {
+        // two-point accel cal, step 1: place vehicle LEVEL
+        return AP::ins().two_point_accel_cal_level();
+    }
+
+    if (packet.x == 6) {
+        // two-point accel cal, step 2: nose DOWN, compute & save offsets
+        return AP::ins().two_point_accel_cal_flip();
+    }
+
     /*
       allow GCS to force an existing calibration of accel and/or
       compass to be written as valid. This is useful when reloading

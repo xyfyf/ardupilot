@@ -1,0 +1,71 @@
+# hw definition file for processing by chibios_hwdef.py
+
+# MCU class and specific type
+MCU STM32H7xx STM32H743xx
+
+# board ID. See Tools/AP_Bootloader/board_types.txt
+APJ_BOARD_ID AP_HW_EFT_CAAC
+
+# Crystal is 16MHz
+OSCILLATOR_HZ 16000000
+STM32_ST_USE_TIMER 5
+
+# Bootloader size configuration
+FLASH_SIZE_KB 2048
+FLASH_RESERVE_START_KB 0
+FLASH_BOOTLOADER_LOAD_KB 128
+
+# Disable APP check in bootloader to prevent boot loops
+# define AP_BOOTLOADER_FLASH_NO_APP_CHECK 1
+
+# Default to all pins low to avoid ESD issues
+DEFAULTGPIO OUTPUT LOW PULLDOWN
+
+# Order of UARTs (and USB)
+# OTG1 (USB), USART2 (Telem1), UART4 (Telem2)
+SERIAL_ORDER OTG1 USART2 UART4
+
+# USB Configuration
+PA11 OTG_FS_DM OTG1
+PA12 OTG_FS_DP OTG1
+
+# Serial Ports
+# Telem1 (USART2)
+PA2 USART2_TX USART2
+PA3 USART2_RX USART2
+
+# Telem2 (UART4)
+PA0 UART4_TX UART4
+PA1 UART4_RX UART4
+
+# RGB LED
+PE6 LED_RED OUTPUT GPIO(90)
+PE5 LED_GREEN OUTPUT GPIO(91)
+PC5 LED_BLUE OUTPUT GPIO(92)
+define AP_NOTIFY_GPIO_LED_RGB_RED_PIN 90
+define AP_NOTIFY_GPIO_LED_RGB_GREEN_PIN 91
+define AP_NOTIFY_GPIO_LED_RGB_BLUE_PIN 92
+define HAL_LED_ON 0
+define AP_NOTIFY_GPIO_LED_RGB_ENABLED 1
+
+# Protect SPI Sensors by pulling CS pins HIGH in bootloader
+PC4  BMI088_ACC_CS CS
+PA4  BMI088_GYR_CS CS
+PE12 ICM42688_CS   CS
+
+# SD Card support for firmware update from SD
+PC8  SDMMC1_D0  SDMMC1
+PC9  SDMMC1_D1  SDMMC1
+PC10 SDMMC1_D2  SDMMC1
+PC11 SDMMC1_D3  SDMMC1
+PC12 SDMMC1_CK  SDMMC1
+PD2  SDMMC1_CMD SDMMC1
+
+# Enable FAT filesystem for SD card support
+define HAL_OS_FATFS_IO 1
+
+# Enable DFU boot
+ENABLE_DFU_BOOT 1
+
+# DMA Priority
+DMA_PRIORITY SDMMC* USART*

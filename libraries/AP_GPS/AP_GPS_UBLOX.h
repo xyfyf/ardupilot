@@ -29,6 +29,9 @@
 
 #include <AP_HAL/AP_HAL.h>
 
+// EFT定制：引入磁力计编译开关，避免触发 undef 错误
+#include <AP_Compass/AP_Compass_config.h>
+
 /*
  *  try to put a UBlox into binary mode. This is in two parts. 
  *
@@ -155,6 +158,9 @@ public:
     };
 
     void broadcast_configuration_failure_reason(void) const override;
+#if AP_COMPASS_UBLOX_GPS_ENABLED
+    void _handle_vendor_mag();
+#endif
 #if HAL_LOGGING_ENABLED
     void Write_AP_Logger_Log_Startup_messages() const override;
 #endif
@@ -349,6 +355,18 @@ private:
         uint8_t reserved[2];
         // variable length data, check buffer length
     };
+
+    // EFT定制：GNSS 模块输出的 QMC5883L 磁力计数据结构
+    struct PACKED ubx_vendor_mag {
+        uint32_t iTOW;
+        int16_t  magX;
+        int16_t  magY;
+        int16_t  magZ;
+        int16_t  temperature;
+        uint8_t  accuracy;
+        uint8_t  flags;
+    };
+    static_assert(sizeof(ubx_vendor_mag) == 14, "ubx_vendor_mag must be 14 bytes");
     struct PACKED ubx_nav_posllh {
         uint32_t itow;                                  // GPS msToW
         int32_t longitude;
@@ -634,6 +652,9 @@ private:
         ubx_ack_ack ack;
         ubx_ack_nack nack;
         ubx_tim_tm2 tim_tm2;
+#if AP_COMPASS_UBLOX_GPS_ENABLED
+        ubx_vendor_mag vendor_mag;
+#endif
     } _buffer;
 
     enum class RELPOSNED {
@@ -686,7 +707,10 @@ private:
         MSG_NAV_SVINFO = 0x30,
         MSG_RXM_RAW = 0x10,
         MSG_RXM_RAWX = 0x15,
-        MSG_TIM_TM2 = 0x03
+        MSG_TIM_TM2 = 0x03,
+        // EFT定制：厂商自定义
+        CLASS_VENDOR = 0xF2,
+        MSG_VENDOR_MAG = 0x01
     };
     enum ubx_gnss_identifier {
         GNSS_GPS     = 0x00,

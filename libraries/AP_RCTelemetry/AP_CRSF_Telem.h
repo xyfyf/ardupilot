@@ -350,6 +350,7 @@ private:
         GENERAL_COMMAND,
         VERSION_PING,
         DEVICE_PING,
+        RADAR_DATA,     // 前向雷达距离 + 低电量标志，直接打包为 FrSky passthrough 0x5010
         NUM_SENSORS
     };
 
@@ -383,6 +384,8 @@ private:
     void get_single_packet_passthrough_telem_data();
     void get_multi_packet_passthrough_telem_data(uint8_t size = PASSTHROUGH_MULTI_PACKET_FRAME_MAX_SIZE);
     void calc_status_text();
+    // 前向雷达距离 + 低电量标志，直接打包为 FrSky passthrough 0x5010，绕过 Frsky 队列
+    void calc_radar_data();
     bool process_rf_mode_changes();
     uint8_t get_custom_telem_frame_id() const;
     AP_RCProtocol_CRSF::RFMode get_rf_mode() const;

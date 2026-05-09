@@ -45,6 +45,11 @@
 #if AP_COMPASS_EXTERNALAHRS_ENABLED
 #include "AP_Compass_ExternalAHRS.h"
 #endif
+
+// EFT定制：通过 GPS 串口 VENDOR-MAG UBX 帧获取 QMC5883L 磁力计数据的后端
+#if AP_COMPASS_UBLOX_GPS_ENABLED
+#include "AP_Compass_UBLOX_GPS.h"
+#endif
 #include "AP_Compass.h"
 #include "Compass_learn.h"
 #include <stdio.h>
@@ -1376,7 +1381,7 @@ void Compass::_detect_backends(void)
         ADD_BACKEND(DRIVER_EXTERNALAHRS, NEW_NOTHROW AP_Compass_ExternalAHRS(serial_port));
     }
 #endif
-    
+
 #if AP_FEATURE_BOARD_DETECT
     if (AP_BoardConfig::get_board_type() == AP_BoardConfig::PX4_BOARD_PIXHAWK2) {
         // default to disabling LIS3MDL on pixhawk2 due to hardware issue
@@ -1414,6 +1419,13 @@ void Compass::_detect_backends(void)
     // finally look for i2c and spi compasses not found yet
     CHECK_UNREG_LIMIT_RETURN;
     probe_i2c_spi_compasses();
+
+    // EFT定制：在所有 I2C/SPI 罗盘扫描完成后注册 SERIAL QMC5883L，
+    // 确保 I2C QMC5883P 保持 instance=0（与旧参数 COMPASS_DEV_ID 一致），
+    // SERIAL QMC5883L 作为 instance=1（Compass 2）追加在末尾。
+#if AP_COMPASS_UBLOX_GPS_ENABLED
+    ADD_BACKEND(DRIVER_UBLOX_GPS, AP_Compass_UBLOX_GPS::probe(AP_COMPASS_UBLOX_GPS_INSTANCE));
+#endif
 
     if (_backend_count == 0 ||
         _compass_count == 0) {

@@ -22,6 +22,11 @@
 
 #if AP_GPS_UBLOX_ENABLED
 
+// EFT定制：通过 GPS 串口接收 QMC5883L 磁力计数据
+#if AP_COMPASS_UBLOX_GPS_ENABLED
+#include <AP_Compass/AP_Compass_UBLOX_GPS.h>
+#endif
+
 #include "AP_GPS.h"
 #include <AP_HAL/Util.h>
 #include <AP_Logger/AP_Logger.h>
@@ -1039,6 +1044,15 @@ int8_t AP_GPS_UBLOX::find_active_config_index(ConfigKey key) const
 bool
 AP_GPS_UBLOX::_parse_gps(void)
 {
+    // EFT定制：拦截 VENDOR-MAG 自定义磁力计数据帧
+#if AP_COMPASS_UBLOX_GPS_ENABLED
+    if (_class == CLASS_VENDOR && _msg_id == MSG_VENDOR_MAG) {
+        if (_payload_length == sizeof(_buffer.vendor_mag)) {
+            _handle_vendor_mag();
+        }
+        return false;
+    }
+#endif
     if (_class == CLASS_ACK) {
         Debug("ACK %u", (unsigned)_msg_id);
 
@@ -2409,5 +2423,39 @@ bool AP_GPS_UBLOX::is_gnss_key(ConfigKey key) const
 {
     return (unsigned(key) & 0xFFFF0000) == 0x10310000;
 }
+
+// EFT定制：解析 VENDOR-MAG 帧（CLASS=0xF2, ID=0x01），提取磁力计数据
+// 并推送至 AP_Compass_UBLOX_GPS 后端，由后端注入 ArduPilot EKF 融合管道
+#if AP_COMPASS_UBLOX_GPS_ENABLED
+void AP_GPS_UBLOX::_handle_vendor_mag()
+{
+    const struct ubx_vendor_mag &mag = _buffer.vendor_mag;
+
+    // flags.bit0 (0x01): dataValid，1=数据有效；供应商固件已置 1
+    if ((mag.flags & 0x01) == 0) {
+        return;
+    }
+
+    // flags.bit3 (0x08): saturation，1=磁场饱和，数据不可信
+    if ((mag.flags & 0x08) != 0) {
+        return;
+    }
+
+    // accuracy 字段复用为传感器型号标识：0x01=QMC5883L，0x02=IST8310
+    // 0x00 或未知型号一律忽略
+    if (mag.accuracy != 0x01 && mag.accuracy != 0x02) {
+        return;
+    }
+
+    // GNSS 模块已将原始值转换为 mGauss 输出，直接构造磁场矢量
+    Vector3f field(
+        (float)mag.magX,
+        (float)mag.magY,
+        (float)mag.magZ
+    );
+
+    AP_Compass_UBLOX_GPS::handle_mag(field);
+}
+#endif
 
 #endif

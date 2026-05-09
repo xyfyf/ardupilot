@@ -172,5 +172,7 @@ define OSD_ENABLED 1
 define HAL_OSD_TYPE_DEFAULT 1
 ROMFS_WILDCARD libraries/AP_OSD/fonts/font*.bin
 
+define AP_OPENDRONEID_ENABLED 1
+
 # setup for BF migration
 define HAL_FRAME_TYPE 12

@@ -303,8 +303,22 @@ public:
 
     // simple accel calibration
     MAV_RESULT simple_accel_cal();
+
+    // two-point accel calibration，分两步由 GCS 驱动：
+    //   step 1 (param5=5): 飞机水平放置，采 Level 数据
+    //   step 2 (param5=6): 飞机机头朝下（nose DOWN），采第二面数据并保存
+    MAV_RESULT two_point_accel_cal_level();
+    MAV_RESULT two_point_accel_cal_flip();
+
 private:
     uint32_t last_accel_cal_ms;
+
+    // 两面校准跨两次 MAVLink 命令的中间状态
+    struct TwoPointCalState {
+        bool     level_collected;              // Level 面是否已采集
+        Vector3f avg_level[INS_MAX_INSTANCES]; // Level 面采集均值
+        Vector3f saved_scaling[INS_MAX_INSTANCES]; // 校准前 Scale 备份
+    } _two_point_cal_state;
 public:
 #endif
 

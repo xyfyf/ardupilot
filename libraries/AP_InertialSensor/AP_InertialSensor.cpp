@@ -2705,7 +2705,279 @@ MAV_RESULT AP_InertialSensor::simple_accel_cal()
 
     return result;
 }
+
+/*
+  两面加速度计校准 —— 内部公共采样工具函数
+  -----------------------------------------
+  阻塞采集约 2~10s 的静止 IMU 均值，收敛后填入 avg_out[]。
+  返回 false 表示静止收敛检查未通过（飞机在抖动）。
+
+  注意：调用前必须已设置 _board_orientation = ROTATION_NONE
+        且已清零 _accel_offset / 置 _accel_scale 为 (1,1,1)。
+*/
+static bool _two_point_collect_average(AP_InertialSensor &ins,
+                                       uint8_t num_accels,
+                                       Vector3f avg_out[])
+{
+    const float convergence_limit = 0.05f; // m/s^2，连续两轮差值阈值
+
+    Vector3f last_avg[INS_MAX_INSTANCES] {};
+    bool     converged[INS_MAX_INSTANCES] {};
+    uint8_t  num_converged = 0;
+
+    // 预热：丢弃滤波器启动瞬态（约 25ms）
+    for (uint8_t c = 0; c < 5; c++) {
+        hal.scheduler->delay(5);
+        ins.update();
+    }
+
+    // 最长等待 10s，每轮 250ms，收敛后提前退出
+    for (int16_t j = 0; j <= 40 && num_converged < num_accels; j++) {
+        Vector3f accel_sum[INS_MAX_INSTANCES] {};
+        uint8_t i = 0;
+        for (i = 0; i < 50; i++) {
+            ins.update();
+            for (uint8_t k = 0; k < num_accels; k++) {
+                accel_sum[k] += ins.get_accel(k);
+            }
+            hal.scheduler->delay(5);
+        }
+        for (uint8_t k = 0; k < num_accels; k++) {
+            Vector3f accel_avg = accel_sum[k] / i;
+            float    diff      = (last_avg[k] - accel_avg).length();
+            if (j > 0 && diff < convergence_limit) {
+                // 滑动平均平滑
+                last_avg[k] = (accel_avg * 0.5f) + (last_avg[k] * 0.5f);
+                if (!converged[k]) {
+                    converged[k] = true;
+                    num_converged++;
+                }
+            } else {
+                last_avg[k] = accel_avg;
+            }
+        }
+    }
+
+    if (num_converged < num_accels) {
+        return false;
+    }
+    for (uint8_t k = 0; k < num_accels; k++) {
+        avg_out[k] = last_avg[k];
+    }
+    return true;
+}
+
+/*
+  两面加速度计校准 —— 步骤 1：Level 面（飞机水平正放）
+  -------------------------------------------------------
+  MAVLink 触发：MAV_CMD_PREFLIGHT_CALIBRATION (241), param5 = 5
+
+  地面站流程：
+    1. GCS 发送 param5=5 → 飞控提示用户水平放置飞机
+    2. 飞控采集稳定均值，缓存到 _two_point_cal_state
+    3. 飞控回复 STATUSTEXT 提示第二步（机头朝下）
+    4. 用户摆好姿态后，GCS 发送 param5=6（第二步）
+
+  物理原理：
+    水平时 X/Y 轴理想重力分量为 0，原始读数中的 X/Y 偏置可直接剥离。
+*/
+MAV_RESULT AP_InertialSensor::two_point_accel_cal_level()
+{
+    const uint32_t now = AP_HAL::millis();
+    if ((now - last_accel_cal_ms) < 5000) {
+        return MAV_RESULT_TEMPORARILY_REJECTED;
+    }
+    if (calibrating()) {
+        return MAV_RESULT_TEMPORARILY_REJECTED;
+    }
+
+    uint8_t num_accels = MIN(get_accel_count(), INS_MAX_INSTANCES);
+
+    // 重置跨步骤状态
+    _two_point_cal_state.level_collected = false;
+
+    _calibrating_accel = true;
+    AP_Notify::flags.initialising = true;
+    EXPECT_DELAY_MS(20000);
+
+    // 去掉板级旋转，读取原始传感器轴值
+    enum Rotation saved_orientation = _board_orientation;
+    _board_orientation = ROTATION_NONE;
+
+    // 暂存当前 Scale（整个两面校准完成前不动 Scale）
+    for (uint8_t k = 0; k < num_accels; k++) {
+        _two_point_cal_state.saved_scaling[k] = _accel_scale(k);
+        _accel_offset(k).set(Vector3f());
+        _accel_scale(k).set(Vector3f(1, 1, 1));
+    }
+
+    // 通知 GCS：参考六面校准的标准提示格式
+    GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "Place vehicle level and press any key.");
+
+    MAV_RESULT result = MAV_RESULT_ACCEPTED;
+
+    if (!_two_point_collect_average(*this, num_accels, _two_point_cal_state.avg_level)) {
+        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Calibration FAILED: not stable, retry");
+        result = MAV_RESULT_FAILED;
+        goto cleanup;
+    }
+
+    // 安全检查：水平放置时，Z 轴应承受大部分重力（|Z| >= 0.5g）
+    for (uint8_t k = 0; k < num_accels; k++) {
+        if (fabsf(_two_point_cal_state.avg_level[k].z) < 0.5f * GRAVITY_MSS) {
+            GCS_SEND_TEXT(MAV_SEVERITY_ERROR,
+                "Calibration FAILED: IMU[%u] not level, |Z|=%.2f < 0.5g",
+                k, (double)fabsf(_two_point_cal_state.avg_level[k].z));
+            result = MAV_RESULT_FAILED;
+            goto cleanup;
+        }
+    }
+
+    _two_point_cal_state.level_collected = true;
+
+    GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "Place vehicle nose DOWN and press any key.");
+
+cleanup:
+    _board_orientation = saved_orientation;
+    _calibrating_accel = false;
+    AP_Notify::flags.initialising = false;
+    last_accel_cal_ms = AP_HAL::millis();
+
+    return result;
+}
+
+/*
+  两面加速度计校准 —— 步骤 2：Nose Down 面（机头朝下）
+  MAVLink 触发：MAV_CMD_PREFLIGHT_CALIBRATION (241), param5 = 6
+
+  Level + Nose Down「零重力轴直读」：
+    offset_x = avg_level.x, offset_y = avg_level.y, offset_z = avg_nosedown.z
+  Scale 保留 Level 步骤前的旧值。
+*/
+MAV_RESULT AP_InertialSensor::two_point_accel_cal_flip()
+{
+    const uint32_t now = AP_HAL::millis();
+    if ((now - last_accel_cal_ms) < 5000) {
+        return MAV_RESULT_TEMPORARILY_REJECTED;
+    }
+    if (calibrating()) {
+        return MAV_RESULT_TEMPORARILY_REJECTED;
+    }
+
+    if (!_two_point_cal_state.level_collected) {
+        GCS_SEND_TEXT(MAV_SEVERITY_ERROR,
+            "Calibration FAILED: run Level step (param5=5) first");
+        return MAV_RESULT_FAILED;
+    }
+
+    uint8_t num_accels = MIN(get_accel_count(), INS_MAX_INSTANCES);
+
+    Vector3f saved_offsets[INS_MAX_INSTANCES];
+    for (uint8_t k = 0; k < num_accels; k++) {
+        saved_offsets[k] = _accel_offset(k);
+    }
+
+    _calibrating_accel = true;
+    AP_Notify::flags.initialising = true;
+    EXPECT_DELAY_MS(20000);
+
+    enum Rotation saved_orientation = _board_orientation;
+    _board_orientation = ROTATION_NONE;
+
+    for (uint8_t k = 0; k < num_accels; k++) {
+        _accel_offset(k).set(Vector3f());
+        _accel_scale(k).set(Vector3f(1, 1, 1));
+    }
+
+    GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "Place vehicle nose DOWN and hold still.");
+
+    MAV_RESULT result = MAV_RESULT_ACCEPTED;
+    Vector3f avg_nosedown[INS_MAX_INSTANCES];
+
+    if (!_two_point_collect_average(*this, num_accels, avg_nosedown)) {
+        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Calibration FAILED: not stable, retry");
+        result = MAV_RESULT_FAILED;
+        goto cleanup;
+    }
+
+    // 机头朝下时 X 轴应承受大部分重力（|X| >= 0.5g）
+    for (uint8_t k = 0; k < num_accels; k++) {
+        if (fabsf(avg_nosedown[k].x) < 0.5f * GRAVITY_MSS) {
+            GCS_SEND_TEXT(MAV_SEVERITY_ERROR,
+                "Calibration FAILED: IMU[%u] |X|=%.2f < 0.5g, not nose DOWN",
+                k, (double)fabsf(avg_nosedown[k].x));
+            result = MAV_RESULT_FAILED;
+            goto cleanup;
+        }
+    }
+
+    for (uint8_t k = 0; k < num_accels; k++) {
+        Vector3f new_offset;
+        new_offset.x = _two_point_cal_state.avg_level[k].x;
+        new_offset.y = _two_point_cal_state.avg_level[k].y;
+        new_offset.z = avg_nosedown[k].z;
+
+        _accel_offset(k).set_and_save(new_offset);
+        _accel_scale(k).set_and_save(_two_point_cal_state.saved_scaling[k]);
+        _accel_id(k).save();
+        _accel_id_ok[k] = true;
+
+#if HAL_INS_TEMPERATURE_CAL_ENABLE
+        caltemp_accel(k).set_and_save(get_temperature(k));
 #endif
+
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO,
+            "Accel[%u] offset: X=%.3f Y=%.3f Z=%.3f (src: LVL/LVL/ND)",
+            k,
+            (double)new_offset.x,
+            (double)new_offset.y,
+            (double)new_offset.z);
+    }
+
+    for (uint8_t k = num_accels; k < INS_MAX_INSTANCES; k++) {
+        _accel_offset(k).set_and_save(Vector3f());
+        _accel_scale(k).set_and_save(Vector3f());
+        _gyro_offset(k).set_and_save(Vector3f());
+        _accel_id(k).set_and_save(0);
+    }
+
+#if AP_AHRS_ENABLED
+    AP::ahrs().set_trim(Vector3f(0, 0, 0));
+#endif
+
+    _two_point_cal_state.level_collected = false;
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Calibration successful");
+
+cleanup:
+    if (result != MAV_RESULT_ACCEPTED) {
+        for (uint8_t k = 0; k < num_accels; k++) {
+            _accel_offset(k).set(saved_offsets[k]);
+            _accel_scale(k).set(_two_point_cal_state.saved_scaling[k]);
+        }
+        _two_point_cal_state.level_collected = false;
+        GCS_SEND_TEXT(MAV_SEVERITY_ERROR, "Calibration FAILED, previous params restored");
+    }
+
+    _board_orientation = saved_orientation;
+    _calibrating_accel = false;
+
+    {
+        uint32_t flush_ms = AP_HAL::millis();
+        while (AP_HAL::millis() - flush_ms < 500) {
+            update();
+        }
+    }
+
+#if AP_AHRS_ENABLED
+    AP::ahrs().reset();
+#endif
+
+    AP_Notify::flags.initialising = false;
+    last_accel_cal_ms = AP_HAL::millis();
+
+    return result;
+}
+#endif // HAL_GCS_ENABLED
 
 /*
   see if gyro calibration should be performed
