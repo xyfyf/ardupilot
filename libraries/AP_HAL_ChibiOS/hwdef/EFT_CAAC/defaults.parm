@@ -127,7 +127,7 @@ GPS_RAW_DATA 0
 GPS_SBAS_MODE 2
 
 # Compass
-COMPASS_LEARN 2
+COMPASS_LEARN 3
 
 # CAN (CAN1: radar, CAN2: motor per hwdef — DroneCAN 1 Mbps)
 CAN_P1_DRIVER 1
