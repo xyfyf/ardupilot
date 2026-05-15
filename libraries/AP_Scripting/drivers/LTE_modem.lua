@@ -279,21 +279,124 @@ LTE_OPTIONS_TCP = (1<<4)
 -- 上报 Topic: uav/up/telemetry/{vendor_id}/{fcu_id}
 -- ============================================================
 
--- 用户配置（建议未来改为参数，此处为编译期常量）
-local UOM_VENDOR_ID   = "your_vendor_id"   -- 向监管机构申请
-local UOM_FCU_ID      = "your_fcu_id"      -- 飞控唯一标识
+-- 用户配置（向监管机构申请后填写）
+local UOM_VENDOR_ID = "your_vendor_id"  -- 厂家ID
+local UOM_FCU_ID    = "your_fcu_id"     -- 飞控唯一标识
+
+-- ---- ODID 数据缓存（从地面站下发的 MAVLink OpenDroneID 消息中读取）----
+-- 地面站通过 OPEN_DRONE_ID_BASIC_ID(12900) / OPEN_DRONE_ID_SYSTEM(12904)
+-- / OPEN_DRONE_ID_OPERATOR_ID(12905) 下发，ArduPilot 转发给 Lua 脚本。
+local odid = {
+    uas_id       = "",    -- 飞行器唯一ID（来自 BASIC_ID.uas_id）
+    operator_id  = "",    -- 操作员ID（来自 OPERATOR_ID.operator_id）
+    op_lat       = 0.0,   -- 操作员纬度（来自 SYSTEM.operator_latitude，degE7→度）
+    op_lng       = 0.0,   -- 操作员经度
+    op_alt       = 0.0,   -- 操作员海拔（来自 SYSTEM.operator_altitude_geo，m）
+}
+
+-- MAVLink ODID 消息 ID
+local MSGID_BASIC_ID    = 12900
+local MSGID_SYSTEM      = 12904
+local MSGID_OPERATOR_ID = 12905
+
+-- 注册接收这三条消息（脚本加载时执行一次）
+mavlink:register_rx_msgid(MSGID_BASIC_ID)
+mavlink:register_rx_msgid(MSGID_SYSTEM)
+mavlink:register_rx_msgid(MSGID_OPERATOR_ID)
+
+--[[
+    从 MAVLink 收件箱轮询 ODID 消息并更新缓存。
+    MAVLink 2 payload 布局（严格按 common.xml 字段顺序，无填充）：
+
+    OPEN_DRONE_ID_BASIC_ID (12900):
+      B  target_system
+      B  target_component
+      c20 id_or_mac
+      B  id_type
+      B  ua_type
+      c20 uas_id       ← 飞行器ID
+
+    OPEN_DRONE_ID_SYSTEM (12904):
+      B   target_system
+      B   target_component
+      c20 id_or_mac
+      B   operator_location_type
+      B   classification_type
+      i   operator_latitude  (degE7, signed 32bit)
+      i   operator_longitude (degE7, signed 32bit)
+      H   area_count
+      H   area_radius
+      f   area_ceiling
+      f   area_floor
+      B   category_eu
+      B   class_eu
+      f   operator_altitude_geo  ← 操作员海拔
+      I   timestamp
+
+    OPEN_DRONE_ID_OPERATOR_ID (12905):
+      B   target_system
+      B   target_component
+      c20 id_or_mac
+      B   operator_id_type
+      c20 operator_id    ← 操作员ID
+--]]
+local function odid_poll()
+    while true do
+        local msg, _ = mavlink:receive_chan()
+        if not msg then break end
+
+        local id  = msg:id()
+        local buf = msg:payload()
+        if not buf then break end
+
+        if id == MSGID_BASIC_ID and #buf >= 44 then
+            -- uas_id 在偏移 24 开始，长度 20
+            -- 格式：BB c20 BB c20
+            local uas_raw = buf:sub(25, 44)     -- 1-indexed: 2+2+20+2 = 24 bytes before
+            -- 去掉尾部 null 填充
+            odid.uas_id = uas_raw:match("^([^%z]*)") or ""
+
+        elseif id == MSGID_SYSTEM and #buf >= 54 then
+            -- 偏移：BB(2) + c20(20) + BB(2) = 24 bytes 前置
+            -- operator_latitude: int32 at byte 25
+            -- operator_longitude: int32 at byte 29
+            -- ...
+            -- operator_altitude_geo: float at byte 47
+            local _, op_lat_raw, op_lng_raw = string.unpack("<BBc20BBi4i4", buf)
+            -- string.unpack 返回值顺序：target_sys, target_comp, id_or_mac(跳过),
+            -- op_loc_type, class_type, op_lat, op_lng, next_pos
+            -- 重新解包更清晰：
+            local ts, tc, _, olt, ct, olat, olng, ac, ar, ace, afl, ceu, cleu, oalt =
+                string.unpack("<BBc20BBi4i4HHffBBf", buf)
+            if ts then
+                odid.op_lat = olat * 1e-7
+                odid.op_lng = olng * 1e-7
+                odid.op_alt = oalt
+            end
+
+        elseif id == MSGID_OPERATOR_ID and #buf >= 43 then
+            -- operator_id 在偏移 24 开始，长度 20
+            -- 格式：BB c20 B c20
+            local _, _, _, _, op_id_raw = string.unpack("<BBc20Bc20", buf)
+            if op_id_raw then
+                odid.operator_id = op_id_raw:match("^([^%z]*)") or ""
+            end
+        end
+    end
+end
 
 local uom = {}
-uom.sock        = nil
-uom.state       = "IDLE"   -- IDLE / CONNECTING / READY
-uom.last_pub_ms = uint32_t(0)
-uom.last_ping_ms = uint32_t(0)
+uom.sock               = nil
+uom.state              = "IDLE"
+uom.last_pub_ms        = uint32_t(0)
+uom.last_ping_ms       = uint32_t(0)
 uom.connect_timeout_ms = uint32_t(0)
-uom.TOPIC       = string.format("uav/up/telemetry/%s/%s", UOM_VENDOR_ID, UOM_FCU_ID)
-uom.PING_MS     = 30000   -- MQTT心跳间隔（ms）
-uom.REPORT_MS   = 1000    -- 上报间隔（ms，最低1秒1次）
+uom.TOPIC              = string.format("uav/up/telemetry/%s/%s", UOM_VENDOR_ID, UOM_FCU_ID)
+uom.PING_MS            = 30000  -- MQTT 心跳间隔（ms）
+uom.REPORT_MS          = 1000   -- 上报间隔（ms）
 
--- 构造MQTT可变长度编码
+-- ---- MQTT 工具函数 ----
+
 local function mqtt_encode_len(n)
     local r = ""
     repeat
@@ -305,37 +408,32 @@ local function mqtt_encode_len(n)
     return r
 end
 
--- 编码MQTT字符串（2字节长度前缀）
 local function mqtt_str(s)
     local l = #s
     return string.char(math.floor(l/256), l%256) .. s
 end
 
--- 构造 MQTT CONNECT 报文（QoS 0，Clean Session）
 local function mqtt_connect_pkt(client_id)
-    local vh = "\0\4MQTT\4\2\0\x3C"   -- 协议名+版本+flags(clean)+keepalive=60s
+    local vh = "\0\4MQTT\4\2\0\x3C"  -- protocol+version+flags(clean)+keepalive=60s
     local pl = mqtt_str(client_id)
     return "\x10" .. mqtt_encode_len(#vh + #pl) .. vh .. pl
 end
 
--- 构造 MQTT PUBLISH 报文（QoS 0，不需要 packet_id）
 local function mqtt_publish_pkt(topic, payload)
     local vh = mqtt_str(topic)
     return "\x30" .. mqtt_encode_len(#vh + #payload) .. vh .. payload
 end
 
--- 构造 MQTT PINGREQ
 local function mqtt_pingreq_pkt()
     return "\xC0\x00"
 end
 
--- 采集飞行数据并构造 UOM JSON
+-- ---- 构造 UOM JSON（飞行遥测 + ODID 信息）----
 local function uom_build_json()
     local lat, lng = 0.0, 0.0
     local alt_rel, alt_gps = 0.0, 0.0
     local speed, yaw, pitch, roll = 0.0, 0.0, 0.0, 0.0
     local accuracy = 9999
-    local status_bit = 0
 
     local loc = ahrs:get_position()
     if loc then
@@ -344,10 +442,10 @@ local function uom_build_json()
     end
 
     local d = ahrs:get_relative_position_D_home()
-    if d then alt_rel = -d end  -- D轴朝下，取反得高度
+    if d then alt_rel = -d end
 
     local gps_loc = gps:location(0)
-    if gps_loc then alt_gps = gps_loc:alt() * 0.01 end  -- cm→m
+    if gps_loc then alt_gps = gps_loc:alt() * 0.01 end
 
     local vel = ahrs:get_velocity_NED()
     if vel then speed = math.sqrt(vel:x()^2 + vel:y()^2) end
@@ -363,18 +461,28 @@ local function uom_build_json()
     local hacc = gps:horizontal_accuracy(0)
     if hacc then accuracy = math.floor(hacc * 100) end
 
-    if arming:is_armed()    then status_bit = status_bit | 0x01 end
-    if gps:status(0) >= 3   then status_bit = status_bit | 0x02 end
-
+    -- sys_status_bit 固定为 0（按需求）
     return string.format(
-        '{"ts":%u,"lng":%.7f,"lat":%.7f,"alt":%.1f,"alt_gps":%.1f,' ..
-        '"speed":%.2f,"yaw":%.1f,"pitch":%.1f,"roll":%.1f,' ..
-        '"accuracy":%d,"sys_status_bit":%d}',
-        millis():toint(), lng, lat, alt_rel, alt_gps,
-        speed, yaw, pitch, roll, accuracy, status_bit)
+        '{"ts":%u,'  ..
+        '"lng":%.7f,"lat":%.7f,'  ..
+        '"alt":%.1f,"alt_gps":%.1f,'  ..
+        '"speed":%.2f,"yaw":%.1f,"pitch":%.1f,"roll":%.1f,'  ..
+        '"accuracy":%d,"sys_status_bit":0,'  ..
+        '"uas_id":"%s",'   ..
+        '"operator_id":"%s",'  ..
+        '"op_lat":%.7f,"op_lng":%.7f,"op_alt":%.1f}',
+        millis():toint(),
+        lng, lat,
+        alt_rel, alt_gps,
+        speed, yaw, pitch, roll,
+        accuracy,
+        odid.uas_id,
+        odid.operator_id,
+        odid.op_lat, odid.op_lng, odid.op_alt)
 end
 
--- 关闭 UOM socket，重置状态
+-- ---- socket 管理 ----
+
 local function uom_close()
     if uom.sock then
         uom.sock:close()
@@ -383,18 +491,20 @@ local function uom_close()
     uom.state = "IDLE"
 end
 
--- UOM 主更新函数，在 step_CONNECTED() 中每次调用
+-- ---- UOM 主更新函数，在 step_CONNECTED() 中每次调用 ----
 local function uom_update()
     if LTE_UOM_ENABLE:get() ~= 1 then return end
-    if LTE_PROTOCOL:get() ~= PPP then return end  -- 仅 PPP 模式下有效
+    if LTE_PROTOCOL:get() ~= PPP then return end
 
-    local now = millis()
+    -- 轮询 ODID 消息缓存（无论 MQTT 状态如何都持续更新）
+    odid_poll()
+
+    local now  = millis()
     local host = string.format("%d.%d.%d.%d",
         LTE_UOM_IP0:get(), LTE_UOM_IP1:get(),
         LTE_UOM_IP2:get(), LTE_UOM_IP3:get())
     local port = math.floor(LTE_UOM_PORT:get())
 
-    -- IDLE：尝试建立 TCP 连接
     if uom.state == "IDLE" then
         if port <= 0 then return end
         uom.sock = socket.tcp()
@@ -406,25 +516,22 @@ local function uom_update()
         return
     end
 
-    -- CONNECTING：发送 CONNECT，等待 CONNACK
     if uom.state == "CONNECTING" then
         if now > uom.connect_timeout_ms then
             gcs:send_text(MAV_SEVERITY.WARNING, "UOM: connect timeout")
             uom_close()
             return
         end
-        -- 发送 MQTT CONNECT
         local pkt = mqtt_connect_pkt(UOM_FCU_ID)
         local n = uom.sock:send(pkt)
         if not n or n <= 0 then return end
-        -- 读 CONNACK（非阻塞，可能当次读不到，等下次）
         local ack = uom.sock:recv(4)
         if ack and #ack >= 4 then
             if ack:byte(1) == 0x20 and ack:byte(4) == 0x00 then
                 gcs:send_text(MAV_SEVERITY.INFO, "UOM: MQTT connected")
                 uom.state = "READY"
                 uom.last_ping_ms = now
-                uom.last_pub_ms = uint32_t(0)
+                uom.last_pub_ms  = uint32_t(0)
             else
                 gcs:send_text(MAV_SEVERITY.ERROR,
                     string.format("UOM: CONNACK rc=%d", ack:byte(4)))
@@ -434,9 +541,7 @@ local function uom_update()
         return
     end
 
-    -- READY：定时发布遥测 + 心跳
     if uom.state == "READY" then
-        -- 检测断连（recv nil 表示出错）
         local dummy = uom.sock:recv(1)
         if dummy == nil then
             gcs:send_text(MAV_SEVERITY.WARNING, "UOM: connection lost")
@@ -444,7 +549,6 @@ local function uom_update()
             return
         end
 
-        -- 定时发布
         if now - uom.last_pub_ms >= uint32_t(uom.REPORT_MS) then
             local json = uom_build_json()
             local pkt  = mqtt_publish_pkt(uom.TOPIC, json)
@@ -458,7 +562,6 @@ local function uom_update()
             end
         end
 
-        -- 心跳
         if now - uom.last_ping_ms >= uint32_t(uom.PING_MS) then
             uom.sock:send(mqtt_pingreq_pkt())
             uom.last_ping_ms = now
