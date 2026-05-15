@@ -217,11 +217,254 @@ local LTE_TX_RATE  = bind_add_param('TX_RATE',  20, 0)
 --]]
 local LTE_BAND      = bind_add_param('BAND', 21, -1)
 
+--[[
+    // @Param: LTE_UOM_ENABLE
+    // @DisplayName: UOM MQTT reporting enable
+    // @Description: Enable UOM telemetry reporting via MQTT over PPP
+    // @Values: 0:Disabled,1:Enabled
+    // @User: Standard
+--]]
+local LTE_UOM_ENABLE = bind_add_param('UOM_ENABLE', 22, 0)
+
+--[[
+    // @Param: LTE_UOM_IP0
+    // @DisplayName: UOM MQTT server IP octet 0
+    // @Range: 0 255
+    // @User: Standard
+--]]
+local LTE_UOM_IP0 = bind_add_param('UOM_IP0', 23, 0)
+
+--[[
+    // @Param: LTE_UOM_IP1
+    // @DisplayName: UOM MQTT server IP octet 1
+    // @Range: 0 255
+    // @User: Standard
+--]]
+local LTE_UOM_IP1 = bind_add_param('UOM_IP1', 24, 0)
+
+--[[
+    // @Param: LTE_UOM_IP2
+    // @DisplayName: UOM MQTT server IP octet 2
+    // @Range: 0 255
+    // @User: Standard
+--]]
+local LTE_UOM_IP2 = bind_add_param('UOM_IP2', 25, 0)
+
+--[[
+    // @Param: LTE_UOM_IP3
+    // @DisplayName: UOM MQTT server IP octet 3
+    // @Range: 0 255
+    // @User: Standard
+--]]
+local LTE_UOM_IP3 = bind_add_param('UOM_IP3', 26, 0)
+
+--[[
+    // @Param: LTE_UOM_PORT
+    // @DisplayName: UOM MQTT server port
+    // @Range: 1 65535
+    // @User: Standard
+--]]
+local LTE_UOM_PORT = bind_add_param('UOM_PORT', 27, 1883)
+
 LTE_OPTIONS_LOGALL  = (1<<0)
 LTE_OPTIONS_SIGNALS = (1<<1)
 LTE_OPTIONS_NOMUX   = (1<<2)
 LTE_OPTIONS_NOSIGQUERY = (1<<3)
 LTE_OPTIONS_TCP = (1<<4)
+
+-- ============================================================
+-- UOM无人机运营管理系统 MQTT 上报模块
+-- 在 PPP 连通（step=CONNECTED）后自动启动
+-- 配置：LTE_UOM_ENABLE=1, LTE_UOM_IP0~3, LTE_UOM_PORT
+-- 上报 Topic: uav/up/telemetry/{vendor_id}/{fcu_id}
+-- ============================================================
+
+-- 用户配置（建议未来改为参数，此处为编译期常量）
+local UOM_VENDOR_ID   = "your_vendor_id"   -- 向监管机构申请
+local UOM_FCU_ID      = "your_fcu_id"      -- 飞控唯一标识
+
+local uom = {}
+uom.sock        = nil
+uom.state       = "IDLE"   -- IDLE / CONNECTING / READY
+uom.last_pub_ms = uint32_t(0)
+uom.last_ping_ms = uint32_t(0)
+uom.connect_timeout_ms = uint32_t(0)
+uom.TOPIC       = string.format("uav/up/telemetry/%s/%s", UOM_VENDOR_ID, UOM_FCU_ID)
+uom.PING_MS     = 30000   -- MQTT心跳间隔（ms）
+uom.REPORT_MS   = 1000    -- 上报间隔（ms，最低1秒1次）
+
+-- 构造MQTT可变长度编码
+local function mqtt_encode_len(n)
+    local r = ""
+    repeat
+        local b = n % 128
+        n = math.floor(n / 128)
+        if n > 0 then b = b | 0x80 end
+        r = r .. string.char(b)
+    until n == 0
+    return r
+end
+
+-- 编码MQTT字符串（2字节长度前缀）
+local function mqtt_str(s)
+    local l = #s
+    return string.char(math.floor(l/256), l%256) .. s
+end
+
+-- 构造 MQTT CONNECT 报文（QoS 0，Clean Session）
+local function mqtt_connect_pkt(client_id)
+    local vh = "\0\4MQTT\4\2\0\x3C"   -- 协议名+版本+flags(clean)+keepalive=60s
+    local pl = mqtt_str(client_id)
+    return "\x10" .. mqtt_encode_len(#vh + #pl) .. vh .. pl
+end
+
+-- 构造 MQTT PUBLISH 报文（QoS 0，不需要 packet_id）
+local function mqtt_publish_pkt(topic, payload)
+    local vh = mqtt_str(topic)
+    return "\x30" .. mqtt_encode_len(#vh + #payload) .. vh .. payload
+end
+
+-- 构造 MQTT PINGREQ
+local function mqtt_pingreq_pkt()
+    return "\xC0\x00"
+end
+
+-- 采集飞行数据并构造 UOM JSON
+local function uom_build_json()
+    local lat, lng = 0.0, 0.0
+    local alt_rel, alt_gps = 0.0, 0.0
+    local speed, yaw, pitch, roll = 0.0, 0.0, 0.0, 0.0
+    local accuracy = 9999
+    local status_bit = 0
+
+    local loc = ahrs:get_position()
+    if loc then
+        lat = loc:lat() * 1e-7
+        lng = loc:lng() * 1e-7
+    end
+
+    local d = ahrs:get_relative_position_D_home()
+    if d then alt_rel = -d end  -- D轴朝下，取反得高度
+
+    local gps_loc = gps:location(0)
+    if gps_loc then alt_gps = gps_loc:alt() * 0.01 end  -- cm→m
+
+    local vel = ahrs:get_velocity_NED()
+    if vel then speed = math.sqrt(vel:x()^2 + vel:y()^2) end
+
+    local r, p, y = ahrs:get_euler_angles()
+    if r then
+        roll  = math.deg(r)
+        pitch = math.deg(p)
+        yaw   = math.deg(y)
+        if yaw < 0 then yaw = yaw + 360 end
+    end
+
+    local hacc = gps:horizontal_accuracy(0)
+    if hacc then accuracy = math.floor(hacc * 100) end
+
+    if arming:is_armed()    then status_bit = status_bit | 0x01 end
+    if gps:status(0) >= 3   then status_bit = status_bit | 0x02 end
+
+    return string.format(
+        '{"ts":%u,"lng":%.7f,"lat":%.7f,"alt":%.1f,"alt_gps":%.1f,' ..
+        '"speed":%.2f,"yaw":%.1f,"pitch":%.1f,"roll":%.1f,' ..
+        '"accuracy":%d,"sys_status_bit":%d}',
+        millis():toint(), lng, lat, alt_rel, alt_gps,
+        speed, yaw, pitch, roll, accuracy, status_bit)
+end
+
+-- 关闭 UOM socket，重置状态
+local function uom_close()
+    if uom.sock then
+        uom.sock:close()
+        uom.sock = nil
+    end
+    uom.state = "IDLE"
+end
+
+-- UOM 主更新函数，在 step_CONNECTED() 中每次调用
+local function uom_update()
+    if LTE_UOM_ENABLE:get() ~= 1 then return end
+    if LTE_PROTOCOL:get() ~= PPP then return end  -- 仅 PPP 模式下有效
+
+    local now = millis()
+    local host = string.format("%d.%d.%d.%d",
+        LTE_UOM_IP0:get(), LTE_UOM_IP1:get(),
+        LTE_UOM_IP2:get(), LTE_UOM_IP3:get())
+    local port = math.floor(LTE_UOM_PORT:get())
+
+    -- IDLE：尝试建立 TCP 连接
+    if uom.state == "IDLE" then
+        if port <= 0 then return end
+        uom.sock = socket.tcp()
+        if not uom.sock then return end
+        uom.sock:set_blocking(false)
+        uom.sock:connect(host, port)
+        uom.state = "CONNECTING"
+        uom.connect_timeout_ms = now + uint32_t(8000)
+        return
+    end
+
+    -- CONNECTING：发送 CONNECT，等待 CONNACK
+    if uom.state == "CONNECTING" then
+        if now > uom.connect_timeout_ms then
+            gcs:send_text(MAV_SEVERITY.WARNING, "UOM: connect timeout")
+            uom_close()
+            return
+        end
+        -- 发送 MQTT CONNECT
+        local pkt = mqtt_connect_pkt(UOM_FCU_ID)
+        local n = uom.sock:send(pkt)
+        if not n or n <= 0 then return end
+        -- 读 CONNACK（非阻塞，可能当次读不到，等下次）
+        local ack = uom.sock:recv(4)
+        if ack and #ack >= 4 then
+            if ack:byte(1) == 0x20 and ack:byte(4) == 0x00 then
+                gcs:send_text(MAV_SEVERITY.INFO, "UOM: MQTT connected")
+                uom.state = "READY"
+                uom.last_ping_ms = now
+                uom.last_pub_ms = uint32_t(0)
+            else
+                gcs:send_text(MAV_SEVERITY.ERROR,
+                    string.format("UOM: CONNACK rc=%d", ack:byte(4)))
+                uom_close()
+            end
+        end
+        return
+    end
+
+    -- READY：定时发布遥测 + 心跳
+    if uom.state == "READY" then
+        -- 检测断连（recv nil 表示出错）
+        local dummy = uom.sock:recv(1)
+        if dummy == nil then
+            gcs:send_text(MAV_SEVERITY.WARNING, "UOM: connection lost")
+            uom_close()
+            return
+        end
+
+        -- 定时发布
+        if now - uom.last_pub_ms >= uint32_t(uom.REPORT_MS) then
+            local json = uom_build_json()
+            local pkt  = mqtt_publish_pkt(uom.TOPIC, json)
+            local n = uom.sock:send(pkt)
+            if n and n > 0 then
+                uom.last_pub_ms = now
+            else
+                gcs:send_text(MAV_SEVERITY.WARNING, "UOM: publish failed")
+                uom_close()
+                return
+            end
+        end
+
+        -- 心跳
+        if now - uom.last_ping_ms >= uint32_t(uom.PING_MS) then
+            uom.sock:send(mqtt_pingreq_pkt())
+            uom.last_ping_ms = now
+        end
+    end
+end
 
 
 --[[
@@ -1304,6 +1547,9 @@ local function step_CONNECTED()
             gcs:send_text(MAV_SEVERITY.INFO, string.format("LTE_modem: set BAND=%d", last_band))
         end
     end
+
+    -- UOM MQTT 上报（PPP 连通后启动）
+    uom_update()
 
     -- newer firmware allows for multiple PPP interfaces and custom routing
     if supports_routing and now_ms - last_route_ms > 1000 then
