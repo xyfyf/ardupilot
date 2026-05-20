@@ -34,6 +34,20 @@
 #include <AP_RangeFinder/AP_RangeFinder.h>
 #include <AP_RangeFinder/AP_RangeFinder_Backend.h>
 #endif
+#if AP_COMPASS_ENABLED
+#include <AP_Compass/AP_Compass.h>
+#endif
+#include <AP_InertialSensor/AP_InertialSensor.h>
+#if AP_FENCE_ENABLED
+#include <AC_Fence/AC_Fence.h>
+#endif
+#if AP_GPS_ENABLED
+#include <AP_GPS/AP_GPS.h>
+#endif
+#if HAL_WITH_ESC_TELEM
+#include <AP_ESC_Telem/AP_ESC_Telem.h>
+#endif
+#include <RC_Channel/RC_Channel.h>
 #include <math.h>
 #include <stdio.h>
 #include <AP_HAL/AP_HAL.h>
@@ -1928,13 +1942,226 @@ void AP_CRSF_Telem::ScriptedMenu::dump_structure(uint8_t indent)
 
 #endif //AP_CRSF_SCRIPTING_ENABLED
 
+// AppID 0x5010 在标准 4 字节 data 后再追加 2 字节告警（仅 calc_radar_data 使用）
+#define AP_CRSF_RADAR_APPID           0x5010U
+#define AP_CRSF_RADAR_EXTRA_BYTES     2U
+
+// 手杆死区：roll/pitch/yaw 在该范围内视为未在手动大幅打杆
+static const int16_t RADAR_RC_STICK_DEADBAND = 100;
+// 风速过大：需持续满足的 20Hz 帧计数（约 0.5s）
+static const uint8_t RADAR_WIND_SWAY_DEBOUNCE = 10U;
+// 动力丢失：转速低于机队均值的比例阈值
+static const float RADAR_MOTOR_RPM_RATIO_THRESH = 0.45f;
+static const float RADAR_MOTOR_MIN_FLEET_RPM = 150.0f;
+static const float RADAR_MOTOR_MIN_SINGLE_RPM = 80.0f;
+static const int16_t RADAR_MOTOR_MIN_THROTTLE = 200;
+
 /*
-  前向雷达距离 + 低电量标志，打包为 FrSky passthrough 0x5010 单包帧直接注入 CRSF 调度器。
-  数据格式（与 1crsf_radar_battwarn.lua 的 pack_forward_telem 完全相同）：
+  手杆是否在死区内（仅检查 roll/pitch/yaw，不含油门）
+ */
+static bool radar_pilot_sticks_neutral(void)
+{
+    if (!rc().has_valid_input()) {
+        return false;
+    }
+    const RC_Channel::AUX_FUNC axes[] {
+        RC_Channel::AUX_FUNC::ROLL,
+        RC_Channel::AUX_FUNC::PITCH,
+        RC_Channel::AUX_FUNC::YAW,
+    };
+    for (const auto func : axes) {
+        RC_Channel *ch = rc().find_channel_for_option(func);
+        if (ch == nullptr) {
+            continue;
+        }
+        if (abs(ch->get_control_in()) > RADAR_RC_STICK_DEADBAND) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/*
+  非手动打杆且风速较大、机体明显晃动时置位（payload[4] bit0）
+ */
+static bool radar_wind_sway_excessive(void)
+{
+    static uint8_t debounce;
+
+    if (!AP_Notify::flags.armed || !AP_Notify::flags.flying || !radar_pilot_sticks_neutral()) {
+        debounce = 0;
+        return false;
+    }
+
+    const uint8_t wind_max = AP::ahrs().get_max_wind();
+    if (wind_max == 0) {
+        debounce = 0;
+        return false;
+    }
+    const float wind_ms = AP::ahrs().wind_estimate().length();
+    if (wind_ms < float(wind_max) * 0.85f) {
+        debounce = 0;
+        return false;
+    }
+
+    if (!AP::ins().get_gyro_health()) {
+        debounce = 0;
+        return false;
+    }
+    const Vector3f &gyro = AP::ins().get_gyro();
+    const float sway_rate_rads = MAX(fabsf(gyro.x), fabsf(gyro.y));
+    if (sway_rate_rads < radians(12.0f)) {
+        debounce = 0;
+        return false;
+    }
+
+    debounce = MIN(debounce + 1, RADAR_WIND_SWAY_DEBOUNCE);
+    return debounce >= RADAR_WIND_SWAY_DEBOUNCE;
+}
+
+/*
+  罗盘未校准或一致性/健康异常（payload[4] bit2）
+ */
+static bool radar_compass_abnormal(void)
+{
+#if AP_COMPASS_ENABLED
+    Compass &compass = AP::compass();
+    if (!compass.available()) {
+        return false;
+    }
+    if (!compass.healthy()) {
+        return true;
+    }
+    if (!compass.configured(0)) {
+        return true;
+    }
+    if (compass.get_count() > 0 && !compass.consistent()) {
+        return true;
+    }
+#endif
+    return false;
+}
+
+/*
+  通过 UAVCAN/ESC 遥测判断各电机是否丢油门（payload[4] bit6-7, payload[5] bit0-3）
+  在较大油门下对比各电机转速，明显偏低或遥测丢失则置位
+ */
+static void radar_pack_motor_loss_flags(uint8_t &payload4, uint8_t &payload5)
+{
+#if HAL_WITH_ESC_TELEM
+    if (!AP_Notify::flags.armed) {
+        return;
+    }
+    if (gcs().get_hud_throttle() < RADAR_MOTOR_MIN_THROTTLE) {
+        return;
+    }
+
+    AP_ESC_Telem &esc = AP::esc_telem();
+    const uint8_t num_motors = MIN(6U, uint8_t(ESC_TELEM_MAX_ESCS));
+
+    float rpms[6];
+    bool have_rpm[6];
+    uint8_t valid_count = 0;
+    float rpm_sum = 0;
+
+    for (uint8_t i = 0; i < num_motors; i++) {
+        have_rpm[i] = esc.get_rpm(i, rpms[i]);
+        if (have_rpm[i] && rpms[i] > RADAR_MOTOR_MIN_SINGLE_RPM) {
+            rpm_sum += rpms[i];
+            valid_count++;
+        }
+    }
+    if (valid_count < 2) {
+        return;
+    }
+    const float rpm_avg = rpm_sum / valid_count;
+    if (rpm_avg < RADAR_MOTOR_MIN_FLEET_RPM) {
+        return;
+    }
+    const float rpm_thresh = rpm_avg * RADAR_MOTOR_RPM_RATIO_THRESH;
+
+    for (uint8_t i = 0; i < num_motors; i++) {
+        bool lost = false;
+
+        if (have_rpm[i]) {
+            if (rpms[i] < rpm_thresh) {
+                lost = true;
+            }
+        } else if (valid_count >= num_motors - 1) {
+            // 其它电机均在转，本路无转速且从未收到遥测
+            if (esc.get_last_telem_data_ms(i) == 0) {
+                lost = true;
+            }
+        }
+
+        if (!lost) {
+            continue;
+        }
+        if (i < 2) {
+            payload4 |= (1U << (6U + i));
+        } else if (i < 6) {
+            payload5 |= (1U << (i - 2U));
+        }
+    }
+#endif
+}
+
+/*
+  打包 payload[4]/payload[5] 告警位
+ */
+static void radar_pack_warning_flags(uint8_t &payload4, uint8_t &payload5)
+{
+    payload4 = 0;
+    payload5 = 0;
+
+    if (radar_wind_sway_excessive()) {
+        payload4 |= (1U << 0);
+    }
+    // bit1 禁飞区：地面站起飞前判定，飞控侧暂不置位
+
+#if AP_COMPASS_ENABLED
+    if (radar_compass_abnormal()) {
+        payload4 |= (1U << 2);
+    }
+#endif
+
+    if (!AP::ins().healthy()) {
+        payload4 |= (1U << 3);
+    }
+
+#if AP_FENCE_ENABLED
+    AC_Fence *fence = AP::fence();
+    if (fence != nullptr && fence->get_breaches() != 0) {
+        payload4 |= (1U << 4);
+    }
+#endif
+
+#if AP_GPS_ENABLED
+    if (AP_Notify::flags.gps_glitching) {
+        payload4 |= (1U << 5);
+    } else {
+        nav_filter_status filt_status;
+        const AP_GPS &gps = AP::gps();
+        if (AP::ahrs().get_filter_status(filt_status) &&
+            filt_status.flags.horiz_pos_abs == 0 &&
+            gps.status() < AP_GPS::GPS_OK_FIX_3D) {
+            payload4 |= (1U << 5);
+        }
+    }
+#endif
+
+    radar_pack_motor_loss_flags(payload4, payload5);
+}
+
+/*
+  前向雷达距离 + 低电量 + 扩展告警，打包为 FrSky passthrough 0x5010 单包帧直接注入 CRSF 调度器。
+  data（uint32 小端）：
     bits[15:0]  = 前向距离，单位 cm（无效时为 0）
     bits[19:16] = AVOID_MARGIN 参数值（4-bit，0~15m）
     bits[23:20] = AVOID_DIST_MAX 参数值（4-bit，0~15m）
     bit[28]     = 低电量标志（1 = 飞控已触发低电量/临界保护）
+  扩展字节（仅本 AppID）：
+    payload[4] / payload[5] 见 radar_pack_warning_flags()
 */
 void AP_CRSF_Telem::calc_radar_data()
 {
@@ -2012,12 +2239,23 @@ void AP_CRSF_Telem::calc_radar_data()
         dword |= (1U << 28);
     }
 
-    // --- 5. 填入 CRSF 单包 passthrough 帧（AppID = 0x5010）---
+    // --- 5. 扩展告警字节 payload[4]/payload[5] ---
+    uint8_t payload4 = 0;
+    uint8_t payload5 = 0;
+    radar_pack_warning_flags(payload4, payload5);
+
+    // --- 6. 填入 CRSF 单包 passthrough 帧（AppID = 0x5010）---
     _telem.bcast.custom_telem.single_packet_passthrough.sub_type =
         AP_RCProtocol_CRSF::CustomTelemSubTypeID::CRSF_AP_CUSTOM_TELEM_SINGLE_PACKET_PASSTHROUGH;
-    _telem.bcast.custom_telem.single_packet_passthrough.appid = 0x5010;
+    _telem.bcast.custom_telem.single_packet_passthrough.appid = AP_CRSF_RADAR_APPID;
     _telem.bcast.custom_telem.single_packet_passthrough.data = dword;
-    _telem_size = sizeof(AP_CRSF_Telem::PassthroughSinglePacketFrame);
+
+    uint8_t *frame_bytes = (uint8_t *)&_telem.bcast.custom_telem.single_packet_passthrough;
+    const uint8_t core_len = sizeof(AP_CRSF_Telem::PassthroughSinglePacketFrame);
+    frame_bytes[core_len + 0] = payload4;
+    frame_bytes[core_len + 1] = payload5;
+
+    _telem_size = core_len + AP_CRSF_RADAR_EXTRA_BYTES;
     _telem_type = get_custom_telem_frame_id();
     _telem_pending = true;
 }
