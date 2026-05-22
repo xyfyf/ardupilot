@@ -11,6 +11,73 @@
 
 extern const AP_HAL::HAL& hal;
 
+#if defined(HAL_EFT_CAAC_BATT_VOLT_CALIB) && HAL_EFT_CAAC_BATT_VOLT_CALIB
+/*
+ * EFT_CAAC 板载分压采样非线性校正表
+ * 输入：经 VOLT_MULT 换算后的软件实测电压 (V)
+ * 输出：与标准表计一致的真实电压 (V)
+ * 校准数据：12~80V 共 15 点（2026 实测）
+ */
+struct EFT_CAAC_BattVoltLUT {
+    float measured_v;
+    float actual_v;
+};
+
+static const EFT_CAAC_BattVoltLUT eft_caac_batt_volt_lut[] = {
+    {11.53f, 12.0f},
+    {14.60f, 15.0f},
+    {19.66f, 20.0f},
+    {24.71f, 25.0f},
+    {29.76f, 30.0f},
+    {34.82f, 35.0f},
+    {39.86f, 40.0f},
+    {44.90f, 45.0f},
+    {49.95f, 50.0f},
+    {54.92f, 55.0f},
+    {59.97f, 60.0f},
+    {65.05f, 65.0f},
+    {70.11f, 70.0f},
+    {75.20f, 75.0f},
+    {80.25f, 80.0f},
+};
+
+static float eft_caac_correct_battery_voltage(float measured_v)
+{
+    const uint8_t lut_size = ARRAY_SIZE(eft_caac_batt_volt_lut);
+
+    if (measured_v <= eft_caac_batt_volt_lut[0].measured_v) {
+        return linear_interpolate(
+            eft_caac_batt_volt_lut[0].actual_v,
+            eft_caac_batt_volt_lut[1].actual_v,
+            measured_v,
+            eft_caac_batt_volt_lut[0].measured_v,
+            eft_caac_batt_volt_lut[1].measured_v);
+    }
+
+    if (measured_v >= eft_caac_batt_volt_lut[lut_size - 1].measured_v) {
+        return linear_interpolate(
+            eft_caac_batt_volt_lut[lut_size - 2].actual_v,
+            eft_caac_batt_volt_lut[lut_size - 1].actual_v,
+            measured_v,
+            eft_caac_batt_volt_lut[lut_size - 2].measured_v,
+            eft_caac_batt_volt_lut[lut_size - 1].measured_v);
+    }
+
+    for (uint8_t i = 0; i < lut_size - 1; i++) {
+        if (measured_v <= eft_caac_batt_volt_lut[i + 1].measured_v) {
+            return linear_interpolate(
+                eft_caac_batt_volt_lut[i].actual_v,
+                eft_caac_batt_volt_lut[i + 1].actual_v,
+                measured_v,
+                eft_caac_batt_volt_lut[i].measured_v,
+                eft_caac_batt_volt_lut[i + 1].measured_v);
+        }
+    }
+
+    return measured_v;
+}
+#endif  // HAL_EFT_CAAC_BATT_VOLT_CALIB
+
 const AP_Param::GroupInfo AP_BattMonitor_Analog::var_info[] = {
 
     // @Param: VOLT_PIN
@@ -114,6 +181,10 @@ AP_BattMonitor_Analog::read()
 
         // get voltage
         _state.voltage = (_volt_pin_analog_source->voltage_average() - _volt_offset) * _volt_multiplier;
+#if defined(HAL_EFT_CAAC_BATT_VOLT_CALIB) && HAL_EFT_CAAC_BATT_VOLT_CALIB
+        // EFT_CAAC：分压非线性校正，将软件实测电压映射为真实电压
+        _state.voltage = eft_caac_correct_battery_voltage(_state.voltage);
+#endif
     } else {
         _state.healthy = 1;
         _state.voltage = 0.0f;
