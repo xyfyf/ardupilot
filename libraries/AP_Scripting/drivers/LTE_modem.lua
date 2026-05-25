@@ -4,6 +4,11 @@
     - SIM7600
     - EC200
     - Air780
+
+    EFT_CAAC 接线约定（无需改 LTE_SERPORT / LTE_SCRPORT）：
+    - 4G 接飞控 SERIAL1（MP 里 Serial Port 1 / UART1），SERIAL1_PROTOCOL = Scripting(28)
+    - SCR_SDEV1_PROTO = PPP(48)，NET_ENABLE = 1
+    - UOM：仅需 LTE_UOM_IP0~3 + PORT（默认已填云平台地址），LTE_UOM_ENABLE 默认开
 --]]
 
 local MAV_SEVERITY = {EMERGENCY=0, ALERT=1, CRITICAL=2, ERROR=3, WARNING=4, NOTICE=5, INFO=6, DEBUG=7}
@@ -14,6 +19,12 @@ local PARAM_TABLE_PREFIX = "LTE_"
 -- local MAVLINK2 = 2
 local PPP = 48
 
+-- 固定 SERIAL1：Scripting 口列表里第 1 个（索引 0），SCR_SDEV1 PPP 也是索引 0
+local LTE_SERPORT_FIXED = 0
+local LTE_SCRPORT_FIXED = 0
+-- 默认 APN（移动/通用 cmnet）；联通卡可改脚本为 3gnet，电信 ctnet
+local LTE_APN_DEFAULT = "cmnet"
+
 -- add a parameter and bind it to a variable
 local function bind_add_param(name, idx, default_value)
     assert(param:add_param(PARAM_TABLE_KEY, idx, name, default_value), string.format('could not add param %s', name))
@@ -21,7 +32,7 @@ local function bind_add_param(name, idx, default_value)
 end
 
 -- Setup Parameters
-assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 30), 'LTE_modem: could not add param table')
+assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 52), 'LTE_modem: could not add param table')
 
 --[[
     // @Param: LTE_ENABLE
@@ -224,7 +235,7 @@ local LTE_BAND      = bind_add_param('BAND', 21, -1)
     // @Values: 0:Disabled,1:Enabled
     // @User: Standard
 --]]
-local LTE_UOM_ENABLE = bind_add_param('UOM_ENABLE', 22, 0)
+LTE_UOM_ENABLE = bind_add_param('UOM_ENABLE', 22, 1)
 
 --[[
     // @Param: LTE_UOM_IP0
@@ -232,7 +243,7 @@ local LTE_UOM_ENABLE = bind_add_param('UOM_ENABLE', 22, 0)
     // @Range: 0 255
     // @User: Standard
 --]]
-local LTE_UOM_IP0 = bind_add_param('UOM_IP0', 23, 0)
+LTE_UOM_IP0 = bind_add_param('UOM_IP0', 23, 47)
 
 --[[
     // @Param: LTE_UOM_IP1
@@ -240,7 +251,7 @@ local LTE_UOM_IP0 = bind_add_param('UOM_IP0', 23, 0)
     // @Range: 0 255
     // @User: Standard
 --]]
-local LTE_UOM_IP1 = bind_add_param('UOM_IP1', 24, 0)
+LTE_UOM_IP1 = bind_add_param('UOM_IP1', 24, 120)
 
 --[[
     // @Param: LTE_UOM_IP2
@@ -248,7 +259,7 @@ local LTE_UOM_IP1 = bind_add_param('UOM_IP1', 24, 0)
     // @Range: 0 255
     // @User: Standard
 --]]
-local LTE_UOM_IP2 = bind_add_param('UOM_IP2', 25, 0)
+LTE_UOM_IP2 = bind_add_param('UOM_IP2', 25, 16)
 
 --[[
     // @Param: LTE_UOM_IP3
@@ -256,7 +267,7 @@ local LTE_UOM_IP2 = bind_add_param('UOM_IP2', 25, 0)
     // @Range: 0 255
     // @User: Standard
 --]]
-local LTE_UOM_IP3 = bind_add_param('UOM_IP3', 26, 0)
+LTE_UOM_IP3 = bind_add_param('UOM_IP3', 26, 113)
 
 --[[
     // @Param: LTE_UOM_PORT
@@ -264,7 +275,48 @@ local LTE_UOM_IP3 = bind_add_param('UOM_IP3', 26, 0)
     // @Range: 1 65535
     // @User: Standard
 --]]
-local LTE_UOM_PORT = bind_add_param('UOM_PORT', 27, 1883)
+LTE_UOM_PORT = bind_add_param('UOM_PORT', 27, 1883)
+
+--[[
+    // @Param: LTE_USER_ID
+    // @DisplayName: UOM MQTT user ID
+    // @Description: User ID for UOM MQTT JSON (RID self-declaration, 0=unset)
+    // @Range: 0 4294967295
+    // @User: Standard
+--]]
+local LTE_USER_ID = bind_add_param('USER_ID', 28, 0)
+
+-- 飞行器/操作员 ID 各 20 字符，拆成 10 个参数（每参数 2 字节 ASCII，float 存储）
+local LTE_UAS_W = {}
+local LTE_OP_W = {}
+for i = 1, 10 do
+    LTE_UAS_W[i] = bind_add_param(string.format('UAS_W%02u', i), 28 + i, 0)
+    LTE_OP_W[i]  = bind_add_param(string.format('OP_W%02u', i), 38 + i, 0)
+end
+
+--[[
+    // @Param: LTE_OP_LAT
+    // @DisplayName: Operator latitude
+    // @Description: Persisted operator latitude (deg) from GCS OpenDroneID
+    // @User: Standard
+--]]
+local LTE_OP_LAT = bind_add_param('OP_LAT', 49, 0)
+
+--[[
+    // @Param: LTE_OP_LNG
+    // @DisplayName: Operator longitude
+    // @Description: Persisted operator longitude (deg) from GCS OpenDroneID
+    // @User: Standard
+--]]
+local LTE_OP_LNG = bind_add_param('OP_LNG', 50, 0)
+
+--[[
+    // @Param: LTE_OP_ALT
+    // @DisplayName: Operator altitude
+    // @Description: Persisted operator geodetic altitude (m) from GCS OpenDroneID
+    // @User: Standard
+--]]
+local LTE_OP_ALT = bind_add_param('OP_ALT', 51, 0)
 
 LTE_OPTIONS_LOGALL  = (1<<0)
 LTE_OPTIONS_SIGNALS = (1<<1)
@@ -276,122 +328,297 @@ LTE_OPTIONS_TCP = (1<<4)
 -- UOM无人机运营管理系统 MQTT 上报模块
 -- 在 PPP 连通（step=CONNECTED）后自动启动
 -- 配置：LTE_UOM_ENABLE=1, LTE_UOM_IP0~3, LTE_UOM_PORT
--- 上报 Topic: uav/up/telemetry/{vendor_id}/{fcu_id}
+-- ODID：地面站经任意 MAVLink 口（如 SERIAL6）下发 OpenDroneID 消息后写入 LTE_* 参数持久化
+-- 上报 Topic: uav/up/telemetry/eft/{uas_id}
 -- ============================================================
 
--- 用户配置（向监管机构申请后填写）
-local UOM_VENDOR_ID = "your_vendor_id"  -- 厂家ID
-local UOM_FCU_ID    = "your_fcu_id"     -- 飞控唯一标识
+-- UOM/ODID 模块独立作用域，避免主 chunk local 超过 100 上限
+uom_update = (function()
 
--- ---- ODID 数据缓存（从地面站下发的 MAVLink OpenDroneID 消息中读取）----
--- 地面站通过 OPEN_DRONE_ID_BASIC_ID(12900) / OPEN_DRONE_ID_SYSTEM(12904)
--- / OPEN_DRONE_ID_OPERATOR_ID(12905) 下发，ArduPilot 转发给 Lua 脚本。
+-- MQTT Broker 认证（云平台提供，修改后需重新拷贝脚本到 SD 卡）
+local UOM_MQTT_USER = "yifeite"
+local UOM_MQTT_PASS = "eftMqtt!qwer"
+
+-- ---- ODID 运行时缓存 ----
 local odid = {
-    uas_id       = "",    -- 飞行器唯一ID（来自 BASIC_ID.uas_id）
-    operator_id  = "",    -- 操作员ID（来自 OPERATOR_ID.operator_id）
-    op_lat       = 0.0,   -- 操作员纬度（来自 SYSTEM.operator_latitude，degE7→度）
-    op_lng       = 0.0,   -- 操作员经度
-    op_alt       = 0.0,   -- 操作员海拔（来自 SYSTEM.operator_altitude_geo，m）
+    uas_id       = "",
+    operator_id  = "",
+    self_desc    = "",   -- 自我声明内容（OPEN_DRONE_ID_SELF_ID.description）
+    op_lat       = 0.0,
+    op_lng       = 0.0,
+    op_alt       = 0.0,
 }
 
--- MAVLink ODID 消息 ID
-local MSGID_BASIC_ID    = 12900
-local MSGID_SYSTEM      = 12904
-local MSGID_OPERATOR_ID = 12905
+-- MAVLink OpenDroneID 消息 ID（ArduPilot 所有串口收到的消息均会转发给 Lua）
+local MSGID_BASIC_ID       = 12900
+local MSGID_SELF_ID        = 12903   -- OPEN_DRONE_ID_SELF_ID（自我声明）
+local MSGID_SYSTEM         = 12904
+local MSGID_OPERATOR_ID    = 12905
+local MSGID_SYSTEM_UPDATE  = 12919
 
--- 注册接收这三条消息（脚本加载时执行一次）
-mavlink:register_rx_msgid(MSGID_BASIC_ID)
-mavlink:register_rx_msgid(MSGID_SYSTEM)
-mavlink:register_rx_msgid(MSGID_OPERATOR_ID)
+-- 将 2 个 ASCII 字符打包为 float 参数（避免 float32 精度问题，不用 4 字节打包）
+local function odid_pack2chars(s, pos)
+    local b1, b2 = s:byte(pos, pos + 1)
+    if not b1 then return 0 end
+    if not b2 then b2 = 0 end
+    return b1 + b2 * 256
+end
 
---[[
-    从 MAVLink 收件箱轮询 ODID 消息并更新缓存。
-    MAVLink 2 payload 布局（严格按 common.xml 字段顺序，无填充）：
+local function odid_unpack2chars(v)
+    v = math.floor(v + 0.5)
+    if v <= 0 then return "" end
+    local b1 = v % 256
+    local b2 = math.floor(v / 256) % 256
+    if b2 == 0 then return string.char(b1) end
+    return string.char(b1, b2)
+end
 
-    OPEN_DRONE_ID_BASIC_ID (12900):
-      B  target_system
-      B  target_component
-      c20 id_or_mac
-      B  id_type
-      B  ua_type
-      c20 uas_id       ← 飞行器ID
+-- 从 LTE_UAS_W / LTE_OP_W 参数组还原字符串（最多 20 字符）
+local function odid_words_to_str(words)
+    local s = ""
+    for i = 1, #words do
+        s = s .. odid_unpack2chars(words[i]:get())
+    end
+    return (s:match("^([^%z]*)") or ""):match("^%s*(.-)%s*$") or ""
+end
 
-    OPEN_DRONE_ID_SYSTEM (12904):
-      B   target_system
-      B   target_component
-      c20 id_or_mac
-      B   operator_location_type
-      B   classification_type
-      i   operator_latitude  (degE7, signed 32bit)
-      i   operator_longitude (degE7, signed 32bit)
-      H   area_count
-      H   area_radius
-      f   area_ceiling
-      f   area_floor
-      B   category_eu
-      B   class_eu
-      f   operator_altitude_geo  ← 操作员海拔
-      I   timestamp
+-- 字符串写入参数组并掉电保存（仅内容变化时写入，减少闪存磨损）
+local function odid_str_to_words(s, words)
+    s = s or ""
+    for i = 1, #words do
+        local v = odid_pack2chars(s, (i - 1) * 2 + 1)
+        if math.floor(words[i]:get() + 0.5) ~= v then
+            words[i]:set_and_save(v)
+        end
+    end
+end
 
-    OPEN_DRONE_ID_OPERATOR_ID (12905):
-      B   target_system
-      B   target_component
-      c20 id_or_mac
-      B   operator_id_type
-      c20 operator_id    ← 操作员ID
---]]
+-- 操作员位置是否有效
+-- MAVLink 规范：lat/lng 同时为 0 表示未知
+-- 用 OR 条件：lat 或 lng 任一接近 0 均视为无效，防止 MP 未设地面 GPS 时
+-- 只有 lng 非零（如 53.89°）而 lat=0 的错误坐标被接受
+local function odid_op_loc_valid(lat, lng, alt)
+    if not lat or not lng then return false end
+    if math.abs(lat) < 0.001 or math.abs(lng) < 0.001 then return false end
+    if alt and alt <= -999 then return false end
+    return true
+end
+
+-- 从参数加载 ODID 缓存（脚本启动时调用）
+local function odid_load_from_params()
+    odid.uas_id = odid_words_to_str(LTE_UAS_W)
+    odid.operator_id = odid_words_to_str(LTE_OP_W)
+    odid.op_lat = LTE_OP_LAT:get()
+    odid.op_lng = LTE_OP_LNG:get()
+    odid.op_alt = LTE_OP_ALT:get()
+end
+
+local function odid_save_uas_id(s)
+    if not s or s == "" then return end
+    if odid.uas_id ~= s then
+        gcs:send_text(MAV_SEVERITY.INFO, "ODID: uas_id=" .. s)
+    end
+    odid.uas_id = s
+    odid_str_to_words(s, LTE_UAS_W)
+end
+
+local function odid_save_operator_id(s)
+    if not s or s == "" then return end
+    if odid.operator_id ~= s then
+        gcs:send_text(MAV_SEVERITY.INFO, "ODID: operator_id=" .. s)
+    end
+    odid.operator_id = s
+    odid_str_to_words(s, LTE_OP_W)
+end
+
+local function odid_save_op_location(lat, lng, alt)
+    if not odid_op_loc_valid(lat, lng, alt) then return end
+    if odid.op_lat ~= lat or odid.op_lng ~= lng then
+        gcs:send_text(MAV_SEVERITY.INFO,
+            string.format("ODID: olat=%.5f olng=%.5f oalt=%.1f", lat, lng, alt))
+    end
+    odid.op_lat = lat
+    odid.op_lng = lng
+    odid.op_alt = alt
+    if math.abs(LTE_OP_LAT:get() - lat) > 1e-7 then
+        LTE_OP_LAT:set_and_save(lat)
+    end
+    if math.abs(LTE_OP_LNG:get() - lng) > 1e-7 then
+        LTE_OP_LNG:set_and_save(lng)
+    end
+    if math.abs(LTE_OP_ALT:get() - alt) > 0.01 then
+        LTE_OP_ALT:set_and_save(alt)
+    end
+end
+
+-- 上报用有效值：运行时缓存优先，否则读持久化参数
+local function odid_get_uas_id()
+    if odid.uas_id ~= "" then return odid.uas_id end
+    return odid_words_to_str(LTE_UAS_W)
+end
+
+local function odid_get_operator_id()
+    if odid.operator_id ~= "" then return odid.operator_id end
+    return odid_words_to_str(LTE_OP_W)
+end
+
+-- home 位置辅助：三个 getter 共用，避免重复调用 ahrs:get_home()
+-- 返回 (lat_deg, lng_deg, alt_m) 或 (nil, nil, nil)
+local function odid_home_loc()
+    local home = ahrs:get_home()
+    if not home then return nil, nil, nil end
+    local hlat = home:lat() * 1e-7
+    local hlng = home:lng() * 1e-7
+    local halt = home:alt() * 0.01  -- cm → m
+    if odid_op_loc_valid(hlat, hlng, halt) then
+        return hlat, hlng, halt
+    end
+    return nil, nil, nil
+end
+
+local function odid_get_op_lat()
+    if odid_op_loc_valid(odid.op_lat, odid.op_lng, odid.op_alt) then
+        return odid.op_lat
+    end
+    local lat = LTE_OP_LAT:get()
+    local lng = LTE_OP_LNG:get()
+    local alt = LTE_OP_ALT:get()
+    if odid_op_loc_valid(lat, lng, alt) then return lat end
+    -- 最终回退：使用 home（解锁前 GPS 定位，即起飞位置）
+    local hlat = odid_home_loc()
+    if hlat then return hlat end
+    return 0.0
+end
+
+local function odid_get_op_lng()
+    if odid_op_loc_valid(odid.op_lat, odid.op_lng, odid.op_alt) then
+        return odid.op_lng
+    end
+    local lat = LTE_OP_LAT:get()
+    local lng = LTE_OP_LNG:get()
+    local alt = LTE_OP_ALT:get()
+    if odid_op_loc_valid(lat, lng, alt) then return lng end
+    local _, hlng = odid_home_loc()
+    if hlng then return hlng end
+    return 0.0
+end
+
+local function odid_get_op_alt()
+    if odid_op_loc_valid(odid.op_lat, odid.op_lng, odid.op_alt) then
+        return odid.op_alt
+    end
+    local lat = LTE_OP_LAT:get()
+    local lng = LTE_OP_LNG:get()
+    local alt = LTE_OP_ALT:get()
+    if odid_op_loc_valid(lat, lng, alt) then return alt end
+    local _, _, halt = odid_home_loc()
+    if halt then return halt end
+    return 0.0
+end
+
+-- 解析 ArduPilot 传入的 mavlink_message_t 二进制结构（非串口线格式）
+-- 布局见 modules/MAVLink/mavlink_msgs.lua decode_header()
+local function mavlink_c_payload(msg_str)
+    if not msg_str or #msg_str < 13 then return nil, nil end
+    local magic = msg_str:byte(3)
+    if magic ~= 0xFD and magic ~= 0xFE then return nil, nil end
+    local payload_len = msg_str:byte(4)
+    local id = msg_str:byte(10) | (msg_str:byte(11) << 8) | (msg_str:byte(12) << 16)
+    if payload_len <= 0 or #msg_str < 12 + payload_len then return nil, nil end
+    return id, msg_str:sub(13, 12 + payload_len)
+end
+
+-- 注册 ODID 消息接收（所有 MAVLink 通道，含 SERIAL6 地面站）
+local function odid_mavlink_setup()
+    mavlink:init(10, 5)  -- 5 种消息类型
+    local ok, err = pcall(function()
+        mavlink:register_rx_msgid(MSGID_BASIC_ID)
+        mavlink:register_rx_msgid(MSGID_SELF_ID)
+        mavlink:register_rx_msgid(MSGID_SYSTEM)
+        mavlink:register_rx_msgid(MSGID_OPERATOR_ID)
+        mavlink:register_rx_msgid(MSGID_SYSTEM_UPDATE)
+    end)
+    if ok then
+        gcs:send_text(MAV_SEVERITY.INFO, "ODID: mavlink OK (5 IDs registered)")
+    else
+        gcs:send_text(MAV_SEVERITY.WARNING, string.format("ODID: reg FAIL: %s", tostring(err)))
+    end
+end
+odid_mavlink_setup()
+odid_load_from_params()
+
+-- 轮询 MAVLink 收件箱，更新 ODID 缓存并持久化到 LTE_* 参数
+-- 注意：MAVLink v2 会自动裁剪末尾零字节（Trailing Zero Trimming），
+--       char[20] 类字段（uas_id / operator_id）若未填满则包比标称长度短，
+--       必须用补零再解包，或直接用 sub 读字符串字段，不能用硬性长度下限。
 local function odid_poll()
     while true do
-        local msg, _ = mavlink:receive_chan()
-        if not msg then break end
+        local msg_str, _chan = mavlink:receive_chan()
+        if not msg_str then break end
+        local id, buf = mavlink_c_payload(msg_str)
+        if not id or not buf then break end
 
-        local id  = msg:id()
-        local buf = msg:payload()
-        if not buf then break end
-
-        if id == MSGID_BASIC_ID and #buf >= 44 then
-            -- uas_id 在偏移 24 开始，长度 20
-            -- 格式：BB c20 BB c20
-            local uas_raw = buf:sub(25, 44)     -- 1-indexed: 2+2+20+2 = 24 bytes before
-            -- 去掉尾部 null 填充
-            odid.uas_id = uas_raw:match("^([^%z]*)") or ""
-
-        elseif id == MSGID_SYSTEM and #buf >= 54 then
-            -- 偏移：BB(2) + c20(20) + BB(2) = 24 bytes 前置
-            -- operator_latitude: int32 at byte 25
-            -- operator_longitude: int32 at byte 29
-            -- ...
-            -- operator_altitude_geo: float at byte 47
-            local _, op_lat_raw, op_lng_raw = string.unpack("<BBc20BBi4i4", buf)
-            -- string.unpack 返回值顺序：target_sys, target_comp, id_or_mac(跳过),
-            -- op_loc_type, class_type, op_lat, op_lng, next_pos
-            -- 重新解包更清晰：
-            local ts, tc, _, olt, ct, olat, olng, ac, ar, ace, afl, ceu, cleu, oalt =
-                string.unpack("<BBc20BBi4i4HHffBBf", buf)
-            if ts then
-                odid.op_lat = olat * 1e-7
-                odid.op_lng = olng * 1e-7
-                odid.op_alt = oalt
+        if id == MSGID_BASIC_ID then
+            -- uas_id = bytes 25~44；末尾零已被 MAVLink v2 裁剪，直接取子串
+            -- 字段顺序: target_sys(1) target_comp(1) id_or_mac(20) id_type(1) ua_type(1) uas_id(20)
+            if #buf >= 24 then
+                local uas_raw = buf:sub(25):match("^([^%z]*)") or ""
+                if uas_raw ~= "" then odid_save_uas_id(uas_raw) end
             end
 
-        elseif id == MSGID_OPERATOR_ID and #buf >= 43 then
-            -- operator_id 在偏移 24 开始，长度 20
-            -- 格式：BB c20 B c20
-            local _, _, _, _, op_id_raw = string.unpack("<BBc20Bc20", buf)
-            if op_id_raw then
-                odid.operator_id = op_id_raw:match("^([^%z]*)") or ""
+        elseif id == MSGID_SELF_ID then
+            -- 自我声明：description = bytes 24~46；末尾零已被 MAVLink v2 裁剪
+            -- 字段顺序: target_sys(1) target_comp(1) id_or_mac(20) desc_type(1) description(23)
+            if #buf >= 23 then
+                local desc = buf:sub(24):match("^([^%z]*)") or ""
+                if desc ~= "" and odid.self_desc ~= desc then
+                    gcs:send_text(MAV_SEVERITY.INFO, "ODID: self_desc=" .. desc)
+                    odid.self_desc = desc
+                end
+            end
+
+        elseif id == MSGID_OPERATOR_ID then
+            -- operator_id = bytes 24~43；末尾零已被 MAVLink v2 裁剪，直接取子串
+            -- 字段顺序: target_sys(1) target_comp(1) id_or_mac(20) op_id_type(1) operator_id(20)
+            if #buf >= 23 then
+                local op_raw = buf:sub(24):match("^([^%z]*)") or ""
+                if op_raw ~= "" then odid_save_operator_id(op_raw) end
+            end
+
+        elseif id == MSGID_SYSTEM then
+            -- MAVLink 线格式按字段大小降序排列（4字节在前，1字节在后）：
+            -- op_lat(i4) op_lng(i4) area_ceiling(f) area_floor(f) op_alt(f)
+            -- timestamp(I4) area_count(H) area_radius(H)
+            -- target_sys(B) target_comp(B) id_or_mac(c20) ...
+            -- op_lat 在 bytes 1-4，op_lng 在 bytes 5-8，op_alt 在 bytes 17-20
+            if #buf >= 8 then
+                local full = buf .. string.rep("\0", math.max(0, 20 - #buf))
+                local olat, olng, _, _, oalt = string.unpack("<i4i4fff", full)
+                odid_save_op_location(olat * 1e-7, olng * 1e-7, oalt)
+            end
+
+        elseif id == MSGID_SYSTEM_UPDATE then
+            -- MAVLink 线格式：op_lat(i4) op_lng(i4) op_alt(f) timestamp(I4) target_sys(B) target_comp(B)
+            -- op_lat 在 bytes 1-4，op_lng 在 bytes 5-8，op_alt 在 bytes 9-12
+            if #buf >= 8 then
+                local full = buf .. string.rep("\0", math.max(0, 12 - #buf))
+                local olat, olng, oalt = string.unpack("<i4i4f", full)
+                odid_save_op_location(olat * 1e-7, olng * 1e-7, oalt)
             end
         end
     end
 end
 
-local uom = {}
+uom = {}
 uom.sock               = nil
 uom.state              = "IDLE"
 uom.last_pub_ms        = uint32_t(0)
 uom.last_ping_ms       = uint32_t(0)
 uom.connect_timeout_ms = uint32_t(0)
-uom.TOPIC              = string.format("uav/up/telemetry/%s/%s", UOM_VENDOR_ID, UOM_FCU_ID)
+uom.TOPIC              = "uav/up/telemetry/eft/%s"  -- 格式化模板，%s 为 SN
+uom.publish_count      = 0      -- 记录发送次数
+uom.connect_sent       = false  -- MQTT CONNECT 是否已发送
+uom.retry_after_ms     = uint32_t(0)  -- 连接失败后冷却，避免刷屏
 uom.PING_MS            = 30000  -- MQTT 心跳间隔（ms）
 uom.REPORT_MS          = 1000   -- 上报间隔（ms）
 
@@ -413,9 +640,19 @@ local function mqtt_str(s)
     return string.char(math.floor(l/256), l%256) .. s
 end
 
-local function mqtt_connect_pkt(client_id)
-    local vh = "\0\4MQTT\4\2\0\x3C"  -- protocol+version+flags(clean)+keepalive=60s
+-- MQTT CONNECT：支持可选用户名/密码（CONNACK rc=4 表示账号密码错误）
+local function mqtt_connect_pkt(client_id, username, password)
+    local flags = 0x02  -- Clean Session
     local pl = mqtt_str(client_id)
+    if username and username ~= "" then
+        flags = flags | 0x80  -- Username
+        pl = pl .. mqtt_str(username)
+        if password and password ~= "" then
+            flags = flags | 0x40  -- Password
+            pl = pl .. mqtt_str(password)
+        end
+    end
+    local vh = "\0\4MQTT\4" .. string.char(flags) .. "\0\x3C"  -- MQTT 3.1.1, keepalive 60s
     return "\x10" .. mqtt_encode_len(#vh + #pl) .. vh .. pl
 end
 
@@ -450,24 +687,29 @@ local function uom_build_json()
     local vel = ahrs:get_velocity_NED()
     if vel then speed = math.sqrt(vel:x()^2 + vel:y()^2) end
 
-    local r, p, y = ahrs:get_euler_angles()
-    if r then
-        roll  = math.deg(r)
-        pitch = math.deg(p)
-        yaw   = math.deg(y)
-        if yaw < 0 then yaw = yaw + 360 end
-    end
+    -- ArduPilot Lua：get_roll/pitch/yaw_rad（无 get_euler_angles）
+    roll  = math.deg(ahrs:get_roll_rad())
+    pitch = math.deg(ahrs:get_pitch_rad())
+    yaw   = math.deg(ahrs:get_yaw_rad())
+    if yaw < 0 then yaw = yaw + 360 end
 
     local hacc = gps:horizontal_accuracy(0)
     if hacc then accuracy = math.floor(hacc * 100) end
 
     -- sys_status_bit 固定为 0（按需求）
+    local uas_id = odid_get_uas_id()
+    local operator_id = odid_get_operator_id()
+    -- user_id：优先使用 Mission Planner 下发的自我声明内容（SELF_ID.description），
+    --          否则回退到 LTE_USER_ID 参数（整数转字符串）
+    local user_id = odid.self_desc ~= "" and odid.self_desc
+                    or tostring(math.floor(LTE_USER_ID:get()))
     return string.format(
         '{"ts":%u,'  ..
         '"lng":%.7f,"lat":%.7f,'  ..
         '"alt":%.1f,"alt_gps":%.1f,'  ..
         '"speed":%.2f,"yaw":%.1f,"pitch":%.1f,"roll":%.1f,'  ..
         '"accuracy":%d,"sys_status_bit":0,'  ..
+        '"user_id":"%s",' ..
         '"uas_id":"%s",'   ..
         '"operator_id":"%s",'  ..
         '"op_lat":%.7f,"op_lng":%.7f,"op_alt":%.1f}',
@@ -476,9 +718,10 @@ local function uom_build_json()
         alt_rel, alt_gps,
         speed, yaw, pitch, roll,
         accuracy,
-        odid.uas_id,
-        odid.operator_id,
-        odid.op_lat, odid.op_lng, odid.op_alt)
+        user_id,
+        uas_id,
+        operator_id,
+        odid_get_op_lat(), odid_get_op_lng(), odid_get_op_alt())
 end
 
 -- ---- socket 管理 ----
@@ -489,10 +732,12 @@ local function uom_close()
         uom.sock = nil
     end
     uom.state = "IDLE"
+    uom.connect_sent = false
+    uom.last_send_ok_ms = nil
 end
 
 -- ---- UOM 主更新函数，在 step_CONNECTED() 中每次调用 ----
-local function uom_update()
+return function()
     if LTE_UOM_ENABLE:get() ~= 1 then return end
     if LTE_PROTOCOL:get() ~= PPP then return end
 
@@ -507,11 +752,13 @@ local function uom_update()
 
     if uom.state == "IDLE" then
         if port <= 0 then return end
-        uom.sock = socket.tcp()
+        if now < uom.retry_after_ms then return end
+        uom.sock = Socket(0) -- 0 for TCP
         if not uom.sock then return end
         uom.sock:set_blocking(false)
         uom.sock:connect(host, port)
         uom.state = "CONNECTING"
+        uom.connect_sent = false
         uom.connect_timeout_ms = now + uint32_t(8000)
         return
     end
@@ -522,19 +769,36 @@ local function uom_update()
             uom_close()
             return
         end
-        local pkt = mqtt_connect_pkt(UOM_FCU_ID)
-        local n = uom.sock:send(pkt)
-        if not n or n <= 0 then return end
+        if not uom.connect_sent then
+            local client_id = odid_get_uas_id()
+            if client_id == "" then client_id = "default_sn" end
+            local pkt = mqtt_connect_pkt(client_id, UOM_MQTT_USER, UOM_MQTT_PASS)
+            local n = uom.sock:send(pkt, #pkt)
+            if not n or n <= 0 then return end
+            uom.connect_sent = true
+            return
+        end
+        if not uom.sock:pollin(0) then return end
         local ack = uom.sock:recv(4)
         if ack and #ack >= 4 then
             if ack:byte(1) == 0x20 and ack:byte(4) == 0x00 then
                 gcs:send_text(MAV_SEVERITY.INFO, "UOM: MQTT connected")
                 uom.state = "READY"
-                uom.last_ping_ms = now
-                uom.last_pub_ms  = uint32_t(0)
+                uom.last_ping_ms  = now
+                uom.last_pub_ms   = uint32_t(0)
+                uom.last_send_ok_ms = now  -- 看门狗基准时间
             else
+                local rc = ack:byte(4)
+                local rc_msg = "unknown"
+                if rc == 1 then rc_msg = "bad protocol"
+                elseif rc == 2 then rc_msg = "client id rejected"
+                elseif rc == 3 then rc_msg = "server unavailable"
+                elseif rc == 4 then rc_msg = "bad user/pass"
+                elseif rc == 5 then rc_msg = "not authorized"
+                end
                 gcs:send_text(MAV_SEVERITY.ERROR,
-                    string.format("UOM: CONNACK rc=%d", ack:byte(4)))
+                    string.format("UOM: CONNACK rc=%d (%s)", rc, rc_msg))
+                uom.retry_after_ms = now + uint32_t(10000)
                 uom_close()
             end
         end
@@ -542,33 +806,65 @@ local function uom_update()
     end
 
     if uom.state == "READY" then
-        local dummy = uom.sock:recv(1)
-        if dummy == nil then
-            gcs:send_text(MAV_SEVERITY.WARNING, "UOM: connection lost")
-            uom_close()
-            return
-        end
-
-        if now - uom.last_pub_ms >= uint32_t(uom.REPORT_MS) then
-            local json = uom_build_json()
-            local pkt  = mqtt_publish_pkt(uom.TOPIC, json)
-            local n = uom.sock:send(pkt)
-            if n and n > 0 then
-                uom.last_pub_ms = now
-            else
-                gcs:send_text(MAV_SEVERITY.WARNING, "UOM: publish failed")
+        -- 有数据时才 recv；recv 返回 "" (空串) 说明远端关闭连接，nil 表示无数据（正常）
+        if uom.sock:pollin(0) then
+            local incoming = uom.sock:recv(64)
+            if incoming ~= nil and #incoming == 0 then
+                gcs:send_text(MAV_SEVERITY.WARNING, "UOM: connection closed by server")
+                uom.retry_after_ms = now + uint32_t(5000)
                 uom_close()
                 return
             end
         end
 
+        if now - uom.last_pub_ms >= uint32_t(uom.REPORT_MS) then
+            json = uom_build_json()
+            local sn = odid_get_uas_id()
+            if sn == "" then sn = "default_sn" end
+            topic = string.format(uom.TOPIC, sn)
+
+            pkt = mqtt_publish_pkt(topic, json)
+            n = uom.sock:send(pkt, #pkt)
+            if n and n > 0 then
+                uom.last_pub_ms = now
+                uom.last_send_ok_ms = now
+                uom.publish_count = uom.publish_count + 1
+                -- 首包及每 10 包打印一次，避免刷屏
+                if uom.publish_count == 1 or (uom.publish_count % 10 == 0) then
+                    local _uas = odid_get_uas_id()
+                    local _op  = odid_get_operator_id()
+                    local _olat = odid_get_op_lat()
+                    local _olng = odid_get_op_lng()
+                    if _uas  == "" then _uas  = "(empty)" end
+                    if _op   == "" then _op   = "(empty)" end
+                    gcs:send_text(MAV_SEVERITY.INFO,
+                        string.format("UOM#%d uas=%s op=%s",
+                            uom.publish_count, _uas, _op))
+                    gcs:send_text(MAV_SEVERITY.INFO,
+                        string.format("UOM#%d olat=%.5f olng=%.5f",
+                            uom.publish_count, _olat, _olng))
+                end
+            end
+        end
+
+        -- 看门狗：60 秒未成功发出任何包则断线重连
+        if uom.last_send_ok_ms ~= nil and
+           (now - uom.last_send_ok_ms) > uint32_t(60000) then
+            gcs:send_text(MAV_SEVERITY.WARNING, "UOM: send watchdog, reconnecting")
+            uom.retry_after_ms = now + uint32_t(5000)
+            uom_close()
+            return
+        end
+
         if now - uom.last_ping_ms >= uint32_t(uom.PING_MS) then
-            uom.sock:send(mqtt_pingreq_pkt())
+            local pkt = mqtt_pingreq_pkt()
+            uom.sock:send(pkt, #pkt)
             uom.last_ping_ms = now
         end
     end
 end
 
+end)()
 
 --[[
     AT command mappings for different modem chipsets
@@ -660,13 +956,14 @@ if LTE_ENABLE:get() == 0 then
     return
 end
 
-local uart = serial:find_serial(LTE_SERPORT:get())
+local uart = serial:find_serial(LTE_SERPORT_FIXED)
 if not uart then
-    gcs:send_text(MAV_SEVERITY.ERROR, 'LTE_modem: could not find serial port')
+    gcs:send_text(MAV_SEVERITY.ERROR,
+        'LTE_modem: SERIAL1 未设为 Scripting(28)，请设 SERIAL1_PROTOCOL=28 后重启')
     return
 end
 
-local ser_device = serial:find_simulated_device(LTE_PROTOCOL:get(), LTE_SCRPORT:get())
+local ser_device = serial:find_simulated_device(PPP, LTE_SCRPORT_FIXED)
 if not ser_device then
     gcs:send_text(MAV_SEVERITY.ERROR, 'LTE_modem: could not find SCR_SDEV device')
     return
@@ -734,22 +1031,22 @@ local function uart_write(s)
 end
 
 -- Constants for GSM 07.10 CMUX framing
-local FLAG = 0xF9
-local UIH = 0xEF
-local SABM = 0x2F
+FLAG = 0xF9
+UIH = 0xEF
+SABM = 0x2F
 --local UA = 0x63
-local EA = 0x01
-local CR_SEND = 0x02
+EA = 0x01
+CR_SEND = 0x02
 
-local DLC_AT = 1
-local DLC_DATA = 2
+DLC_AT = 1
+DLC_DATA = 2
 
 -- CMUX buffer state
 local cmux = {}
 cmux.buffers = {[DLC_AT] = "", [DLC_DATA] = ""} -- DLC1=AT, DLC2=DATA(PPP or TCP)
 
-local last_mccmnc = nil
-local last_band = nil
+last_mccmnc = nil
+last_band = nil
 
 --[[
     FCS lookup table for polynomial x^8 + x^2 + x^1 + 1 (0x07)
@@ -1030,7 +1327,7 @@ end
     - in muxed mode
     - in muxed mode at higher baudrate
 --]]
-local function step_ATI()
+function step_ATI()
     local s = uart_read()
     if s and modem == default_modem then
         check_modem_banner(s)
@@ -1051,6 +1348,11 @@ local function step_ATI()
         AT_send('ATI\r')
         return
     end
+    -- 有数据但识别不了模组：每 15s 提示一次（便于区分「完全无回包」）
+    if s and #s > 0 and ati_sequence % 15 == 0 then
+        gcs:send_text(MAV_SEVERITY.WARNING,
+            string.format("LTE_modem: ATI got %u bytes, no Air780 banner", #s))
+    end
     if ati_sequence % 3 == 2 then
         uart_write('+++')
     elseif ati_sequence % 3 == 1 then
@@ -1066,6 +1368,14 @@ local function step_ATI()
         uart:begin(LTE_IBAUD:get())
         log_data(string.format("{BAUD=%d}", LTE_IBAUD:get()), '***')
     end
+    -- 长时间无应答：软复位模组（退出 PPP 数据模式）
+    if ati_sequence > 0 and ati_sequence % 20 == 0 then
+        uart_write('AT+CFUN=1,1\r\n')
+        gcs:send_text(MAV_SEVERITY.WARNING, "LTE_modem: ATI timeout, reset modem")
+    elseif ati_sequence == 30 then
+        gcs:send_text(MAV_SEVERITY.ERROR,
+            "LTE_modem: no AT reply on SERIAL1, check 4G wire/power/AT fw")
+    end
     ati_sequence = ati_sequence + 1
 end
 
@@ -1074,7 +1384,7 @@ local change_baud = nil
 --[[
     change baud rate
 --]]
-local function step_BAUD()
+function step_BAUD()
     if modem.setbaud and LTE_BAUD:get() ~= LTE_IBAUD:get() then
         change_baud = LTE_BAUD:get()
         AT_send(string.format(modem.setbaud, change_baud))
@@ -1085,7 +1395,7 @@ end
 --[[
     set preferred network using MCC country code and MNC network code
 --]]
-local function set_MCCMNC()
+function set_MCCMNC()
     if not modem.mccmnc then
         return
     end
@@ -1101,7 +1411,7 @@ end
 --[[
     set preferred LTE band
 --]]
-local function set_BAND()
+function set_BAND()
     if not modem.setband and not modem.setband_mask then
         return
     end
@@ -1121,16 +1431,23 @@ end
 --[[
     configuration step
 --]]
-local function step_CONFIG()
+function step_CONFIG()
     set_BAND()
     set_MCCMNC()
+    -- Air780：配置 APN 并打开注册状态上报（与 1LTE/2LTE 一致，否则易卡 CREG）
+    AT_send(string.format('AT+CGDCONT=1,"IP","%s"\r\n', LTE_APN_DEFAULT))
+    AT_send("AT+CREG=2\r\n")
+    AT_send("AT+CGATT=1\r\n")
+    if modem.config_extra then
+        AT_send(modem.config_extra)
+    end
     step = "CREG"
 end
 
 --[[
     check for a SIM
 --]]
-local function step_CPIN()
+function step_CPIN()
     local s = uart_read()
     if s and s:find("READY") then
         step = "CONFIG"
@@ -1141,7 +1458,7 @@ end
 --[[
     confirm we are registered on the network
 --]]
-local function step_CREG()
+function step_CREG()
     local s = uart_read()
     if handle_error(s) then
         return
@@ -1152,7 +1469,7 @@ local function step_CREG()
             step = "CMUX"
             return
         end
-        local reg = s:match('CREG: %d,(%d+)\r\n')
+        local reg = s:match('CREG: %d,(%d+)')
         if reg == "1" or reg == "5" then
             gcs:send_text(MAV_SEVERITY.INFO, 'LTE_modem: CREG OK')
             if LTE_PROTOCOL:get() == PPP then
@@ -1216,7 +1533,7 @@ end
 --[[
     activate network
 --]]
-local function step_CGACT()
+function step_CGACT()
     local s = uart_read()
     if handle_error(s) then
         return
@@ -1240,7 +1557,7 @@ end
 --[[
     set the modem to transparent mode
 --]]
-local function step_CIPMODE()
+function step_CIPMODE()
     local s = uart_read()
     if s:find('AT+CACID=0,0') then
         gcs:send_text(MAV_SEVERITY.INFO, 'LTE_modem: network context set')
@@ -1261,7 +1578,7 @@ end
 --[[
     setup CMUX multiplexing mode
 --]]
-local function step_CMUX()
+function step_CMUX()
     local s = uart_read()
     if s then
         if s:find("CME ERROR") then
@@ -1281,7 +1598,7 @@ end
     open the network stack
     needed to be able to open a TCP or UDP connection
 --]]
-local function step_NETOPEN()
+function step_NETOPEN()
     if not modem.netopen then
         step = "CIPOPEN"
         return
@@ -1305,7 +1622,7 @@ end
 --[[
     open PPP mode
 --]]
-local function step_PPPOPEN()
+function step_PPPOPEN()
     local s = uart_read()
     if s and modem.cgact and s:find("\r\nNO CARRIER\r\n") then
         send_data_reset()
@@ -1334,7 +1651,7 @@ end
     open a TCP or UDP connection to the server
     the server IP and port are defined in the parameters
 --]]
-local function step_CIPOPEN()
+function step_CIPOPEN()
     local s = uart_read()
     if handle_error(s) then
         return
@@ -1374,7 +1691,7 @@ end
 --[[
     check for CSQ reply
 --]]
-local function check_CSQ(s)
+function check_CSQ(s)
     local rssi_raw, ber_raw = s:match("%+CSQ:%s*(%d+),(%d+)")
     if rssi_raw then
         gcs:send_named_float('LTE_RSSI', rssi_raw)
@@ -1392,7 +1709,7 @@ end
 --[[
     check for CGACT reply
 --]]
-local function check_CGACT(s)
+function check_CGACT(s)
     local ctx, active = s:match("%+CGACT:%s*(%d+),(%d+)")
     if ctx then
         ctx = tonumber(ctx) or 0
@@ -1406,7 +1723,7 @@ end
 --[[
     check for CPSI reply
 --]]
-local function check_CPSI(s)
+function check_CPSI(s)
     -- example1: +CPSI: LTE,Online,505-02,0xCBE8,36519691,101,EUTRAN-BAND3,1800,5,5,-147,-1143,-764,11
     -- example2: +CPSI: LTE CAT-M1,Online,505-01,0x2036,134523149,238,EUTRAN-BAND28,9410,5,5,-20,-116,-82,6
 
@@ -1454,7 +1771,7 @@ end
 --[[
     check for QENG reply
 --]]
-local function check_QENG(s)
+function check_QENG(s)
     -- Example1: +QENG: "servingcell","NOCONN","LTE","FDD",505,02,12AED4A,445,3750,8,3,3,CBE8,-99,-14,-71,53,30
     -- Example2: +QENG: "servingcell","NOCONN","LTE","FDD",505,02,22D3F32,271,9260,28,3,3,CBE8,-109,-15,-78,38,20
     -- +QENG:"servingcell",<state>,"LTE",<is_tdd>,<mcc>,<mnc>,<cellid>,<pcid>,<earfcn>,<freq_band_ind>,<ul_bandwidth>,<dl_bandwidth>,<tac>,<rsrp>,<rsrq>,<rssi>,<sinr>,<srxlev>
@@ -1499,7 +1816,7 @@ end
 --[[
     handle AT replies in CMUX mode
 --]]
-local function handle_AT_reply(s)
+function handle_AT_reply(s)
     check_CSQ(s)
     if check_CPSI(s) then
         return
@@ -1525,7 +1842,7 @@ local last_send_data_ms = uint32_t(0)
 --[[
     handle data while connected
 --]]
-local function step_CONNECTED()
+function step_CONNECTED()
     local s = uart:readstring(512)
     stats.bytes_in = stats.bytes_in + #s
     if option_enabled(LTE_OPTIONS_LOGALL) then
@@ -1667,10 +1984,10 @@ local function step_CONNECTED()
     end
 end
 
-local step_count = 0
-local last_step = nil
+step_count = 0
+last_step = nil
 
-local function run_step()
+function run_step()
     if change_baud then
         uart:begin(change_baud)
         change_baud = nil
