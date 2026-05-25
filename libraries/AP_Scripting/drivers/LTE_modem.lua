@@ -1,4 +1,47 @@
 --[[
+    ========================================================================
+    UOM 云平台 · 五个 ID 说明（对接文档 2.3 变量说明，请以此为准）
+    ========================================================================
+
+    | 变量名        | 说明                         | 示例        | 脚本/协议中的位置 |
+    |---------------|------------------------------|-------------|-------------------|
+    | vendor_id     | 厂商 ID，区分不同厂家接入      | eft         | MQTT 主题路径固定段，见下 |
+    | fcu_id        | 飞控设备在平台上的唯一标识符   | DRONE-001   | 激活 JSON；主题后缀 {fcu_id} |
+    | uas_id        | 航空器实名登记号（机体 ID）    | 同 fcu_id   | 遥测 JSON；来源 OpenDroneID BASIC_ID |
+    | operator_id   | 运营人/操控员登记号（CAA 类）  | （登记号）  | 遥测 JSON；来源 OpenDroneID OPERATOR_ID |
+    | user_id       | 用户/自我声明展示字段          | （声明文本）| 遥测 JSON；SELF_ID 或 LTE_USER_ID |
+
+    【vendor_id】
+    - 云平台用来区分厂商的字符串，本方案固定为 "eft"。
+    - 不出现在遥测/激活 JSON 里，而是写在 MQTT 主题路径中，例如：
+        uav/up/telemetry/eft/{fcu_id}
+        uav/up/activation/eft/{fcu_id}
+        uav/down/activation/eft/{fcu_id}
+    - 脚本内写死（uom.TOPIC_* 中的 "eft" 段）；换厂商需改主题模板并与平台约定一致。
+
+    【fcu_id】
+    - 单台飞控在 UOM 平台上的主键；激活请求仅含 fcu_id + timestamp。
+    - 脚本实现：fcu_id = uas_id；若未配置 uas_id 则回退为 "default_sn"（应避免多台共用）。
+    - 同时作为 MQTT Client ID、订阅/发布主题里的设备后缀。
+
+    【uas_id】
+    - 国标 Remote ID「航空器 ID」，最多 20 字符 ASCII。
+    - Mission Planner 经 MAVLink 下发 OPEN_DRONE_ID_BASIC_ID 后写入 LTE_UAS_W01~10 并掉电保存。
+    - 遥测 JSON 字段 "uas_id" 与 fcu_id 内容相同（有值时）。
+
+    【operator_id】
+    - 国标 Remote ID「运营人 ID」，最多 20 字符。
+    - 由 OPEN_DRONE_ID_OPERATOR_ID 写入 LTE_OP_W01~10。
+    - 遥测 JSON 字段 "operator_id"。
+
+    【user_id】
+    - 云平台遥测里的用户/声明字段，非 ICAO 强制 ID。
+    - 优先：OPEN_DRONE_ID_SELF_ID 的 description（自我声明）；
+      否则：参数 LTE_USER_ID 的整数值转字符串；均为空则 "0"。
+
+    相关但非 ID：op_lat / op_lng / op_alt（操控员位置，来自 SYSTEM / SYSTEM_UPDATE）。
+
+    ========================================================================
     driver for LTE modems with AT command set
     supported chipsets:
     - SIM7600
@@ -325,11 +368,15 @@ LTE_OPTIONS_NOSIGQUERY = (1<<3)
 LTE_OPTIONS_TCP = (1<<4)
 
 -- ============================================================
--- UOM无人机运营管理系统 MQTT 上报模块
+-- UOM 无人机运营管理系统 MQTT 上报模块
+-- 五个 ID：见本文件最顶部注释表（vendor_id / fcu_id / uas_id / operator_id / user_id）
 -- 在 PPP 连通（step=CONNECTED）后自动启动
 -- 配置：LTE_UOM_ENABLE=1, LTE_UOM_IP0~3, LTE_UOM_PORT
 -- ODID：地面站经任意 MAVLink 口（如 SERIAL6）下发 OpenDroneID 消息后写入 LTE_* 参数持久化
--- 上报 Topic: uav/up/telemetry/eft/{uas_id}
+-- 主题（vendor_id=eft 为路径固定段，fcu_id 为后缀）:
+--   激活  uav/up/activation/eft/{fcu_id}   QoS1
+--   响应  uav/down/activation/eft/{fcu_id} QoS1 SUBSCRIBE
+--   遥测  uav/up/telemetry/eft/{fcu_id}    QoS0
 -- ============================================================
 
 -- UOM/ODID 模块独立作用域，避免主 chunk local 超过 100 上限
@@ -552,7 +599,9 @@ odid_load_from_params()
 --       char[20] 类字段（uas_id / operator_id）若未填满则包比标称长度短，
 --       必须用补零再解包，或直接用 sub 读字符串字段，不能用硬性长度下限。
 local function odid_poll()
-    while true do
+    local n = 0
+    while n < uom.ODID_POLL_MAX_MSGS do
+        n = n + 1
         local msg_str, _chan = mavlink:receive_chan()
         if not msg_str then break end
         local id, buf = mavlink_c_payload(msg_str)
@@ -610,17 +659,57 @@ local function odid_poll()
 end
 
 uom = {}
-uom.sock               = nil
-uom.state              = "IDLE"
-uom.last_pub_ms        = uint32_t(0)
-uom.last_ping_ms       = uint32_t(0)
-uom.connect_timeout_ms = uint32_t(0)
-uom.TOPIC              = "uav/up/telemetry/eft/%s"  -- 格式化模板，%s 为 SN
-uom.publish_count      = 0      -- 记录发送次数
-uom.connect_sent       = false  -- MQTT CONNECT 是否已发送
-uom.retry_after_ms     = uint32_t(0)  -- 连接失败后冷却，避免刷屏
-uom.PING_MS            = 30000  -- MQTT 心跳间隔（ms）
-uom.REPORT_MS          = 1000   -- 上报间隔（ms）
+uom.sock                  = nil
+uom.state                 = "IDLE"
+uom.last_pub_ms           = uint32_t(0)
+uom.last_ping_ms          = uint32_t(0)
+uom.connect_timeout_ms    = uint32_t(0)
+uom.activate_timeout_ms   = uint32_t(0)
+uom.TOPIC_TELEMETRY       = "uav/up/telemetry/eft/%s"
+uom.TOPIC_ACT_UP          = "uav/up/activation/eft/%s"
+uom.TOPIC_ACT_DOWN        = "uav/down/activation/eft/%s"
+uom.publish_count         = 0
+uom.connect_sent          = false
+uom.subscribe_sent        = false
+uom.activation_sent       = false
+uom.activated             = false
+uom.activation_code       = -1
+uom.activation_send_after_ms = uint32_t(0)
+uom.packet_id             = 1
+uom.rx_buf                = ""
+uom.retry_after_ms        = uint32_t(0)
+uom.PING_MS               = 30000
+uom.REPORT_MS             = 1000
+uom.ACTIVATE_TIMEOUT_MS   = 30000  -- 等待激活 down 响应（云端接口约 3s，留足蜂窝 RTT 余量）
+uom.ACTIVATE_RETRY_MS     = 8000   -- 超时后再次发送 up 激活的最小间隔
+uom.SUBACK_TIMEOUT_MS     = 5000   -- 未收到 SUBACK 时仍进入激活阶段（避免卡死）
+uom.subscribe_sent_ms     = uint32_t(0)
+uom.RX_BUF_MAX            = 2048   -- 接收缓冲上限
+uom.MQTT_RECV_MAX_CHUNKS  = 2      -- 单次最多读 2 个 TCP 块（防 exceeded time limit）
+uom.MQTT_DISPATCH_MAX_PKTS = 4      -- 单次最多解析 4 个 MQTT 包
+uom.TICK_MS               = 50      -- UOM 主逻辑最短周期（step_CONNECTED 为 5ms 时不每拍跑满）
+uom.ODID_POLL_MS          = 250     -- ODID MAVLink 轮询周期
+uom.ODID_POLL_MAX_MSGS    = 2       -- 每次 ODID 最多处理条数
+uom.last_tick_ms          = uint32_t(0)
+uom.last_odid_poll_ms     = uint32_t(0)
+uom.gps_warn_sent         = false
+uom.subscribed_fcu_id     = ""      -- 已订阅的 down 主题后缀，须与当前 fcu_id 一致
+uom.mqtt_connected_ms     = uint32_t(0)
+uom.FCU_ID_MIN_LEN        = 12      -- 完整 UAS ID 长度不足时不订阅（避免 EFT26 与 EFT2605210001 不一致）
+uom.id_wait_warn_sent     = false
+-- 与 AP_GPS::istate_time_to_epoch_ms 一致（libraries/AP_GPS/AP_GPS.h）
+local AP_MSEC_PER_WEEK    = 604800000
+local UNIX_OFFSET_MSEC    = 17000 * 86400 + 52 * 10 * AP_MSEC_PER_WEEK - 18000
+
+-- 激活响应状态码 → 地面站中文说明
+local ACTIVATION_MSG = {
+    [0] = "激活成功",
+    [1] = "服务器异常",
+    [2] = "无人机不存在于系统中",
+    [3] = "实名登记验证失败",
+    [4] = "激活状态上报失败",
+    [5] = "设备正在激活中，请稍候",
+}
 
 -- ---- MQTT 工具函数 ----
 
@@ -640,6 +729,23 @@ local function mqtt_str(s)
     return string.char(math.floor(l/256), l%256) .. s
 end
 
+-- 解码 MQTT 剩余长度字段，返回 (length, next_pos)
+-- MQTT 可变长度整数：bit7=1 表示后续还有字节，bit7=0 表示最后一字节
+local function mqtt_decode_rem_len(data, pos)
+    local multiplier = 1
+    local value = 0
+    local i = pos
+    while true do
+        if i > #data then return nil, pos end
+        local encoded = data:byte(i)
+        value = value + (encoded % 128) * multiplier
+        multiplier = multiplier * 128
+        i = i + 1
+        if encoded < 128 then break end  -- bit7=0：最后一个长度字节
+    end
+    return value, i
+end
+
 -- MQTT CONNECT：支持可选用户名/密码（CONNACK rc=4 表示账号密码错误）
 local function mqtt_connect_pkt(client_id, username, password)
     local flags = 0x02  -- Clean Session
@@ -656,13 +762,367 @@ local function mqtt_connect_pkt(client_id, username, password)
     return "\x10" .. mqtt_encode_len(#vh + #pl) .. vh .. pl
 end
 
-local function mqtt_publish_pkt(topic, payload)
+-- MQTT PUBLISH，qos=0/1
+local function mqtt_publish_pkt(topic, payload, qos, packet_id)
+    qos = qos or 0
+    local flags = qos * 2
     local vh = mqtt_str(topic)
-    return "\x30" .. mqtt_encode_len(#vh + #payload) .. vh .. payload
+    if qos > 0 then
+        vh = vh .. string.char(math.floor(packet_id / 256), packet_id % 256)
+    end
+    return string.char(0x30 | flags) .. mqtt_encode_len(#vh + #payload) .. vh .. payload
+end
+
+-- MQTT SUBSCRIBE
+local function mqtt_subscribe_pkt(packet_id, topic, qos)
+    qos = qos or 1
+    local pl = mqtt_str(topic) .. string.char(qos)
+    local vh = string.char(math.floor(packet_id / 256), packet_id % 256)
+    return "\x82" .. mqtt_encode_len(#vh + #pl) .. vh .. pl
 end
 
 local function mqtt_pingreq_pkt()
     return "\xC0\x00"
+end
+
+-- 应答 broker 下发的 QoS1 PUBLISH（必须回 PUBACK，否则可能收不到后续 down 消息）
+local function mqtt_puback_pkt(packet_id)
+    return string.char(0x40, 0x02, math.floor(packet_id / 256), packet_id % 256)
+end
+
+-- 获取 fcu_id（UAS ID，无则用 default_sn）
+local function uom_get_fcu_id()
+    local id = odid_get_uas_id()
+    if id == "" then id = "default_sn" end
+    return id
+end
+
+-- 绑定返回值可能是 Lua number 或 uint32_t（:toint）；勿对 number 写 v.toint
+local function scripting_to_int(v)
+    if v == nil then
+        return nil
+    end
+    if type(v) == "number" then
+        return v
+    end
+    if type(v) ~= "number" and v.toint then
+        return v:toint()
+    end
+    return tonumber(v)
+end
+
+-- uint64_t → Lua number（time_epoch_usec 不能直接 math.floor）
+local function uint64_to_number(v)
+    if v == nil then
+        return nil
+    end
+    if type(v) == "number" then
+        return v
+    end
+    if v.split then
+        local hi, lo = v:split()
+        return scripting_to_int(hi) * 4294967296.0 + scripting_to_int(lo)
+    end
+    return tonumber(v)
+end
+
+-- 时间戳（毫秒）：优先 3D GPS 的 UTC/周时，否则 millis（遥测用，激活须 uom_ts_json）
+local function uom_timestamp_ms()
+    local inst = uom_gps_inst_3d()
+    if inst ~= nil then
+        local ms = uom_gps_epoch_ms(inst)
+        if ms == nil then
+            ms = uom_gps_week_to_unix_ms(inst)
+        end
+        if ms ~= nil then
+            return ms
+        end
+    end
+    return scripting_to_int(millis()) or 0
+end
+
+-- 十进制整数转字符串（避免 %.0f 输出 2e+12 导致 JSON 非法）
+local function int64_to_dec_str(n)
+    n = math.floor(tonumber(n) or 0)
+    if n <= 0 then
+        return "0"
+    end
+    local s = ""
+    while n > 0 do
+        local d = n % 10
+        s = string.char(48 + d) .. s
+        n = math.floor(n / 10)
+    end
+    return s
+end
+
+-- 返回首个具备 3D 定位的 GPS 实例（日志里常为 GPS 1 → instance 1，勿死用 0）
+local function uom_gps_inst_3d()
+    local n = gps:num_sensors()
+    if n < 1 then
+        return nil
+    end
+    local pri = gps:primary_sensor()
+    if pri ~= nil and gps:status(pri) >= gps.GPS_OK_FIX_3D then
+        return pri
+    end
+    for inst = 0, n - 1 do
+        if gps:status(inst) >= gps.GPS_OK_FIX_3D then
+            return inst
+        end
+    end
+    return nil
+end
+
+-- 由 GPS 周 + 周内毫秒得到 Unix 毫秒（与 AP_GPS::istate_time_to_epoch_ms 一致）
+local function uom_gps_week_to_unix_ms(inst)
+    local w_i = scripting_to_int(gps:time_week(inst))
+    local wms_i = scripting_to_int(gps:time_week_ms(inst))
+    if w_i == nil or wms_i == nil or w_i <= 0 then
+        return nil
+    end
+    -- 用最近一次 fix 时间把周内毫秒推进到当前时刻
+    local fix_i = scripting_to_int(gps:last_fix_time_ms(inst))
+    local now_i = scripting_to_int(millis())
+    if fix_i and now_i and fix_i > 0 then
+        wms_i = wms_i + (now_i - fix_i)
+    end
+    local ms = UNIX_OFFSET_MSEC + w_i * AP_MSEC_PER_WEEK + wms_i
+    if ms > 1000000000000 then
+        return ms
+    end
+    return nil
+end
+
+-- 从 time_epoch_usec 得到 Unix 毫秒（uint64 微秒 ÷ 1000）
+local function uom_gps_epoch_ms(inst)
+    local utc = gps:time_epoch_usec(inst)
+    if not utc or not (utc > 0) then
+        return nil
+    end
+    local usec = uint64_to_number(utc)
+    if not usec or usec < 1e15 then
+        return nil
+    end
+    local ms = math.floor(usec / 1000.0)
+    if ms > 1000000000000 then
+        return ms
+    end
+    return nil
+end
+
+-- JSON 用 Unix 毫秒时间戳（须 ≥1e12，拒绝 177 等无效值）
+local function uom_ts_json()
+    local inst = uom_gps_inst_3d()
+    if inst == nil then
+        return "0"
+    end
+    local ms = uom_gps_epoch_ms(inst)
+    if ms == nil or ms < 1000000000000 then
+        ms = uom_gps_week_to_unix_ms(inst)
+    end
+    if ms == nil or ms < 1000000000000 then
+        return "0"
+    end
+    return int64_to_dec_str(ms)
+end
+
+-- fcu_id 变化后须重新订阅 down 主题
+local function uom_fcu_id_changed_resubscribe()
+    local fcu_id = uom_get_fcu_id()
+    if uom.subscribed_fcu_id == "" or uom.subscribed_fcu_id == fcu_id then
+        return false
+    end
+    if not uom.sock then
+        return false
+    end
+    gcs:send_text(MAV_SEVERITY.WARNING,
+        string.format("UOM: fcu_id %s→%s 重新订阅", uom.subscribed_fcu_id, fcu_id))
+    uom.state = "SUBSCRIBING"
+    uom.subscribe_sent = false
+    uom.subscribe_sent_ms = uint32_t(0)
+    uom.activation_sent = false
+    uom.subscribed_fcu_id = ""
+    return true
+end
+
+-- 构造激活请求 JSON
+local function uom_build_activation_json()
+    local fcu_id = uom_get_fcu_id()
+    return string.format('{"fcu_id":"%s","timestamp":%s}', fcu_id, uom_ts_json())
+end
+
+-- 简易 JSON 字段提取（激活响应）
+local function json_get_number(s, key)
+    local v = s:match('"' .. key .. '"%s*:%s*(%-?%d+)')
+    return v and tonumber(v) or nil
+end
+
+local function json_get_string(s, key)
+    return s:match('"' .. key .. '"%s*:%s*"([^"]*)"')
+end
+
+-- 向地面站发送激活状态
+-- uom_close 为模块级函数（非 local），PPP 断开时也可调用
+uom_close = function() end
+
+local function uom_notify_activation(code, message)
+    local desc = ACTIVATION_MSG[code] or "未知状态"
+    local sev = MAV_SEVERITY.INFO
+    if code == 0 then
+        sev = MAV_SEVERITY.INFO
+    elseif code == 5 then
+        sev = MAV_SEVERITY.WARNING
+    else
+        sev = MAV_SEVERITY.ERROR
+    end
+    gcs:send_text(sev, string.format("UOM激活[%d]: %s", code, desc))
+    if message and message ~= "" then
+        gcs:send_text(sev, string.format("UOM: %s", message))
+    end
+end
+
+-- 进入 ACTIVATING（发送 uav/up/activation/... 并等待 down 响应）
+local function uom_begin_activating(now, reason)
+    if uom.state == "ACTIVATING" or uom.state == "READY" then
+        return
+    end
+    if uom_fcu_id_changed_resubscribe() then
+        return
+    end
+    uom.state = "ACTIVATING"
+    uom.activation_sent = false
+    uom.activation_send_after_ms = now
+    uom.activate_timeout_ms = now + uint32_t(uom.ACTIVATE_TIMEOUT_MS)
+    gcs:send_text(MAV_SEVERITY.INFO,
+        string.format("UOM: 进入激活阶段 (%s)", reason or "?"))
+end
+
+-- 处理激活响应 JSON
+local function uom_handle_activation_response(payload)
+    local code = json_get_number(payload, "code")
+    if code == nil then return end
+    local message = json_get_string(payload, "message") or ""
+    uom.activation_code = code
+    uom_notify_activation(code, message)
+
+    if code == 0 then
+        uom.activated = true
+        uom.state = "READY"
+        uom.last_pub_ms = uint32_t(0)
+        gcs:send_text(MAV_SEVERITY.INFO, "UOM: 激活完成，开始上报遥测")
+    elseif code == 5 then
+        -- 正在激活中，延迟后重试
+        uom.activation_sent = false
+        uom.activation_send_after_ms = millis() + uint32_t(uom.ACTIVATE_RETRY_MS)
+        uom.activate_timeout_ms = uom.activation_send_after_ms + uint32_t(uom.ACTIVATE_TIMEOUT_MS)
+    else
+        -- 致命错误：断开重连，冷却后再走激活流程
+        uom.activated = false
+        uom.retry_after_ms = millis() + uint32_t(30000)
+        uom_close()
+    end
+end
+
+-- 解析 rx_buf 中的 MQTT 包，处理 SUBACK / PUBLISH（单次调用有包数上限）
+-- 激活等待期间收到任意 MQTT 下行则延长等待（避免与云端 3~15s 处理撞车）
+local function uom_mqtt_dispatch()
+    local pkt_count = 0
+    while #uom.rx_buf >= 2 and pkt_count < uom.MQTT_DISPATCH_MAX_PKTS do
+        pkt_count = pkt_count + 1
+        local b0 = uom.rx_buf:byte(1)
+        local msg_type = math.floor(b0 / 16)
+        local rem_len, hdr_end = mqtt_decode_rem_len(uom.rx_buf, 2)
+        if not rem_len then break end
+        local total = hdr_end - 1 + rem_len
+        if #uom.rx_buf < total then break end  -- 包未收全
+
+        local body = uom.rx_buf:sub(hdr_end, total)
+        uom.rx_buf = uom.rx_buf:sub(total + 1)
+
+        if msg_type == 9 then
+            -- SUBACK：订阅成功，进入激活阶段
+            if uom.state == "SUBSCRIBING" then
+                uom_begin_activating(millis(), "SUBACK")
+            end
+
+        elseif msg_type == 3 then
+            -- PUBLISH：解析 topic + payload
+            if #body < 2 then goto continue end
+            local tlen = body:byte(1) * 256 + body:byte(2)
+            if #body < 2 + tlen then goto continue end
+            local topic = body:sub(3, 2 + tlen)
+            local pos = 3 + tlen
+            local qos = (b0 >> 1) & 0x03
+            local pub_pid = nil
+            if qos > 0 then
+                if #body < pos + 1 then goto continue end
+                pub_pid = body:byte(pos) * 256 + body:byte(pos + 1)
+                pos = pos + 2
+            end
+            local payload = body:sub(pos)
+
+            if qos > 0 and pub_pid and uom.sock then
+                local ack = mqtt_puback_pkt(pub_pid)
+                uom.sock:send(ack, #ack)
+            end
+
+            -- 激活响应：云 → 飞控，主题 uav/down/activation/{vendor}/{fcu_id}
+            local fcu_id = uom_get_fcu_id()
+            local act_down = string.format(uom.TOPIC_ACT_DOWN, fcu_id)
+            if topic == act_down or topic:find("activation") then
+                if uom.state == "ACTIVATING" and uom.activation_sent then
+                    uom.activate_timeout_ms = millis() + uint32_t(uom.ACTIVATE_TIMEOUT_MS)
+                end
+                gcs:send_text(MAV_SEVERITY.INFO,
+                    string.format("UOM: DOWN %s", topic))
+                if payload == "" or payload == nil then
+                    gcs:send_text(MAV_SEVERITY.WARNING, "UOM: 激活响应 payload 为空")
+                else
+                    local code = json_get_number(payload, "code")
+                    if code == nil then
+                        gcs:send_text(MAV_SEVERITY.WARNING,
+                            string.format("UOM: 无法解析 code: %s", payload:sub(1, 80)))
+                    end
+                    uom_handle_activation_response(payload)
+                end
+            end
+
+        elseif msg_type == 4 or msg_type == 13 then
+            -- PUBACK(4) / PINGRESP(13)：已消费，无需处理
+        end
+        ::continue::
+    end
+end
+
+-- 非阻塞读取 MQTT 下行数据（限制单次循环工作量，避免 exceeded time limit）
+local function uom_mqtt_recv()
+    if not uom.sock then return end
+    local chunks = 0
+    while uom.sock:pollin(0) and chunks < uom.MQTT_RECV_MAX_CHUNKS do
+        chunks = chunks + 1
+        local chunk = uom.sock:recv(256)
+        if chunk == nil then break end
+        if #chunk == 0 then
+            gcs:send_text(MAV_SEVERITY.WARNING, "UOM: connection closed by server")
+            uom.retry_after_ms = millis() + uint32_t(5000)
+            uom_close()
+            return
+        end
+        uom.rx_buf = uom.rx_buf .. chunk
+        if #uom.rx_buf > uom.RX_BUF_MAX then
+            uom.rx_buf = uom.rx_buf:sub(#uom.rx_buf - uom.RX_BUF_MAX + 1)
+        end
+    end
+    uom_mqtt_dispatch()
+end
+
+-- 分配 MQTT 包 ID（1~65535 循环）
+local function uom_next_packet_id()
+    local id = uom.packet_id
+    uom.packet_id = uom.packet_id + 1
+    if uom.packet_id > 65535 then uom.packet_id = 1 end
+    return id
 end
 
 -- ---- 构造 UOM JSON（飞行遥测 + ODID 信息）----
@@ -704,7 +1164,7 @@ local function uom_build_json()
     local user_id = odid.self_desc ~= "" and odid.self_desc
                     or tostring(math.floor(LTE_USER_ID:get()))
     return string.format(
-        '{"ts":%u,'  ..
+        '{"ts":%s,'  ..
         '"lng":%.7f,"lat":%.7f,'  ..
         '"alt":%.1f,"alt_gps":%.1f,'  ..
         '"speed":%.2f,"yaw":%.1f,"pitch":%.1f,"roll":%.1f,'  ..
@@ -713,7 +1173,7 @@ local function uom_build_json()
         '"uas_id":"%s",'   ..
         '"operator_id":"%s",'  ..
         '"op_lat":%.7f,"op_lng":%.7f,"op_alt":%.1f}',
-        millis():toint(),
+        uom_ts_json(),
         lng, lat,
         alt_rel, alt_gps,
         speed, yaw, pitch, roll,
@@ -724,27 +1184,52 @@ local function uom_build_json()
         odid_get_op_lat(), odid_get_op_lng(), odid_get_op_alt())
 end
 
--- ---- socket 管理 ----
-
-local function uom_close()
+uom_close = function()
     if uom.sock then
         uom.sock:close()
         uom.sock = nil
     end
     uom.state = "IDLE"
     uom.connect_sent = false
+    uom.subscribe_sent = false
+    uom.activation_sent = false
+    uom.activated = false
+    uom.activation_code = -1
+    uom.rx_buf = ""
     uom.last_send_ok_ms = nil
+    uom.subscribe_sent_ms = uint32_t(0)
+    uom.gps_warn_sent = false
+    uom.subscribed_fcu_id = ""
+    uom.mqtt_connected_ms = uint32_t(0)
+    uom.id_wait_warn_sent = false
 end
 
--- ---- UOM 主更新函数，在 step_CONNECTED() 中每次调用 ----
+-- MQTT 套接字仍可用（uom_close / 对端断开 / PPP 掉线后必须为 false）
+local function uom_sock_alive()
+    return uom.sock ~= nil
+end
+
+-- ---- UOM 主更新函数，在 step_CONNECTED() 中按 uom.TICK_MS 节流派发 ----
 return function()
     if LTE_UOM_ENABLE:get() ~= 1 then return end
     if LTE_PROTOCOL:get() ~= PPP then return end
 
-    -- 轮询 ODID 消息缓存（无论 MQTT 状态如何都持续更新）
-    odid_poll()
+    local now = millis()
+    if (now - uom.last_odid_poll_ms) >= uint32_t(uom.ODID_POLL_MS) then
+        uom.last_odid_poll_ms = now
+        odid_poll()
+    end
 
-    local now  = millis()
+    -- CONNECTED 步 5ms 调用一次；MQTT 不必每拍跑满，避免 scripting time limit
+    if uom.state ~= "ACTIVATING" and uom.state ~= "READY" and uom.state ~= "SUBSCRIBING" then
+        if (now - uom.last_tick_ms) < uint32_t(uom.TICK_MS) then
+            return
+        end
+    elseif (now - uom.last_tick_ms) < uint32_t(20) then
+        -- 激活/遥测阶段略快（20ms），仍远低于 5ms
+        return
+    end
+    uom.last_tick_ms = now
     local host = string.format("%d.%d.%d.%d",
         LTE_UOM_IP0:get(), LTE_UOM_IP1:get(),
         LTE_UOM_IP2:get(), LTE_UOM_IP3:get())
@@ -759,19 +1244,26 @@ return function()
         uom.sock:connect(host, port)
         uom.state = "CONNECTING"
         uom.connect_sent = false
+        uom.subscribe_sent = false
+        uom.activation_sent = false
+        uom.activated = false
+        uom.rx_buf = ""
         uom.connect_timeout_ms = now + uint32_t(8000)
         return
     end
 
     if uom.state == "CONNECTING" then
+        if not uom_sock_alive() then
+            uom_close()
+            return
+        end
         if now > uom.connect_timeout_ms then
             gcs:send_text(MAV_SEVERITY.WARNING, "UOM: connect timeout")
             uom_close()
             return
         end
         if not uom.connect_sent then
-            local client_id = odid_get_uas_id()
-            if client_id == "" then client_id = "default_sn" end
+            local client_id = uom_get_fcu_id()
             local pkt = mqtt_connect_pkt(client_id, UOM_MQTT_USER, UOM_MQTT_PASS)
             local n = uom.sock:send(pkt, #pkt)
             if not n or n <= 0 then return end
@@ -783,10 +1275,11 @@ return function()
         if ack and #ack >= 4 then
             if ack:byte(1) == 0x20 and ack:byte(4) == 0x00 then
                 gcs:send_text(MAV_SEVERITY.INFO, "UOM: MQTT connected")
-                uom.state = "READY"
-                uom.last_ping_ms  = now
-                uom.last_pub_ms   = uint32_t(0)
-                uom.last_send_ok_ms = now  -- 看门狗基准时间
+                uom.mqtt_connected_ms = now
+                uom.state = "SUBSCRIBING"
+                uom.subscribe_sent = false
+                uom.last_ping_ms = now
+                uom.last_send_ok_ms = now
             else
                 local rc = ack:byte(4)
                 local rc_msg = "unknown"
@@ -805,31 +1298,121 @@ return function()
         return
     end
 
-    if uom.state == "READY" then
-        -- 有数据时才 recv；recv 返回 "" (空串) 说明远端关闭连接，nil 表示无数据（正常）
-        if uom.sock:pollin(0) then
-            local incoming = uom.sock:recv(64)
-            if incoming ~= nil and #incoming == 0 then
-                gcs:send_text(MAV_SEVERITY.WARNING, "UOM: connection closed by server")
-                uom.retry_after_ms = now + uint32_t(5000)
-                uom_close()
+    -- SUBSCRIBING：订阅激活响应主题 uav/down/activation/eft/{fcu_id}
+    if uom.state == "SUBSCRIBING" then
+        uom_mqtt_recv()
+        if not uom_sock_alive() then return end
+        if uom_fcu_id_changed_resubscribe() then
+            return
+        end
+        odid_poll()
+        if not uom.subscribe_sent then
+            local fcu_id = uom_get_fcu_id()
+            if #fcu_id < uom.FCU_ID_MIN_LEN then
+                if not uom.id_wait_warn_sent and uom.mqtt_connected_ms > 0 and
+                   (now - uom.mqtt_connected_ms) > uint32_t(5000) then
+                    uom.id_wait_warn_sent = true
+                    gcs:send_text(MAV_SEVERITY.WARNING,
+                        string.format("UOM: 等待完整UAS ID(当前%s)", fcu_id))
+                end
                 return
+            end
+            local sub_topic = string.format(uom.TOPIC_ACT_DOWN, fcu_id)
+            local pid = uom_next_packet_id()
+            -- 与云平台 down 发布 QoS0 一致
+            local pkt = mqtt_subscribe_pkt(pid, sub_topic, 0)
+            local n = uom.sock:send(pkt, #pkt)
+            if n and n > 0 then
+                uom.subscribe_sent = true
+                uom.subscribe_sent_ms = now
+                uom.subscribed_fcu_id = fcu_id
+                gcs:send_text(MAV_SEVERITY.INFO,
+                    string.format("UOM: 已发送订阅 %s", sub_topic))
+            end
+        elseif uom.subscribe_sent_ms > 0 and
+               (now - uom.subscribe_sent_ms) > uint32_t(uom.SUBACK_TIMEOUT_MS) then
+            -- 未收到 SUBACK 时仍进入激活（部分 broker SUBACK 格式异常会导致一直卡住）
+            uom_begin_activating(now, "SUBACK timeout")
+        end
+        if uom_sock_alive() and now - uom.last_ping_ms >= uint32_t(uom.PING_MS) then
+            uom.sock:send(mqtt_pingreq_pkt(), 2)
+            uom.last_ping_ms = now
+        end
+        return
+    end
+
+    -- ACTIVATING：发送 up 激活，等待 down 响应（云 → 飞控）
+    if uom.state == "ACTIVATING" then
+        uom_mqtt_recv()
+        if not uom_sock_alive() then return end
+        if uom.state == "READY" then
+            return
+        end
+        if uom_fcu_id_changed_resubscribe() then
+            return
+        end
+        odid_poll()
+
+        if uom.activation_sent and now > uom.activate_timeout_ms then
+            gcs:send_text(MAV_SEVERITY.WARNING, "UOM: 激活响应超时，重试")
+            uom.activation_sent = false
+            uom.activation_send_after_ms = now + uint32_t(uom.ACTIVATE_RETRY_MS)
+        end
+
+        if not uom.activation_sent and now >= uom.activation_send_after_ms then
+            local ts_s = uom_ts_json()
+            if ts_s == "0" then
+                if not uom.gps_warn_sent then
+                    uom.gps_warn_sent = true
+                    local inst = uom_gps_inst_3d()
+                    local st = inst and gps:status(inst) or -1
+                    gcs:send_text(MAV_SEVERITY.WARNING,
+                        string.format("UOM: 无UTC ts inst=%s st=%s",
+                            tostring(inst), tostring(st)))
+                end
+                return
+            end
+            local fcu_id = uom_get_fcu_id()
+            -- 飞控 → 云：uav/up/activation/eft/{fcu_id}（协议 3.2 激活请求）
+            local act_topic = string.format(uom.TOPIC_ACT_UP, fcu_id)
+            local json = string.format(
+                '{"fcu_id":"%s","timestamp":%s}', fcu_id, ts_s)
+            local pid = uom_next_packet_id()
+            -- QoS0：与文档一致且无需等 broker PUBACK，避免占满接收缓冲
+            local pkt = mqtt_publish_pkt(act_topic, json, 0, pid)
+            local n = uom.sock:send(pkt, #pkt)
+            if n and n > 0 then
+                uom.activation_sent = true
+                uom.activate_timeout_ms = now + uint32_t(uom.ACTIVATE_TIMEOUT_MS)
+                uom.last_send_ok_ms = now
+                gcs:send_text(MAV_SEVERITY.INFO,
+                    string.format("UOM: UP %s ts=%s", act_topic, ts_s))
             end
         end
 
-        if now - uom.last_pub_ms >= uint32_t(uom.REPORT_MS) then
-            json = uom_build_json()
-            local sn = odid_get_uas_id()
-            if sn == "" then sn = "default_sn" end
-            topic = string.format(uom.TOPIC, sn)
+        if uom_sock_alive() and now - uom.last_ping_ms >= uint32_t(uom.PING_MS) then
+            uom.sock:send(mqtt_pingreq_pkt(), 2)
+            uom.last_ping_ms = now
+        end
+        return
+    end
 
-            pkt = mqtt_publish_pkt(topic, json)
-            n = uom.sock:send(pkt, #pkt)
+    -- READY：激活成功后上报遥测
+    if uom.state == "READY" then
+        uom_mqtt_recv()
+        if not uom_sock_alive() then return end
+
+        if uom.activated and now - uom.last_pub_ms >= uint32_t(uom.REPORT_MS) then
+            local json = uom_build_json()
+            local sn = uom_get_fcu_id()
+            local topic = string.format(uom.TOPIC_TELEMETRY, sn)
+
+            local pkt = mqtt_publish_pkt(topic, json, 0)
+            local n = uom.sock:send(pkt, #pkt)
             if n and n > 0 then
                 uom.last_pub_ms = now
                 uom.last_send_ok_ms = now
                 uom.publish_count = uom.publish_count + 1
-                -- 首包及每 10 包打印一次，避免刷屏
                 if uom.publish_count == 1 or (uom.publish_count % 10 == 0) then
                     local _uas = odid_get_uas_id()
                     local _op  = odid_get_operator_id()
@@ -847,7 +1430,6 @@ return function()
             end
         end
 
-        -- 看门狗：60 秒未成功发出任何包则断线重连
         if uom.last_send_ok_ms ~= nil and
            (now - uom.last_send_ok_ms) > uint32_t(60000) then
             gcs:send_text(MAV_SEVERITY.WARNING, "UOM: send watchdog, reconnecting")
@@ -856,9 +1438,8 @@ return function()
             return
         end
 
-        if now - uom.last_ping_ms >= uint32_t(uom.PING_MS) then
-            local pkt = mqtt_pingreq_pkt()
-            uom.sock:send(pkt, #pkt)
+        if uom_sock_alive() and now - uom.last_ping_ms >= uint32_t(uom.PING_MS) then
+            uom.sock:send(mqtt_pingreq_pkt(), 2)
             uom.last_ping_ms = now
         end
     end
@@ -907,7 +1488,9 @@ local SimCom2 = { banner = 'R1951',
                  setband = 'AT+CBANDCFG="CAT-M",%d\r\n',
                  setband_all = 'AT+CBANDCFG="CAT-M",1,2,3,4,5,8,12,13,14,18,19,20,25,26,27,28,66,85\r\n',
                 }
+-- 合宙不同 AT 固件 banner 略有差异，均视为 Air780
 local Air780 = { banner = 'AirM2M_780E',
+                 banners = { 'AirM2M_780E', 'Air780E', 'Air780', 'AIR780', '780E' },
                  cmux = nil, -- 'AT+CIPMUX=1\r\n',
                  setbaud = 'AT+IPR=%u\r\n',
                  cgact = 'AT+CGACT=1,1\r\n',
@@ -1308,11 +1891,14 @@ end
     modem type
 --]]
 local function check_modem_banner(s)
-    for model in pairs(modem_list) do
-        if s:find(modem_list[model].banner) then
-            modem = modem_list[model]
-            gcs:send_text(MAV_SEVERITY.INFO, "LTE_modem: found modem: " .. model)
-            return
+    for model, m in pairs(modem_list) do
+        local keys = m.banners or { m.banner }
+        for i = 1, #keys do
+            if keys[i] and s:find(keys[i], 1, true) then
+                modem = m
+                gcs:send_text(MAV_SEVERITY.INFO, "LTE_modem: found modem: " .. model)
+                return
+            end
         end
     end
 end
@@ -1328,6 +1914,10 @@ end
     - in muxed mode at higher baudrate
 --]]
 function step_ATI()
+    -- 上电首轮先发软复位，退出上次 PPP/数据模式以便响应 AT
+    if ati_sequence == 0 then
+        send_data_reset()
+    end
     local s = uart_read()
     if s and modem == default_modem then
         check_modem_banner(s)
@@ -1348,7 +1938,12 @@ function step_ATI()
         AT_send('ATI\r')
         return
     end
-    -- 有数据但识别不了模组：每 15s 提示一次（便于区分「完全无回包」）
+    -- 完全无回包：约每 10s 提示（与「有数据无 banner」区分）
+    if (not s or #s == 0) and ati_sequence > 0 and ati_sequence % 9 == 0 then
+        gcs:send_text(MAV_SEVERITY.WARNING,
+            "LTE_modem: ATI 无串口回包，查 4G 供电/TX-RX/SERIAL1_PROTOCOL=28/BRD_SER1_RTSCTS=0")
+    end
+    -- 有数据但识别不了模组：约每 15s 提示一次
     if s and #s > 0 and ati_sequence % 15 == 0 then
         gcs:send_text(MAV_SEVERITY.WARNING,
             string.format("LTE_modem: ATI got %u bytes, no Air780 banner", #s))
@@ -1369,7 +1964,7 @@ function step_ATI()
         log_data(string.format("{BAUD=%d}", LTE_IBAUD:get()), '***')
     end
     -- 长时间无应答：软复位模组（退出 PPP 数据模式）
-    if ati_sequence > 0 and ati_sequence % 20 == 0 then
+    if ati_sequence > 0 and ati_sequence % 12 == 0 then
         uart_write('AT+CFUN=1,1\r\n')
         gcs:send_text(MAV_SEVERITY.WARNING, "LTE_modem: ATI timeout, reset modem")
     elseif ati_sequence == 30 then
@@ -1850,11 +2445,13 @@ function step_CONNECTED()
     end
     if s and s:find('\r\nCLOSED\r\n') then
         gcs:send_text(MAV_SEVERITY.INFO, 'LTE_modem: connection closed, reconnecting')
+        uom_close()
         step = "CIPOPEN"
         return
     end
     if s and s:find('PPPD: DISCONNECTED\r\n') then
         gcs:send_text(MAV_SEVERITY.INFO, 'LTE_modem: PPP closed, reconnecting')
+        uom_close()
         step = "PPPOPEN"
         return
     end
@@ -1986,6 +2583,7 @@ end
 
 step_count = 0
 last_step = nil
+last_logged_step = nil
 
 function run_step()
     if change_baud then
@@ -2012,7 +2610,11 @@ function run_step()
     end
     last_step = step
 
-    gcs:send_text(MAV_SEVERITY.INFO, string.format('LTE_modem: step %s', step))
+    -- 仅步骤变化时打印，避免 ATI 阶段每秒刷屏
+    if step ~= last_logged_step then
+        last_logged_step = step
+        gcs:send_text(MAV_SEVERITY.INFO, string.format('LTE_modem: step %s', step))
+    end
 
     if step == "ATI" then
         step_ATI()
