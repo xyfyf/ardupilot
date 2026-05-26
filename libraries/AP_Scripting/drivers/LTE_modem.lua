@@ -9,14 +9,6 @@
     UOM 云平台 · 五个 ID 说明（对接文档 2.3 变量说明，请以此为准）
     ========================================================================
 
-    | 变量名        | 说明                         | 示例        | 脚本/协议中的位置 |
-    |---------------|------------------------------|-------------|-------------------|
-    | vendor_id     | 厂商 ID，区分不同厂家接入      | eft         | MQTT 主题路径固定段，见下 |
-    | fcu_id        | 飞控设备在平台上的唯一标识符   | DRONE-001   | 激活 JSON；主题后缀 {fcu_id} |
-    | uas_id        | 航空器实名登记号（机体 ID）    | 同 fcu_id   | 遥测 JSON；来源 OpenDroneID BASIC_ID |
-    | operator_id   | 运营人/操控员登记号（CAA 类）  | （登记号）  | 遥测 JSON；来源 OpenDroneID OPERATOR_ID |
-    | user_id       | 用户/自我声明展示字段          | （声明文本）| 遥测 JSON；SELF_ID 或 LTE_USER_ID |
-
     【vendor_id】
     - 云平台用来区分厂商的字符串，本方案固定为 "eft"。
     - 不出现在遥测/激活 JSON 里，而是写在 MQTT 主题路径中，例如：
@@ -27,24 +19,21 @@
 
     【fcu_id】
     - 单台飞控在 UOM 平台上的主键；激活请求仅含 fcu_id + timestamp。
-    - 脚本实现：fcu_id = uas_id；若未配置 uas_id 则回退为 "default_sn"（应避免多台共用）。
+    - 脚本实现：fcu_id = 飞控sn码。
     - 同时作为 MQTT Client ID、订阅/发布主题里的设备后缀。
 
     【uas_id】
     - 国标 Remote ID「航空器 ID」，最多 20 字符 ASCII。
     - Mission Planner 经 MAVLink 下发 OPEN_DRONE_ID_BASIC_ID 后写入 LTE_UAS_W01~10 并掉电保存。
-    - 遥测 JSON 字段 "uas_id" 与 fcu_id 内容相同（有值时）。
 
     【operator_id】
     - 国标 Remote ID「运营人 ID」，最多 20 字符。
-    - 由 OPEN_DRONE_ID_OPERATOR_ID 写入 LTE_OP_W01~10。
     - 遥测 JSON 字段 "operator_id"。
 
     【user_id】
     - 云平台遥测里的用户/声明字段，非 ICAO 强制 ID。
     - 优先：OPEN_DRONE_ID_SELF_ID 的 description（自我声明）；
       否则：参数 LTE_USER_ID 的整数值转字符串；均为空则 "0"。
-
     相关但非 ID：op_lat / op_lng / op_alt（操控员位置，来自 SYSTEM / SYSTEM_UPDATE）。
 
     ========================================================================
@@ -1540,10 +1529,52 @@ local function option_enabled(option)
     return (LTE_OPTIONS:get() & option) ~= 0
 end
 
+-- ============================================================
+-- 启动时检查关键系统参数，不对则通过 GCS 告警提示用户
+-- ============================================================
+local function check_hw_params()
+    -- { 参数名, 期望值, 比较符("eq"/"ge"), 说明 }
+    local checks = {
+        { "SERIAL1_PROTOCOL", 28,     "eq", "应为28(Scripting)" },
+        { "SERIAL1_BAUD",     115,    "eq", "应为115(=115200bps)" },
+        { "SCR_SDEV_EN",      1,      "eq", "需开启Scripting虚拟串口" },
+        { "NET_ENABLE",       1,      "eq", "需开启网络栈" },
+        { "SCR_ENABLE",       1,      "eq", "需开启Lua脚本引擎" },
+        { "SCR_HEAP_SIZE",    65536,  "ge", "堆内存建议>=65536(推荐204800)" },
+    }
+    local warn_count = 0
+    for _, c in ipairs(checks) do
+        local name, expect, op, hint = c[1], c[2], c[3], c[4]
+        local v = param:get(name)
+        local bad = false
+        if v == nil then
+            bad = true
+            hint = "参数不存在，请升级固件"
+        elseif op == "eq" and math.floor(v + 0.5) ~= expect then
+            bad = true
+        elseif op == "ge" and v < expect then
+            bad = true
+        end
+        if bad then
+            gcs:send_text(MAV_SEVERITY.WARNING,
+                string.format("LTE: ⚠ %s=%s %s", name, tostring(v), hint))
+            warn_count = warn_count + 1
+        end
+    end
+    if warn_count == 0 then
+        gcs:send_text(MAV_SEVERITY.INFO, "LTE: 系统参数检查通过")
+    else
+        gcs:send_text(MAV_SEVERITY.WARNING,
+            string.format("LTE: 发现%d项参数异常，请按SOP修正后重启", warn_count))
+    end
+end
+
 if LTE_ENABLE:get() == 0 then
     -- disabled
     return
 end
+
+check_hw_params()
 
 local uart = serial:find_serial(LTE_SERPORT_FIXED)
 if not uart then
