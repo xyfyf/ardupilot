@@ -37,16 +37,14 @@
     相关但非 ID：op_lat / op_lng / op_alt（操控员位置，来自 SYSTEM / SYSTEM_UPDATE）。
 
     ========================================================================
-    driver for LTE modems with AT command set
-    supported chipsets:
-    - SIM7600
-    - EC200
-    - Air780
+    driver for LTE modem (合宙 Air780E / Air780 only)
 
     EFT_CAAC 接线约定（无需改 LTE_SERPORT / LTE_SCRPORT）：
     - 4G 接飞控 SERIAL1（MP 里 Serial Port 1 / UART1），SERIAL1_PROTOCOL = Scripting(28)
     - SCR_SDEV1_PROTO = PPP(48)，NET_ENABLE = 1
     - UOM：仅需 LTE_UOM_IP0~3 + PORT（默认已填云平台地址），LTE_UOM_ENABLE 默认开
+    - 禁飞区：PPP CONNECT 后写 APM/lte_ppp_ready.flag=1，供 1noflyzone_checker.lua 拉 HTTP
+    - UOM MQTT down code=6：PreArm「UOM：禁飞区内禁止解锁」；首次进入 GCS「已进入禁飞区，请立刻返航或降落！」
 --]]
 
 local MAV_SEVERITY = {EMERGENCY=0, ALERT=1, CRITICAL=2, ERROR=3, WARNING=4, NOTICE=5, INFO=6, DEBUG=7}
@@ -62,6 +60,13 @@ local LTE_SERPORT_FIXED = 0
 local LTE_SCRPORT_FIXED = 0
 -- 默认 APN（移动/通用 cmnet）；联通卡可改脚本为 3gnet，电信 ctnet
 local LTE_APN_DEFAULT = "cmnet"
+
+-- 与 1noflyzone_checker.lua 共享：PPP 数据链路就绪（'1'）/ 未就绪（'0'）
+local LTE_PPP_READY_FILE = "APM/lte_ppp_ready.flag"
+local lte_ppp_ready_state = nil
+-- CONNECT 后延迟置 flag，避免底层 PPP 尚未协商完就触发禁飞脚本 HTTP
+local PPP_NFZ_FLAG_DELAY_MS = 15000
+local ppp_connected_ms = nil
 
 -- add a parameter and bind it to a variable
 local function bind_add_param(name, idx, default_value)
@@ -171,6 +176,34 @@ local LTE_TIMEOUT     = bind_add_param('TIMEOUT', 10, 10)
     // @User: Standard
 --]]
 local LTE_PROTOCOL     = bind_add_param('PROTOCOL', 11, 48)
+
+--[[
+    写入 PPP 就绪标志，供禁飞区脚本读取（见 examples/1noflyzone_checker.lua）。
+    须放在 LTE_PROTOCOL 定义之后，否则 Lua 会把 LTE_PROTOCOL 当全局 nil。
+    ready=true 仅在 LTE_PROTOCOL=PPP(48) 且模组侧 PPP 已 CONNECT 满延迟后置位。
+--]]
+local function write_lte_ppp_ready_flag(ready)
+    if ready and LTE_PROTOCOL:get() ~= PPP then
+        return
+    end
+    if lte_ppp_ready_state == ready then
+        return
+    end
+    local f = io.open(LTE_PPP_READY_FILE, 'w')
+    if not f then
+        if ready then
+            gcs:send_text(MAV_SEVERITY.WARNING,
+                'LTE: 无法写入 ' .. LTE_PPP_READY_FILE)
+        end
+        return
+    end
+    f:write(ready and '1' or '0')
+    f:close()
+    lte_ppp_ready_state = ready
+    if ready then
+        -- PPP 就绪不写 GCS（禁飞脚本读 flag 即可）
+    end
+end
 
 --[[
     // @Param: LTE_OPTIONS
@@ -458,7 +491,7 @@ end
 local function odid_save_uas_id(s)
     if not s or s == "" then return end
     if odid.uas_id ~= s then
-        gcs:send_text(MAV_SEVERITY.INFO, "ODID: uas_id=" .. s)
+        -- 静默缓存，不写 GCS
     end
     odid.uas_id = s
     odid_str_to_words(s, LTE_UAS_W)
@@ -467,7 +500,7 @@ end
 local function odid_save_operator_id(s)
     if not s or s == "" then return end
     if odid.operator_id ~= s then
-        gcs:send_text(MAV_SEVERITY.INFO, "ODID: operator_id=" .. s)
+        -- 静默缓存，不写 GCS
     end
     odid.operator_id = s
     odid_str_to_words(s, LTE_OP_W)
@@ -476,8 +509,7 @@ end
 local function odid_save_op_location(lat, lng, alt)
     if not odid_op_loc_valid(lat, lng, alt) then return end
     if odid.op_lat ~= lat or odid.op_lng ~= lng then
-        gcs:send_text(MAV_SEVERITY.INFO,
-            string.format("ODID: olat=%.5f olng=%.5f oalt=%.1f", lat, lng, alt))
+        -- 静默缓存，不写 GCS
     end
     odid.op_lat = lat
     odid.op_lng = lng
@@ -581,7 +613,7 @@ local function odid_mavlink_setup()
         mavlink:register_rx_msgid(MSGID_SYSTEM_UPDATE)
     end)
     if ok then
-        gcs:send_text(MAV_SEVERITY.INFO, "ODID: mavlink OK (5 IDs registered)")
+        -- 注册成功不提示
     else
         gcs:send_text(MAV_SEVERITY.WARNING, string.format("ODID: reg FAIL: %s", tostring(err)))
     end
@@ -616,7 +648,7 @@ local function odid_poll()
             if #buf >= 23 then
                 local desc = buf:sub(24):match("^([^%z]*)") or ""
                 if desc ~= "" and odid.self_desc ~= desc then
-                    gcs:send_text(MAV_SEVERITY.INFO, "ODID: self_desc=" .. desc)
+                    -- self_desc 静默缓存
                     odid.self_desc = desc
                 end
             end
@@ -692,6 +724,9 @@ uom.subscribed_fcu_id     = ""      -- 已订阅的 down 主题后缀，须与�
 uom.mqtt_connected_ms     = uint32_t(0)
 uom.FCU_ID_MIN_LEN        = 12      -- 完整 UAS ID 长度不足时不订阅（避免 EFT26 与 EFT2605210001 不一致）
 uom.id_wait_warn_sent     = false
+uom.auth_id               = arming:get_aux_auth_id()  -- UOM 禁飞区解锁鉴权（与 NFZ 脚本独立）
+uom.in_nfz_zone           = false   -- 云平台 MQTT code=6：在禁飞区内/接近禁飞区
+local UOM_NFZ_ARming_MSG  = "UOM：禁飞区内禁止解锁"
 -- 与 AP_GPS::istate_time_to_epoch_ms 一致（libraries/AP_GPS/AP_GPS.h）
 local AP_MSEC_PER_WEEK    = 604800000
 local UNIX_OFFSET_MSEC    = 17000 * 86400 + 52 * 10 * AP_MSEC_PER_WEEK - 18000
@@ -704,6 +739,7 @@ local ACTIVATION_MSG = {
     [3] = "实名登记验证失败",
     [4] = "激活状态上报失败",
     [5] = "设备正在激活中，请稍候",
+    [6] = "在禁飞区内/接近禁飞区",
 }
 
 -- ---- MQTT 工具函数 ----
@@ -931,14 +967,31 @@ local function uom_fcu_id_changed_resubscribe()
     if not uom.sock then
         return false
     end
-    gcs:send_text(MAV_SEVERITY.WARNING,
-        string.format("UOM: fcu_id %s→%s 重新订阅", uom.subscribed_fcu_id, fcu_id))
+    gcs:send_text(MAV_SEVERITY.WARNING, "UOM: 设备编号变化，重新订阅")
     uom.state = "SUBSCRIBING"
     uom.subscribe_sent = false
     uom.subscribe_sent_ms = uint32_t(0)
     uom.activation_sent = false
     uom.subscribed_fcu_id = ""
     return true
+end
+
+-- 遥测发送成功计数：仅在 1、10、100、1000… 条时通知地面站（避免每 10 条刷屏）
+local function uom_telemetry_log_milestone(cnt)
+    if cnt == 1 then
+        return true
+    end
+    local step = 10
+    while step <= cnt do
+        if cnt == step then
+            return true
+        end
+        if step > 1000000000 then
+            break
+        end
+        step = step * 10
+    end
+    return false
 end
 
 -- 构造激活请求 JSON
@@ -961,20 +1014,46 @@ end
 -- uom_close 为模块级函数（非 local），PPP 断开时也可调用
 uom_close = function() end
 
+-- 云平台下行 code=6：禁飞区状态 → PreArm 禁止解锁；首次进入时飞入告警
+local function uom_apply_nfz_from_cloud(inside, message)
+    local was_inside = uom.in_nfz_zone
+    uom.in_nfz_zone = inside
+
+    if inside and not was_inside then
+        -- 上电在区内 / 解锁后飞入：边沿触发，避免重复刷屏
+        gcs:send_text(MAV_SEVERITY.CRITICAL, "已进入禁飞区，请立刻返航或降落！")
+    end
+
+    if uom.auth_id then
+        if inside then
+            arming:set_aux_auth_failed(uom.auth_id, UOM_NFZ_ARming_MSG)
+        elseif was_inside then
+            -- 仅在本模块曾判入禁飞区后离开（如后续收到 code=0）时释放
+            arming:set_aux_auth_passed(uom.auth_id)
+        end
+    end
+end
+
 local function uom_notify_activation(code, message)
+    if code == 0 then
+        return  -- 激活成功不写 GCS
+    end
+    if code == 6 then
+        -- 发状态说明；不用「UOM激活[6]」格式，也不转发云平台英文 message
+        if not uom.in_nfz_zone then
+            gcs:send_text(MAV_SEVERITY.WARNING,
+                "UOM: " .. (ACTIVATION_MSG[6] or "在禁飞区内/接近禁飞区"))
+        end
+        return
+    end
     local desc = ACTIVATION_MSG[code] or "未知状态"
     local sev = MAV_SEVERITY.INFO
-    if code == 0 then
-        sev = MAV_SEVERITY.INFO
-    elseif code == 5 then
+    if code == 5 then
         sev = MAV_SEVERITY.WARNING
     else
         sev = MAV_SEVERITY.ERROR
     end
-    gcs:send_text(sev, string.format("UOM激活[%d]: %s", code, desc))
-    if message and message ~= "" then
-        gcs:send_text(sev, string.format("UOM: %s", message))
-    end
+    gcs:send_text(sev, string.format("UOM: %s", desc))
 end
 
 -- 进入 ACTIVATING（发送 uav/up/activation/... 并等待 down 响应）
@@ -989,8 +1068,6 @@ local function uom_begin_activating(now, reason)
     uom.activation_sent = false
     uom.activation_send_after_ms = now
     uom.activate_timeout_ms = now + uint32_t(uom.ACTIVATE_TIMEOUT_MS)
-    gcs:send_text(MAV_SEVERITY.INFO,
-        string.format("UOM: 进入激活阶段 (%s)", reason or "?"))
 end
 
 -- 处理激活响应 JSON
@@ -1002,15 +1079,24 @@ local function uom_handle_activation_response(payload)
     uom_notify_activation(code, message)
 
     if code == 0 then
+        uom_apply_nfz_from_cloud(false, message)
         uom.activated = true
         uom.state = "READY"
         uom.last_pub_ms = uint32_t(0)
-        gcs:send_text(MAV_SEVERITY.INFO, "UOM: 激活完成，开始上报遥测")
     elseif code == 5 then
         -- 正在激活中，延迟后重试
         uom.activation_sent = false
         uom.activation_send_after_ms = millis() + uint32_t(uom.ACTIVATE_RETRY_MS)
         uom.activate_timeout_ms = uom.activation_send_after_ms + uint32_t(uom.ACTIVATE_TIMEOUT_MS)
+    elseif code == 6 then
+        -- 禁飞区通知：保持 MQTT/遥测，仅 PreArm 禁止解锁
+        uom_apply_nfz_from_cloud(true, message)
+        uom.activated = false
+        if uom.state == "ACTIVATING" then
+            uom.activation_sent = false
+            uom.activation_send_after_ms = millis() + uint32_t(uom.ACTIVATE_RETRY_MS)
+            uom.activate_timeout_ms = uom.activation_send_after_ms + uint32_t(uom.ACTIVATE_TIMEOUT_MS)
+        end
     else
         -- 致命错误：断开重连，冷却后再走激活流程
         uom.activated = false
@@ -1069,15 +1155,12 @@ local function uom_mqtt_dispatch()
                 if uom.state == "ACTIVATING" and uom.activation_sent then
                     uom.activate_timeout_ms = millis() + uint32_t(uom.ACTIVATE_TIMEOUT_MS)
                 end
-                gcs:send_text(MAV_SEVERITY.INFO,
-                    string.format("UOM: DOWN %s", topic))
                 if payload == "" or payload == nil then
-                    gcs:send_text(MAV_SEVERITY.WARNING, "UOM: 激活响应 payload 为空")
+                    gcs:send_text(MAV_SEVERITY.WARNING, "UOM: 激活响应为空")
                 else
                     local code = json_get_number(payload, "code")
                     if code == nil then
-                        gcs:send_text(MAV_SEVERITY.WARNING,
-                            string.format("UOM: 无法解析 code: %s", payload:sub(1, 80)))
+                        gcs:send_text(MAV_SEVERITY.WARNING, "UOM: 激活响应无法解析")
                     end
                     uom_handle_activation_response(payload)
                 end
@@ -1099,7 +1182,7 @@ local function uom_mqtt_recv()
         local chunk = uom.sock:recv(256)
         if chunk == nil then break end
         if #chunk == 0 then
-            gcs:send_text(MAV_SEVERITY.WARNING, "UOM: connection closed by server")
+            gcs:send_text(MAV_SEVERITY.WARNING, "UOM: 服务器断开连接")
             uom.retry_after_ms = millis() + uint32_t(5000)
             uom_close()
             return
@@ -1197,6 +1280,10 @@ uom_close = function()
     uom.subscribed_fcu_id = ""
     uom.mqtt_connected_ms = uint32_t(0)
     uom.id_wait_warn_sent = false
+    uom.in_nfz_zone = false
+    if uom.auth_id then
+        arming:set_aux_auth_passed(uom.auth_id)
+    end
 end
 
 -- MQTT 套接字仍可用（uom_close / 对端断开 / PPP 掉线后必须为 false）
@@ -1253,8 +1340,7 @@ return function()
             return
         end
         if now > uom.connect_timeout_ms then
-            gcs:send_text(MAV_SEVERITY.WARNING, "UOM: connect timeout")
-            uom_close()
+            uom_close()  -- 静默重连，不写 GCS
             return
         end
         if not uom.connect_sent then
@@ -1269,7 +1355,6 @@ return function()
         local ack = uom.sock:recv(4)
         if ack and #ack >= 4 then
             if ack:byte(1) == 0x20 and ack:byte(4) == 0x00 then
-                gcs:send_text(MAV_SEVERITY.INFO, "UOM: MQTT connected")
                 uom.mqtt_connected_ms = now
                 uom.state = "SUBSCRIBING"
                 uom.subscribe_sent = false
@@ -1277,15 +1362,8 @@ return function()
                 uom.last_send_ok_ms = now
             else
                 local rc = ack:byte(4)
-                local rc_msg = "unknown"
-                if rc == 1 then rc_msg = "bad protocol"
-                elseif rc == 2 then rc_msg = "client id rejected"
-                elseif rc == 3 then rc_msg = "server unavailable"
-                elseif rc == 4 then rc_msg = "bad user/pass"
-                elseif rc == 5 then rc_msg = "not authorized"
-                end
                 gcs:send_text(MAV_SEVERITY.ERROR,
-                    string.format("UOM: CONNACK rc=%d (%s)", rc, rc_msg))
+                    string.format("UOM: 连接被拒绝(%d)", rc or 0))
                 uom.retry_after_ms = now + uint32_t(10000)
                 uom_close()
             end
@@ -1304,12 +1382,6 @@ return function()
         if not uom.subscribe_sent then
             local fcu_id = uom_get_fcu_id()
             if #fcu_id < uom.FCU_ID_MIN_LEN then
-                if not uom.id_wait_warn_sent and uom.mqtt_connected_ms > 0 and
-                   (now - uom.mqtt_connected_ms) > uint32_t(5000) then
-                    uom.id_wait_warn_sent = true
-                    gcs:send_text(MAV_SEVERITY.WARNING,
-                        string.format("UOM: 等待完整UAS ID(当前%s)", fcu_id))
-                end
                 return
             end
             local sub_topic = string.format(uom.TOPIC_ACT_DOWN, fcu_id)
@@ -1321,8 +1393,6 @@ return function()
                 uom.subscribe_sent = true
                 uom.subscribe_sent_ms = now
                 uom.subscribed_fcu_id = fcu_id
-                gcs:send_text(MAV_SEVERITY.INFO,
-                    string.format("UOM: 已发送订阅 %s", sub_topic))
             end
         elseif uom.subscribe_sent_ms > 0 and
                (now - uom.subscribe_sent_ms) > uint32_t(uom.SUBACK_TIMEOUT_MS) then
@@ -1349,7 +1419,6 @@ return function()
         odid_poll()
 
         if uom.activation_sent and now > uom.activate_timeout_ms then
-            gcs:send_text(MAV_SEVERITY.WARNING, "UOM: 激活响应超时，重试")
             uom.activation_sent = false
             uom.activation_send_after_ms = now + uint32_t(uom.ACTIVATE_RETRY_MS)
         end
@@ -1357,15 +1426,7 @@ return function()
         if not uom.activation_sent and now >= uom.activation_send_after_ms then
             local ts_s = uom_ts_json()
             if ts_s == "0" then
-                if not uom.gps_warn_sent then
-                    uom.gps_warn_sent = true
-                    local inst = uom_gps_inst_3d()
-                    local st = inst and gps:status(inst) or -1
-                    gcs:send_text(MAV_SEVERITY.WARNING,
-                        string.format("UOM: 无UTC ts inst=%s st=%s",
-                            tostring(inst), tostring(st)))
-                end
-                return
+                return  -- 无 GPS 时间则等待，不写 GCS
             end
             local fcu_id = uom_get_fcu_id()
             -- 飞控 → 云：uav/up/activation/eft/{fcu_id}（协议 3.2 激活请求）
@@ -1380,8 +1441,6 @@ return function()
                 uom.activation_sent = true
                 uom.activate_timeout_ms = now + uint32_t(uom.ACTIVATE_TIMEOUT_MS)
                 uom.last_send_ok_ms = now
-                gcs:send_text(MAV_SEVERITY.INFO,
-                    string.format("UOM: UP %s ts=%s", act_topic, ts_s))
             end
         end
 
@@ -1397,6 +1456,11 @@ return function()
         uom_mqtt_recv()
         if not uom_sock_alive() then return end
 
+        -- 云平台 code=6 后持续维持解锁禁止（与 1noflyzone_checker 鉴权 ID 独立）
+        if uom.in_nfz_zone and uom.auth_id then
+            arming:set_aux_auth_failed(uom.auth_id, UOM_NFZ_ARming_MSG)
+        end
+
         if uom.activated and now - uom.last_pub_ms >= uint32_t(uom.REPORT_MS) then
             local json = uom_build_json()
             local sn = uom_get_fcu_id()
@@ -1408,26 +1472,17 @@ return function()
                 uom.last_pub_ms = now
                 uom.last_send_ok_ms = now
                 uom.publish_count = uom.publish_count + 1
-                if uom.publish_count == 1 or (uom.publish_count % 10 == 0) then
-                    local _uas = odid_get_uas_id()
-                    local _op  = odid_get_operator_id()
-                    local _olat = odid_get_op_lat()
-                    local _olng = odid_get_op_lng()
-                    if _uas  == "" then _uas  = "(empty)" end
-                    if _op   == "" then _op   = "(empty)" end
+                if uom_telemetry_log_milestone(uom.publish_count) then
                     gcs:send_text(MAV_SEVERITY.INFO,
-                        string.format("UOM#%d uas=%s op=%s",
-                            uom.publish_count, _uas, _op))
-                    gcs:send_text(MAV_SEVERITY.INFO,
-                        string.format("UOM#%d olat=%.5f olng=%.5f",
-                            uom.publish_count, _olat, _olng))
+                        string.format("UOM#%d SEND SUCCESS",
+                            uom.publish_count))
                 end
             end
         end
 
         if uom.last_send_ok_ms ~= nil and
            (now - uom.last_send_ok_ms) > uint32_t(60000) then
-            gcs:send_text(MAV_SEVERITY.WARNING, "UOM: send watchdog, reconnecting")
+            gcs:send_text(MAV_SEVERITY.WARNING, "UOM: 发送超时，重连中")
             uom.retry_after_ms = now + uint32_t(5000)
             uom_close()
             return
@@ -1443,84 +1498,21 @@ end
 end)()
 
 --[[
-    AT command mappings for different modem chipsets
+    合宙 Air780E / Air780 AT 指令表（EFT_CAAC 仅使用此模组）
 --]]
-local SimCom = { banner = 'SIMCOM',
-                 cmux = 'AT+CMUX=0\r\n',
-                 setbaud = 'AT+IPR=%u\r\n',
-                 pppopen = 'ATD*99#\r',
-                 cpin = 'AT+CPIN?\r\n',
-                 cpsi = 'AT+CPSI?\r\n',
-                 reset = 'AT+CFUN=1,1\r\n',
-                 cipmode = 'AT+CIPMODE=1\r\n',
-                 cipopen_udp = 'AT+CIPOPEN=0,"UDP","%d.%d.%d.%d",%d,6001\r\n',
-                 cipopen_tcp = 'AT+CIPOPEN=0,"TCP","%d.%d.%d.%d",%d\r\n',
-                 --cgact = 'AT+CGACT?\r\n',
-                 cgerep = 'AT+CGEREP=1,1\r\n',
-                 netopen = 'AT+NETOPEN\r\n',
-                 mccmnc = 'AT+COPS=1,2,"%u"\r\n',
-                 setband_mask = 'AT+CNBP=,0x%x\r\n',
-                 setband_all = 'AT+CNBP=,0x480000000000000000000000000000000000000000000042000007FFFFDF3FFF\r\n',
-                }
-local SimCom2 = { banner = 'R1951',
-                 cmux = 'AT+CMUX=0\r\n',
-                 setbaud = 'AT+IPR=%u\r\n',
-                 pppopen = 'ATD*99#\r',
-                 cpin = 'AT+CPIN?\r\n',
-                 cpsi = 'AT+CPSI?\r\n',
-                 cipmode = 'AT+CACID=0\r\n',
-                 cipopen_tcp = 'AT+CAOPEN=0,0,"TCP","%d.%d.%d.%d",%d\r\n',
-                 cipopen_udp = 'AT+CAOPEN=0,0,"UDP","%d.%d.%d.%d",%d\r\n',
-                 cgact = 'AT+CGACT?\r\n',
-                 cgerep = 'AT+CGEREP=1,1\r\n',
-                 reset = 'AT+CFUN=1,1\r\n',
-                 netopen = "AT+CNACT=0,1\r\n",
-                 netclose = "AT+CNACT=0,0\r\n",
-                 cfun = 'AT+CFUN=1\r\n',
-                 reset_not_baudrate = true,
-                 mccmnc = 'AT+COPS=4,2,"%u"\r\n',
-                 caswitch = 'AT+CASWITCH=0,1\r\n',
-                 setband = 'AT+CBANDCFG="CAT-M",%d\r\n',
-                 setband_all = 'AT+CBANDCFG="CAT-M",1,2,3,4,5,8,12,13,14,18,19,20,25,26,27,28,66,85\r\n',
-                }
--- 合宙不同 AT 固件 banner 略有差异，均视为 Air780
-local Air780 = { banner = 'AirM2M_780E',
-                 banners = { 'AirM2M_780E', 'Air780E', 'Air780', 'AIR780', '780E' },
-                 cmux = nil, -- 'AT+CIPMUX=1\r\n',
-                 setbaud = 'AT+IPR=%u\r\n',
-                 cgact = 'AT+CGACT=1,1\r\n',
-                 pppopen = 'ATD*99#\r',
-                 cpin = 'AT+CPIN?\r\n',
-                 reset = 'AT+CFUN=1,1\r\n',
-                 cipmode = 'AT+CIPMODE=1\r\n',
-                }
-local EC200 = { banner = 'EC200',
-                 cmux = 'AT+CMUX=0\r\n',
---                 setbaud = 'AT+IPR=%u\r\n', AT+IPR not working? gives error
---                 cgact = 'AT+QIACT=1\r\n',
-                 pppopen = 'ATD*99#\r',
-                 cpsi = 'AT+QENG="servingcell"\r\n',
-                 cipmode = nil,
-                 cpin = 'AT+CPIN?\r\n',
-                 reset = 'AT+CFUN=1,1\r\n',
-                 cipopen_tcp = 'AT+QIOPEN=1,0,"TCP","%d.%d.%d.%d",%d,0,2\r\n',
-                 cipopen_udp = 'AT+QIOPEN=1,0,"UDP","%d.%d.%d.%d",%d,6001,2\r\n',
-                 cipclose = 'AT+QICLOSE=1\r\n',
-                 mccmnc = 'AT+COPS=4,2,"%u"\r\n',
-                 setband_mask = 'AT+QCFG="band",0,0x%x\r\n',
-                 setband_all = 'AT+QCFG="band",0,0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\r\n',
-                }
-
-local default_modem = { reset = 'AT+CFUN=1,1\r\r' }
-
-local modem_list = {
-    ["SimCom"] = SimCom,
-    ["SimCom2"] = SimCom2,
-    ["Air780"] = Air780,
-    ["EC200"] = EC200,
+local Air780 = {
+    banner = 'AirM2M_780E',
+    banners = { 'AirM2M_780E', 'Air780E', 'Air780', 'AIR780', '780E' },
+    cmux = nil,
+    setbaud = 'AT+IPR=%u\r\n',
+    cgact = 'AT+CGACT=1,1\r\n',
+    pppopen = 'ATD*99#\r',
+    cpin = 'AT+CPIN?\r\n',
+    reset = 'AT+CFUN=1,1\r\n',
+    cipmode = 'AT+CIPMODE=1\r\n',
 }
 
-local modem = default_modem
+local modem = nil  -- nil=尚未识别；识别成功后指向 Air780
 
 --[[
     return true if an option is enabled
@@ -1561,9 +1553,8 @@ local function check_hw_params()
             warn_count = warn_count + 1
         end
     end
-    if warn_count == 0 then
-        gcs:send_text(MAV_SEVERITY.INFO, "LTE: 系统参数检查通过")
-    else
+    -- 仅参数异常时告警，通过时不提示
+    if warn_count > 0 then
         gcs:send_text(MAV_SEVERITY.WARNING,
             string.format("LTE: 发现%d项参数异常，请按SOP修正后重启", warn_count))
     end
@@ -1575,6 +1566,8 @@ if LTE_ENABLE:get() == 0 then
 end
 
 check_hw_params()
+-- 启动先清零，避免沿用上电前 SD 里残留的 '1' 导致禁飞脚本过早 HTTP
+write_lte_ppp_ready_flag(false)
 
 local uart = serial:find_serial(LTE_SERPORT_FIXED)
 if not uart then
@@ -1590,6 +1583,34 @@ if not ser_device then
 end
 
 local step = "ATI"
+
+-- GCS 仅上报少数关键节点，避免 step/AT 过程刷屏
+local lte_link_gcs_done = false    -- 已提示 4G 已连接
+
+local function lte_gcs_link_up_once()
+    if lte_link_gcs_done then
+        return
+    end
+    lte_link_gcs_done = true
+    gcs:send_text(MAV_SEVERITY.INFO, "LTE: 4G已连接")
+end
+
+local function lte_gcs_link_clear()
+    lte_link_gcs_done = false
+end
+
+-- ATI 未识别到 Air780 时提示（限频，避免刷屏）
+local lte_4g_nf_last_ms = uint32_t(0)
+local LTE_4G_NF_GAP_MS = 15000
+
+local function lte_gcs_4g_not_found()
+    local now = millis()
+    if lte_4g_nf_last_ms > 0 and (now - lte_4g_nf_last_ms):toint() < LTE_4G_NF_GAP_MS then
+        return
+    end
+    lte_4g_nf_last_ms = now
+    gcs:send_text(MAV_SEVERITY.WARNING, "没有找到4G模块，请检查")
+end
 
 local stats = { bytes_in = 0, bytes_out = 0 }
 
@@ -1763,15 +1784,16 @@ end
     send an appropriate data reset for the protocol
 --]]
 local function send_data_reset()
-    if modem.reset then
-        AT_send(modem.reset)
-        if not modem.reset_not_baudrate then
+    local profile = modem or Air780
+    if profile.reset then
+        lte_gcs_link_clear()
+        AT_send(profile.reset)
+        if not profile.reset_not_baudrate then
             -- a reset changes the baud rate to the initial baud rate
             uart:begin(LTE_IBAUD:get())
         end
         -- and clears cmux state
         found_cmux = false
-        gcs:send_text(MAV_SEVERITY.INFO, "LTE_modem: sent reset")
         return
     end
 end
@@ -1917,25 +1939,22 @@ local ati_sequence = 0
 
 -- reset back to ATI step
 local function reset_to_ATI()
+    ppp_connected_ms = nil
+    write_lte_ppp_ready_flag(false)
     send_data_reset()
     step = "ATI"
-    modem = default_modem
+    modem = nil
     found_cmux = false
 end
 
---[[
-    check an ATI response against modem banner strings to auto-detect
-    modem type
---]]
+-- 根据 ATI 回显确认是否为 Air780
 local function check_modem_banner(s)
-    for model, m in pairs(modem_list) do
-        local keys = m.banners or { m.banner }
-        for i = 1, #keys do
-            if keys[i] and s:find(keys[i], 1, true) then
-                modem = m
-                gcs:send_text(MAV_SEVERITY.INFO, "LTE_modem: found modem: " .. model)
-                return
-            end
+    local keys = Air780.banners or { Air780.banner }
+    for i = 1, #keys do
+        if keys[i] and s:find(keys[i], 1, true) then
+            modem = Air780
+            lte_4g_nf_last_ms = uint32_t(0)
+            return
         end
     end
 end
@@ -1956,10 +1975,10 @@ function step_ATI()
         send_data_reset()
     end
     local s = uart_read()
-    if s and modem == default_modem then
+    if s and modem == nil then
         check_modem_banner(s)
     end
-    if modem ~= default_modem then
+    if modem ~= nil then
         if not cmux_enabled() then
             step = "BAUD"
         else
@@ -1970,20 +1989,16 @@ function step_ATI()
     if s and #s >= 4 and s:byte(1) == FLAG and s:byte(-1) == FLAG then
         -- already in mux mode
         found_cmux = true
-        gcs:send_text(MAV_SEVERITY.INFO, "LTE_modem: in CMUX mode")
+        -- CMUX 就绪不提示
         log_data("{INCMUX}", '***')
         AT_send('ATI\r')
         return
     end
-    -- 完全无回包：约每 10s 提示（与「有数据无 banner」区分）
-    if (not s or #s == 0) and ati_sequence > 0 and ati_sequence % 9 == 0 then
-        gcs:send_text(MAV_SEVERITY.WARNING,
-            "LTE_modem: ATI 无串口回包，查 4G 供电/TX-RX/SERIAL1_PROTOCOL=28/BRD_SER1_RTSCTS=0")
-    end
-    -- 有数据但识别不了模组：约每 15s 提示一次
-    if s and #s > 0 and ati_sequence % 15 == 0 then
-        gcs:send_text(MAV_SEVERITY.WARNING,
-            string.format("LTE_modem: ATI got %u bytes, no Air780 banner", #s))
+    -- 未识别到 Air780（无回包 / 有数据但非 Air780 回显）
+    if ati_sequence > 0 and ati_sequence % 15 == 0 then
+        if not s or #s == 0 or modem == nil then
+            lte_gcs_4g_not_found()
+        end
     end
     if ati_sequence % 3 == 2 then
         uart_write('+++')
@@ -2003,10 +2018,7 @@ function step_ATI()
     -- 长时间无应答：软复位模组（退出 PPP 数据模式）
     if ati_sequence > 0 and ati_sequence % 12 == 0 then
         uart_write('AT+CFUN=1,1\r\n')
-        gcs:send_text(MAV_SEVERITY.WARNING, "LTE_modem: ATI timeout, reset modem")
-    elseif ati_sequence == 30 then
-        gcs:send_text(MAV_SEVERITY.ERROR,
-            "LTE_modem: no AT reply on SERIAL1, check 4G wire/power/AT fw")
+        lte_gcs_4g_not_found()
     end
     ati_sequence = ati_sequence + 1
 end
@@ -2103,7 +2115,7 @@ function step_CREG()
         end
         local reg = s:match('CREG: %d,(%d+)')
         if reg == "1" or reg == "5" then
-            gcs:send_text(MAV_SEVERITY.INFO, 'LTE_modem: CREG OK')
+            -- CREG 就绪不提示
             if LTE_PROTOCOL:get() == PPP then
                 if modem.cgact then
                     step = "CGACT"
@@ -2132,7 +2144,7 @@ function step_CREG()
                 [9] = "9: registered for CSFB not preferred",
             }
             local status = status_map[tonumber(reg)] or (tostring(reg) .. ": unknown status")
-            gcs:send_text(MAV_SEVERITY.INFO, "CREG: " .. status)
+            -- CREG 状态不提示
             if reg == "0" then
                 AT_send("AT+CFUN=1\r\n")
                 AT_send("AT+COPS?\r\n")
@@ -2171,7 +2183,7 @@ function step_CGACT()
         return
     end
     if s and s:find('\r\nOK\r\n') then
-        gcs:send_text(MAV_SEVERITY.INFO, 'LTE_modem: CGACT OK')
+        -- CGACT 就绪不提示
         if LTE_PROTOCOL:get() == PPP then
             step = "PPPOPEN"
             last_data_ms = millis()
@@ -2192,7 +2204,7 @@ end
 function step_CIPMODE()
     local s = uart_read()
     if s:find('AT+CACID=0,0') then
-        gcs:send_text(MAV_SEVERITY.INFO, 'LTE_modem: network context set')
+        -- 网络上下文就绪不提示
         step = "NETOPEN"
         return
     end
@@ -2200,7 +2212,7 @@ function step_CIPMODE()
         return
     end
     if s:find('\r\r\nOK\r') then
-        gcs:send_text(MAV_SEVERITY.INFO, 'LTE_modem: transparent mode set')
+        -- 透明模式就绪不提示
         step = "NETOPEN"
         return
     end
@@ -2216,7 +2228,7 @@ function step_CMUX()
         if s:find("CME ERROR") then
             AT_send('AT+CFUN=1\r\n')
         elseif #s >= 4 and (cmux.parse_cmux_frame(s) or s:find('CMUX=0\r\r\nOK\r')) then
-            gcs:send_text(MAV_SEVERITY.INFO, 'LTE_modem: CMUX mode set')
+            -- CMUX 模式就绪不提示
             -- send SABM frames to establish the DLCs
             cmux.send_sabm()
             step = "BAUD"
@@ -2244,7 +2256,7 @@ function step_NETOPEN()
         return
     end
     if s and (s:find('NETOPEN\r') or s:find('ACTIVE\r')) and s:find('OK\r') then
-        gcs:send_text(MAV_SEVERITY.INFO, 'LTE_modem: network opened')
+        -- NETOPEN 就绪不提示
         step = "CIPOPEN"
         return
     end
@@ -2257,11 +2269,13 @@ end
 function step_PPPOPEN()
     local s = uart_read()
     if s and modem.cgact and s:find("\r\nNO CARRIER\r\n") then
+        write_lte_ppp_ready_flag(false)
         send_data_reset()
         step = "ATI"
         return
     end
     if s and s:find("CME ERROR:") then
+        write_lte_ppp_ready_flag(false)
         send_data_reset()
         step = "ATI"
         return
@@ -2271,9 +2285,10 @@ function step_PPPOPEN()
     end
 
     if s and s:find('CONNECT') then
-        gcs:send_text(MAV_SEVERITY.INFO, 'LTE_modem: connected')
+        lte_gcs_link_up_once()
         reset_buffers()
         step = "CONNECTED"
+        ppp_connected_ms = nil  -- 进入 CONNECTED 后计时，延迟写 NFZ flag
         return
     end
     data_send(modem.pppopen)
@@ -2299,7 +2314,7 @@ function step_CIPOPEN()
             return
         end
         if s:find('CONNECT') or (s:find('+CAOPEN: 0,0') and s:find('OK\r')) then
-            gcs:send_text(MAV_SEVERITY.INFO, 'LTE_modem: connected')
+            lte_gcs_link_up_once()
             reset_buffers()
             step = "CONNECTED"
             return
@@ -2346,7 +2361,7 @@ function check_CGACT(s)
     if ctx then
         ctx = tonumber(ctx) or 0
         active = tonumber(active) or 0
-        gcs:send_text(MAV_SEVERITY.INFO, string.format("CGACT: %d,%d", ctx, active))
+        -- CGACT 查询结果不提示
         return true
     end
     return false
@@ -2481,18 +2496,32 @@ function step_CONNECTED()
         log_data(s, '<<<')
     end
     if s and s:find('\r\nCLOSED\r\n') then
-        gcs:send_text(MAV_SEVERITY.INFO, 'LTE_modem: connection closed, reconnecting')
+        lte_gcs_link_clear()
+        gcs:send_text(MAV_SEVERITY.WARNING, 'LTE: 断开，重连中')
         uom_close()
+        ppp_connected_ms = nil
+        write_lte_ppp_ready_flag(false)
         step = "CIPOPEN"
         return
     end
     if s and s:find('PPPD: DISCONNECTED\r\n') then
-        gcs:send_text(MAV_SEVERITY.INFO, 'LTE_modem: PPP closed, reconnecting')
+        lte_gcs_link_clear()
+        gcs:send_text(MAV_SEVERITY.WARNING, 'LTE: PPP断开，重连中')
         uom_close()
+        ppp_connected_ms = nil
+        write_lte_ppp_ready_flag(false)
         step = "PPPOPEN"
         return
     end
     local now_ms = millis()
+    -- PPP 模式：CONNECT 满 PPP_NFZ_FLAG_DELAY_MS 后再通知禁飞脚本（减轻 PPP 抢跑）
+    if LTE_PROTOCOL:get() == PPP then
+        if not ppp_connected_ms then
+            ppp_connected_ms = now_ms
+        elseif (now_ms - ppp_connected_ms):toint() >= PPP_NFZ_FLAG_DELAY_MS then
+            write_lte_ppp_ready_flag(true)
+        end
+    end
     if s and #s > 0 then
         if not cmux_enabled() then
             pending_to_fc = pending_to_fc .. s
@@ -2620,7 +2649,6 @@ end
 
 step_count = 0
 last_step = nil
-last_logged_step = nil
 
 function run_step()
     if change_baud then
@@ -2639,19 +2667,12 @@ function run_step()
     if step == last_step and step ~= "ATI" then
         step_count = step_count + 1
         if step_count > 50 then
-            gcs:send_text(MAV_SEVERITY.INFO, "LTE_modem: step reset")
             reset_to_ATI()
         end
     else
         step_count = 0
     end
     last_step = step
-
-    -- 仅步骤变化时打印，避免 ATI 阶段每秒刷屏
-    if step ~= last_logged_step then
-        last_logged_step = step
-        gcs:send_text(MAV_SEVERITY.INFO, string.format('LTE_modem: step %s', step))
-    end
 
     if step == "ATI" then
         step_ATI()
@@ -2720,7 +2741,5 @@ local function update()
     uart_write_pending()
     return update, delay
 end
-
-gcs:send_text(MAV_SEVERITY.INFO, 'LTE_modem: starting')
 
 return update,500
