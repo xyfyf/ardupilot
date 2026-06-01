@@ -70,6 +70,14 @@ extern AP_IOMCU iomcu;
 
 #define TELEM_IC_SAMPLE 16
 
+#ifndef HAL_EARLY_PWM_1000_MASK
+#define HAL_EARLY_PWM_1000_MASK 0
+#endif
+
+#ifndef HAL_EARLY_PWM_FREQ_HZ
+#define HAL_EARLY_PWM_FREQ_HZ 0
+#endif
+
 struct RCOutput::pwm_group RCOutput::pwm_group_list[] = { HAL_PWM_GROUPS };
 #if HAL_SERIAL_ESC_COMM_ENABLED
 struct RCOutput::irq_state RCOutput::irq;
@@ -142,6 +150,7 @@ void RCOutput::init()
         if (group.ch_mask != 0) {
             pwmStart(group.pwm_drv, &group.pwm_cfg);
             group.pwm_started = true;
+            set_early_pwm_1000us(group);
         }
         chVTObjectInit(&group.dma_timeout);
     }
@@ -434,7 +443,48 @@ void RCOutput::set_freq_group(pwm_group &group)
         group.pwm_started = true;
     }
     pwmChangePeriod(group.pwm_drv, group.pwm_cfg.period);
+    set_early_pwm_1000us(group);
 }
+
+#if HAL_EARLY_PWM_1000_MASK
+void RCOutput::set_early_pwm_1000us(pwm_group &group)
+{
+    // Some ESCs need a valid low-throttle PWM signal as soon as the
+    // timer starts, before the normal motor code has written its first PWM.
+    const uint32_t early_period = (HAL_EARLY_PWM_FREQ_HZ > 0) ?
+        group.pwm_cfg.frequency / HAL_EARLY_PWM_FREQ_HZ :
+        group.pwm_cfg.period;
+
+    if (group.pwm_cfg.period != early_period) {
+        group.pwm_cfg.period = early_period;
+        pwmChangePeriod(group.pwm_drv, group.pwm_cfg.period);
+    }
+
+    for (uint8_t j = 0; j < 4; j++) {
+        const uint8_t chan = group.chan[j];
+        if (chan == CHAN_DISABLED) {
+            continue;
+        }
+        const uint8_t output_chan = chan + chan_offset;
+        if (output_chan >= max_channels) {
+            continue;
+        }
+        if (HAL_EARLY_PWM_1000_MASK & (1U << output_chan)) {
+            if (hal.scheduler->is_system_initialized() && last_sent[output_chan] != 0) {
+                continue;
+            }
+            const uint32_t width = (group.pwm_cfg.frequency / 1000000U) * 1000U;
+            pwmEnableChannel(group.pwm_drv, j, width);
+            period[chan] = 1000;
+        }
+    }
+}
+#else
+void RCOutput::set_early_pwm_1000us(pwm_group &group)
+{
+    (void)group;
+}
+#endif
 
 /*
   set output frequency in HZ for a set of channels given by a mask
@@ -699,6 +749,14 @@ void RCOutput::disable_ch(uint8_t chan)
     uint8_t i;
     pwm_group *grp = find_chan(chan, i);
     if (grp) {
+#if HAL_EARLY_PWM_1000_MASK
+        if (chan < max_channels &&
+            (HAL_EARLY_PWM_1000_MASK & (1U << chan)) &&
+            last_sent[chan] == 0) {
+            set_early_pwm_1000us(*grp);
+            return;
+        }
+#endif
         pwmDisableChannel(grp->pwm_drv, i);
         en_mask &= ~(1U<<(chan - chan_offset));
         grp->en_mask &= ~(1U << (chan - chan_offset));

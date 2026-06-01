@@ -671,6 +671,9 @@ private:
     // setup output frequency for a group
     void set_freq_group(pwm_group &group);
 
+    // apply board-specific early PWM output during startup
+    void set_early_pwm_1000us(pwm_group &group);
+
     // safety switch state
     AP_HAL::Util::safety_state safety_state;
     uint32_t safety_update_ms;

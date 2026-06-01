@@ -107,6 +107,9 @@ define FATFS_HAL_DEVICE SDCD1
 define HAL_OS_FATFS_IO 1
 
 # PWM Output
+# Output PWM1-PWM6 at 1000us/400Hz immediately after timer start.
+define HAL_EARLY_PWM_1000_MASK 0x3F
+define HAL_EARLY_PWM_FREQ_HZ 400
 # Main (D1-D8)
 PA8  TIM1_CH1 TIM1 PWM(1)  GPIO(50)
 PB11 TIM2_CH4 TIM2 PWM(2)  GPIO(51)
