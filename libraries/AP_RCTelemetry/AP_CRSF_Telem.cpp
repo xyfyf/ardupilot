@@ -2199,12 +2199,14 @@ void AP_CRSF_Telem::calc_radar_data()
 #endif
 
     // --- 2. 低电量检测 ---
+    // 仅按当前电压判定：电压回升至阈值上方（含 0.1V 滞回）后自动清除 bit28。
+    // 不再使用 battery.has_failsafed()，该接口一旦触发即锁死直到重启或 BATTERY_RESET。
     const AP_BattMonitor &battery = AP::battery();
-    bool low_batt = battery.has_failsafed();
-    if (!low_batt) {
-        // 每 1s 查一次 BATT_LOW_VOLT 参数，避免高频 O(n) 查找
-        static float s_low_volt_threshold = 0.0f;
-        static uint32_t s_volt_check_ms = 0;
+    static bool s_low_batt_latched = false;
+    static float s_low_volt_threshold = 0.0f;
+    static float s_crt_volt_threshold = 0.0f;
+    static uint32_t s_volt_check_ms = 0;
+    {
         const uint32_t now_ms = AP_HAL::millis();
         if (now_ms - s_volt_check_ms >= 1000U) {
             s_volt_check_ms = now_ms;
@@ -2213,14 +2215,31 @@ void AP_CRSF_Telem::calc_radar_data()
             if (p != nullptr && ptype == AP_PARAM_FLOAT) {
                 s_low_volt_threshold = ((AP_Float *)p)->get();
             }
-        }
-        if (s_low_volt_threshold > 0.5f) {
-            float voltage = battery.voltage(0);
-            if (voltage > 0.5f && voltage < s_low_volt_threshold) {
-                low_batt = true;
+            p = AP_Param::find("BATT_CRT_VOLT", &ptype);
+            if (p != nullptr && ptype == AP_PARAM_FLOAT) {
+                s_crt_volt_threshold = ((AP_Float *)p)->get();
             }
         }
     }
+    {
+        const float voltage = battery.voltage(0);
+        const float trip_thresh = MAX(s_low_volt_threshold, s_crt_volt_threshold);
+        if (trip_thresh > 0.5f && voltage > 0.5f) {
+            if (s_low_batt_latched) {
+                // 已告警：电压回升超过阈值 +0.1V 才清除（滞回防抖）
+                if (voltage >= trip_thresh + 0.1f) {
+                    s_low_batt_latched = false;
+                }
+            } else {
+                if (voltage < trip_thresh) {
+                    s_low_batt_latched = true;
+                }
+            }
+        } else if (trip_thresh <= 0.5f) {
+            s_low_batt_latched = false;
+        }
+    }
+    const bool low_batt = s_low_batt_latched;
 
     // --- 3. 避障参数（每 1s 缓存）---
     static float s_avoid_dist_max = 0.0f;
