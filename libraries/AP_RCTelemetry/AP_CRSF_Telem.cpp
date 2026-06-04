@@ -2107,12 +2107,30 @@ static void radar_pack_motor_loss_flags(uint8_t &payload4, uint8_t &payload5)
 }
 
 /*
+  飞控完成自检前不向 ELRS 上报扩展告警（避免上电阶段罗盘/GPS 等误报）
+ */
+static bool radar_warnings_enabled(void)
+{
+    if (AP_Notify::flags.initialising) {
+        return false;
+    }
+    if (!AP_Notify::flags.pre_arm_check) {
+        return false;
+    }
+    return true;
+}
+
+/*
   打包 payload[4]/payload[5] 告警位
  */
 static void radar_pack_warning_flags(uint8_t &payload4, uint8_t &payload5)
 {
     payload4 = 0;
     payload5 = 0;
+
+    if (!radar_warnings_enabled()) {
+        return;
+    }
 
     if (radar_wind_sway_excessive()) {
         payload4 |= (1U << 0);
