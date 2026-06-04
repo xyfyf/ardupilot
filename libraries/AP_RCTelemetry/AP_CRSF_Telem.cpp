@@ -2021,25 +2021,60 @@ static bool radar_wind_sway_excessive(void)
 
 /*
   罗盘未校准或一致性/健康异常（payload[4] bit2）
+  判定口径与飞控 pre-arm（AP_Arming::compass_checks）保持一致：
+   1) 若 use_for_yaw(0)==false 视为正常（用户禁用罗盘 → 不告警）
+   2) healthy / configured(failure_msg) / consistent 任一失败视为异常
+   3) Copter 永远要求 configured；Plane/Rover 若 COMPASS_LEARN==INFLIGHT 则跳过
+   4) 连续 RADAR_COMPASS_DEBOUNCE 次（约 1s）异常才置位，避免开机/瞬时跳变误报
  */
 static bool radar_compass_abnormal(void)
 {
 #if AP_COMPASS_ENABLED
+    static uint8_t fail_count = 0;
+    static const uint8_t RADAR_COMPASS_DEBOUNCE = 5U; // ~1s @5Hz 调度
+
     Compass &compass = AP::compass();
     if (!compass.available()) {
+        fail_count = 0;
         return false;
     }
+    if (!compass.use_for_yaw(0)) {
+        // 用户禁用罗盘，与 pre-arm 行为一致：直接视为正常
+        fail_count = 0;
+        return false;
+    }
+
+    bool abnormal = false;
     if (!compass.healthy()) {
-        return true;
-    }
-    if (!compass.configured(0)) {
-        return true;
-    }
-    if (compass.get_count() > 0 && !compass.consistent()) {
-        return true;
-    }
+        abnormal = true;
+    } else {
+#if APM_BUILD_COPTER_OR_HELI || APM_BUILD_TYPE(APM_BUILD_Blimp)
+        const bool need_configured = true;
+#else
+        const bool need_configured = !compass.learn_offsets_enabled();
 #endif
+        if (need_configured) {
+            char failure_msg[64] = {};
+            if (!compass.configured(failure_msg, ARRAY_SIZE(failure_msg))) {
+                abnormal = true;
+            }
+        }
+        if (!abnormal && compass.get_count() > 0 && !compass.consistent()) {
+            abnormal = true;
+        }
+    }
+
+    if (abnormal) {
+        if (fail_count < RADAR_COMPASS_DEBOUNCE) {
+            fail_count++;
+        }
+    } else {
+        fail_count = 0;
+    }
+    return fail_count >= RADAR_COMPASS_DEBOUNCE;
+#else
     return false;
+#endif
 }
 
 /*
