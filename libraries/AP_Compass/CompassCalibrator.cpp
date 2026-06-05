@@ -250,19 +250,37 @@ void CompassCalibrator::pull_sample()
         return;
     }
 
-    // 两阶段姿态过滤：仅在 STEP_ONE 采集阶段约束姿态
-    // STEP_TWO 期间 thin_samples() 会删掉部分样本，补足样本时不限姿态
+    // ---- 陀螺仪旋转积分：每帧在姿态过滤前执行，确保完整记录旋转 ----
+    // 陀螺仪完全独立于罗盘，不受 EKF yaw 不可靠问题影响
+    if (_status == Status::RUNNING_STEP_ONE) {
+        const uint32_t now_ms = AP_HAL::millis();
+        if (_rot_tracking_active) {
+            const float dt = constrain_float((now_ms - _rot_last_time_ms) * 1.0e-3f, 0.0f, 0.2f);
+            const Vector3f gyro = AP::ahrs().get_gyro();
+            if (_phase == 0) {
+                // 水平阶段：主要围绕机体Z轴（偏航方向）旋转
+                _phase0_rot_accum_rad += fabsf(gyro.z) * dt;
+            } else {
+                // 朝下阶段：机体倾斜，追踪所有轴旋转总量
+                _phase1_rot_accum_rad += gyro.length() * dt;
+            }
+        }
+        _rot_last_time_ms    = now_ms;
+        _rot_tracking_active = true;
+    }
+
+    // ---- 姿态过滤（STEP_ONE 阶段） ----
     if (_status == Status::RUNNING_STEP_ONE) {
         const float pitch_rad = mag_sample.att.get_pitch_rad();
         if (_phase == 0) {
             // 阶段0：水平旋转，pitch > -20°
             if (pitch_rad < COMPASS_CAL_PHASE1_PITCH_MIN) {
-                return;  // 未水平，丢弃
+                return;
             }
         } else {
             // 阶段1：机头朝下旋转，pitch < -30°
             if (pitch_rad > COMPASS_CAL_PHASE2_PITCH_MAX) {
-                return;  // 俯仰不够，丢弃
+                return;
             }
         }
     }
@@ -275,13 +293,25 @@ void CompassCalibrator::pull_sample()
     _sample_buffer[_samples_collected] = mag_sample;
     _samples_collected++;
 
-    // 阶段0：样本收满后切换到阶段1
-    // accept_sample() 的间距约束已保证 30 个点覆盖足够大的弧度，无需额外 yaw 追踪
+    // 阶段0：样本收满 且 陀螺仪已记录 ≥340° 旋转，才切换到阶段1
     if (_phase == 0) {
         _phase1_samples++;
-        if (_phase1_samples >= COMPASS_CAL_PHASE1_SAMPLES) {
+        const bool enough_samples = (_phase1_samples >= COMPASS_CAL_PHASE1_SAMPLES);
+        const bool full_rotation  = (_phase0_rot_accum_rad >= (340.0f * DEG_TO_RAD));
+        if (enough_samples && full_rotation) {
             _phase = 1;
+            _rot_tracking_active = false;  // 重置，重新开始阶段1计时
             GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "MagCal #%u: 水平完成 请机头朝下旋转", (unsigned)(_compass_idx + 1));
+        }
+    }
+    // 阶段1：若样本收满但旋转未达 340°，撤销本次入库，继续等待旋转
+    else {
+        const uint16_t phase2_needed  = COMPASS_CAL_NUM_SAMPLES - COMPASS_CAL_PHASE1_SAMPLES;
+        const uint16_t phase2_have    = _samples_collected - _phase1_samples;
+        const bool     phase2_full    = (phase2_have >= phase2_needed);
+        const bool     full_rotation  = (_phase1_rot_accum_rad >= (340.0f * DEG_TO_RAD));
+        if (phase2_full && !full_rotation) {
+            _samples_collected--;  // 未转满，撤销
         }
     }
 }
@@ -413,6 +443,10 @@ void CompassCalibrator::reset_state()
 
     _phase = 0;
     _phase1_samples = 0;
+    _phase0_rot_accum_rad = 0.0f;
+    _phase1_rot_accum_rad = 0.0f;
+    _rot_last_time_ms     = 0;
+    _rot_tracking_active  = false;
 
     memset(_completion_mask, 0, sizeof(_completion_mask));
     initialize_fit();

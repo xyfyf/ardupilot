@@ -264,6 +264,12 @@ private:
     uint8_t  _phase;            // 当前采样阶段
     uint16_t _phase1_samples;   // 阶段0已接受样本数
 
+    // 陀螺仪旋转追踪（不依赖罗盘/EKF，可靠）
+    float    _phase0_rot_accum_rad;  // 阶段0累计旋转量(rad)
+    float    _phase1_rot_accum_rad;  // 阶段1累计旋转量(rad)
+    uint32_t _rot_last_time_ms;      // 上次积分时间戳
+    bool     _rot_tracking_active;   // 积分追踪是否激活
+
     Status _requested_status;
     bool   _status_set_requested;
 
