@@ -340,6 +340,11 @@ private:
     // crsf v3 decoding
     void decode_variable_bit_channels(const uint8_t* data, uint8_t frame_length, uint8_t nchannels, uint16_t *values);
 
+#if AP_CRSF_ELRS_RAW_AUX15_16_ENABLED
+    // ELRS CH15/CH16 透传 0-2047 原始 CRSF 数值
+    static void apply_raw_aux15_16(const uint8_t *payload, uint16_t *channels);
+#endif
+
     void write_frame(Frame* frame);
     void start_uart();
     AP_HAL::UARTDriver* get_current_UART() { return (_uart ? _uart : get_available_UART()); }

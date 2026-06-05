@@ -133,6 +133,9 @@ protected:
     // decode channels from the standard 11bit format (used by CRSF and SBUS)
     static void decode_11bit_channels(const uint8_t* data, uint8_t nchannels, uint16_t *values, uint16_t mult, uint16_t div, uint16_t offset);
 
+    // 从 CRSF 11bit 打包数据中提取单路原始值 (0-2047)
+    static uint16_t decode_11bit_channel_raw(const uint8_t* data, uint8_t channel_index);
+
 private:
     uint32_t rc_input_count;
     uint32_t last_rc_input_count;

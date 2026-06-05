@@ -157,6 +157,23 @@ static const char* get_frame_type(uint8_t byte, uint8_t subtype = 0)
 #define CRSF_DIGITAL_CHANNEL_MIN 172
 #define CRSF_DIGITAL_CHANNEL_MAX 1811
 
+// ELRS 扩展 Aux 通道索引 (0-based: CH15=14, CH16=15)
+#define CRSF_ELRS_RAW_AUX_CH15_INDEX 14U
+#define CRSF_ELRS_RAW_AUX_CH16_INDEX 15U
+
+#if AP_CRSF_ELRS_RAW_AUX15_16_ENABLED
+/*
+  将 CH15/CH16 替换为 CRSF 11bit 原始值 (0-2047)，跳过 TICKS_TO_US 映射
+ */
+void AP_RCProtocol_CRSF::apply_raw_aux15_16(const uint8_t *payload, uint16_t *channels)
+{
+    channels[CRSF_ELRS_RAW_AUX_CH15_INDEX] =
+        decode_11bit_channel_raw(payload, CRSF_ELRS_RAW_AUX_CH15_INDEX);
+    channels[CRSF_ELRS_RAW_AUX_CH16_INDEX] =
+        decode_11bit_channel_raw(payload, CRSF_ELRS_RAW_AUX_CH16_INDEX);
+}
+#endif
+
 #define CRSF_BAUDRATE_1MBIT      1000000U
 #define CRSF_BAUDRATE_2MBIT      2000000U
 
@@ -453,6 +470,9 @@ bool AP_RCProtocol_CRSF::decode_crsf_packet()
         case CRSF_FRAMETYPE_RC_CHANNELS_PACKED:
             // scale factors defined by TBS - TICKS_TO_US(x) ((x - 992) * 5 / 8 + 1500)
             decode_11bit_channels((const uint8_t*)(&_frame.payload), CRSF_MAX_CHANNELS, _channels, 5U, 8U, 880U);
+#if AP_CRSF_ELRS_RAW_AUX15_16_ENABLED
+            apply_raw_aux15_16((const uint8_t*)(&_frame.payload), _channels);
+#endif
             _crsf_v3_active = false;
             rc_active = !_uart; // only accept RC data if we are not in standalone mode
             break;
@@ -581,8 +601,17 @@ void AP_RCProtocol_CRSF::decode_variable_bit_channels(const uint8_t* payload, ui
         if (uint8_t(channel_data->starting_channel + n) >= CRSF_MAX_CHANNELS) {
             return;
         }
-        _channels[channel_data->starting_channel + n] =
-            uint16_t(channelScale * float(uint16_t(readValue & channelMask)) + 988);
+#if AP_CRSF_ELRS_RAW_AUX15_16_ENABLED
+        const uint8_t ch_idx = channel_data->starting_channel + n;
+        if (ch_idx == CRSF_ELRS_RAW_AUX_CH15_INDEX || ch_idx == CRSF_ELRS_RAW_AUX_CH16_INDEX) {
+            // CRSFv3 子集帧：CH15/CH16 保留位域原始值，不做 +988 缩放
+            _channels[ch_idx] = uint16_t(readValue & channelMask);
+        } else
+#endif
+        {
+            _channels[channel_data->starting_channel + n] =
+                uint16_t(channelScale * float(uint16_t(readValue & channelMask)) + 988);
+        }
         readValue >>= channelBits;
         bitsMerged -= channelBits;
     }

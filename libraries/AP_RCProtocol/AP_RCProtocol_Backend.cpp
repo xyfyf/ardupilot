@@ -118,6 +118,20 @@ void AP_RCProtocol_Backend::decode_11bit_channels(const uint8_t* data, uint8_t n
     }
 }
 
+/*
+  从 CRSF RC_CHANNELS_PACKED 帧中提取单路 11bit 原始通道值 (0-2047)
+ */
+uint16_t AP_RCProtocol_Backend::decode_11bit_channel_raw(const uint8_t* data, uint8_t channel_index)
+{
+    const uint32_t bit_offset = uint32_t(channel_index) * 11U;
+    const uint8_t byte_idx = bit_offset / 8U;
+    const uint8_t shift = bit_offset % 8U;
+    const uint32_t value = uint32_t(data[byte_idx]) |
+                           (uint32_t(data[byte_idx + 1U]) << 8U) |
+                           (uint32_t(data[byte_idx + 2U]) << 16U);
+    return uint16_t((value >> shift) & 0x7FFU);
+}
+
 #if AP_VIDEOTX_ENABLED
 // configure the video transmitter, the input values are Spektrum-oriented
 void AP_RCProtocol_Backend::configure_vtx(uint8_t band, uint8_t channel, uint8_t power, uint8_t pitmode)
