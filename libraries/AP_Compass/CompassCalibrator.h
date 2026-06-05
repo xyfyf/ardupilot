@@ -10,14 +10,14 @@
 #define COMPASS_CAL_NUM_ELLIPSOID_PARAMS    9
 // 默认 300，但"两圆 360°"几何上凑不到 300 个合格样本，飞控会卡在采样阶段。
 // 仅适用于本项目自定义固件 (EFT_CAAC 等)，更高精度场景请改回 300。
-#define COMPASS_CAL_NUM_SAMPLES             40      // 实际采集并用于拟合的样本数
+#define COMPASS_CAL_NUM_SAMPLES             60      // 实际采集并用于拟合的样本数
 // 间距公式用虚拟 N 计算，N 越小，要求点与点之间的距离越大（转的角度越多）。
 // N=100 对应的 min_distance，使得在正常地磁强度下，收集 30 个点正好需要旋转约 300°。
-// 这保证了水平方向能覆盖接近一整圈，垂直方向能覆盖约 100°，提供足够优质的三维空间数据。
+// 这保证了水平方向能覆盖接近一整圈，垂直方向能覆盖一整圈，提供足够优质的三维空间数据。
 #define COMPASS_CAL_SPACING_SAMPLES         100     // 仅用于 accept_sample() 间距公式
 
 // 两阶段姿态约束采样：阶段0=水平旋转，阶段1=机头朝下旋转
-// 用户要求：水平采集30个点，机头朝下采集10个点（总共40点）
+// 用户要求：水平采集30个点，机头朝下采集30个点（总共60点）
 #define COMPASS_CAL_PHASE1_SAMPLES      30
 #define COMPASS_CAL_PHASE1_PITCH_MIN    -0.349f   // -20°：阶段0(水平)要求 pitch > 此值
 #define COMPASS_CAL_PHASE2_PITCH_MAX    -0.524f   // -30°：阶段1(朝下)要求 pitch < 此值（从-40°放宽）
