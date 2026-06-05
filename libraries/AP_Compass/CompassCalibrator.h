@@ -142,7 +142,6 @@ private:
         void set_from_ahrs();
         // pitch_rad ∈ [-PI/2, PI/2]，存储精度约 0.7°
         float get_pitch_rad() const { return pitch * (M_PI_2 / 127.0f); }
-        float get_yaw_rad()   const { return yaw   * (M_PI   / 127.0f); }
     private:
         int8_t roll;
         int8_t pitch;
@@ -264,12 +263,6 @@ private:
     // 两阶段采样状态（0=水平, 1=机头朝下）
     uint8_t  _phase;            // 当前采样阶段
     uint16_t _phase1_samples;   // 阶段0已接受样本数
-
-    // 各阶段偏航累计旋转量（rad），需达到 2π 才允许进入下一阶段 / 结束收集
-    float    _phase0_yaw_accum; // 阶段0累计旋转
-    float    _phase1_yaw_accum; // 阶段1累计旋转
-    float    _prev_yaw_rad;     // 上一帧 yaw，用于差分
-    bool     _prev_yaw_valid;   // 是否已有上一帧 yaw
 
     Status _requested_status;
     bool   _status_set_requested;
