@@ -271,16 +271,44 @@ void CompassCalibrator::pull_sample()
         return;
     }
 
+    // ---- 累计偏航旋转追踪 ----
+    const float cur_yaw = mag_sample.att.get_yaw_rad();
+    if (_prev_yaw_valid) {
+        float delta = cur_yaw - _prev_yaw_rad;
+        // 归一化到 (-π, π]
+        if (delta > M_PI)  { delta -= 2.0f * M_PI; }
+        if (delta < -M_PI) { delta += 2.0f * M_PI; }
+        if (_phase == 0) {
+            _phase0_yaw_accum += fabsf(delta);
+        } else {
+            _phase1_yaw_accum += fabsf(delta);
+        }
+    }
+    _prev_yaw_rad   = cur_yaw;
+    _prev_yaw_valid = true;
+
     update_completion_mask(mag_sample.get());
     _sample_buffer[_samples_collected] = mag_sample;
     _samples_collected++;
 
-    // 阶段0收满后切换到阶段1，通知用户
+    // 阶段0：样本足够且已旋转 ≥360° 才切换到阶段1
     if (_phase == 0) {
         _phase1_samples++;
-        if (_phase1_samples >= COMPASS_CAL_PHASE1_SAMPLES) {
+        if (_phase1_samples >= COMPASS_CAL_PHASE1_SAMPLES &&
+            _phase0_yaw_accum >= (2.0f * M_PI)) {
             _phase = 1;
+            _prev_yaw_valid = false;  // 重置 yaw 追踪，避免跨阶段跳变
             GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "MagCal #%u: 水平完成 请机头朝下旋转", (unsigned)(_compass_idx + 1));
+        }
+    }
+    // 阶段1：样本收满且已旋转 ≥360°，总样本数才允许凑满（否则继续等）
+    else {
+        const uint16_t phase2_samples = COMPASS_CAL_NUM_SAMPLES - COMPASS_CAL_PHASE1_SAMPLES;
+        const uint16_t phase2_collected = _samples_collected - _phase1_samples;
+        if (phase2_collected >= phase2_samples &&
+            _phase1_yaw_accum < (2.0f * M_PI)) {
+            // 朝下圈没转满，撤销刚刚加入的这个点
+            _samples_collected--;
         }
     }
 }
@@ -412,6 +440,10 @@ void CompassCalibrator::reset_state()
 
     _phase = 0;
     _phase1_samples = 0;
+    _phase0_yaw_accum = 0.0f;
+    _phase1_yaw_accum = 0.0f;
+    _prev_yaw_rad     = 0.0f;
+    _prev_yaw_valid   = false;
 
     memset(_completion_mask, 0, sizeof(_completion_mask));
     initialize_fit();
