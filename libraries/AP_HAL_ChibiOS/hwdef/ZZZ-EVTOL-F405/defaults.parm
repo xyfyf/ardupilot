@@ -1,0 +1,33 @@
+# ZZZ-EVTOL-F405 defaults for QuadPlane / eVTOL (tune per airframe)
+
+# --- VTOL motors on PWM 1-4 (ArduPlane motor functions 33-36) ---
+SERVO1_FUNCTION,33
+SERVO2_FUNCTION,34
+SERVO3_FUNCTION,35
+SERVO4_FUNCTION,36
+
+# --- Compass: onboard QMC5883L + optional GPS module compass ---
+# Run compass calibration after install; prefer GPS mag when GPS has compass
+COMPASS_ENABLE,1
+COMPASS_AUTODEC,1
+COMPASS_OFFS_MAX,1800
+
+# --- Serial (see hwdef.dat) ---
+SERIAL1_PROTOCOL,2
+SERIAL1_BAUD,115
+SERIAL2_PROTOCOL,23
+SERIAL3_PROTOCOL,5
+SERIAL3_BAUD,115
+SERIAL4_PROTOCOL,42
+SERIAL5_PROTOCOL,-1
+
+# VTX power - GPIO 81
+RELAY1_FUNCTION,1
+RELAY1_PIN,81
+
+# Enable QuadPlane (set Q_ENABLE and frame class in GCS for first-time users)
+Q_ENABLE,1
+Q_FRAME_CLASS,1
+
+# Airspeed for transition (analog pitot on ADC PC5)
+ARSPD_TYPE,1
