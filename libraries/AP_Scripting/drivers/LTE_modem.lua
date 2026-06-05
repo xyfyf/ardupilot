@@ -44,7 +44,7 @@
     - SCR_SDEV1_PROTO = PPP(48)，NET_ENABLE = 1
     - UOM：仅需 LTE_UOM_IP0~3 + PORT（默认已填云平台地址），LTE_UOM_ENABLE 默认开
     - 禁飞区：PPP CONNECT 后写 APM/lte_ppp_ready.flag=1，供 1noflyzone_checker.lua 拉 HTTP
-    - UOM MQTT down code=6：PreArm「UOM：禁飞区内禁止解锁」；首次进入 GCS「已进入禁飞区，请立刻返航或降落！」
+    - UOM MQTT down code=6：PreArm 禁止解锁；飞入禁飞区 GCS 告警；在飞时强制 RTL
 --]]
 
 local MAV_SEVERITY = {EMERGENCY=0, ALERT=1, CRITICAL=2, ERROR=3, WARNING=4, NOTICE=5, INFO=6, DEBUG=7}
@@ -727,6 +727,20 @@ uom.id_wait_warn_sent     = false
 uom.auth_id               = arming:get_aux_auth_id()  -- UOM 禁飞区解锁鉴权（与 NFZ 脚本独立）
 uom.in_nfz_zone           = false   -- 云平台 MQTT code=6：在禁飞区内/接近禁飞区
 local UOM_NFZ_ARming_MSG  = "UOM：禁飞区内禁止解锁"
+-- ArduCopter 飞行模式号（强制返航用）
+local COPTER_MODE_RTL       = 6
+local COPTER_MODE_LAND      = 9
+local COPTER_MODE_SMART_RTL = 21
+local COPTER_MODE_AUTO_RTL  = 27
+
+-- 是否已在返航/降落类模式（避免重复 set_mode）
+local function uom_mode_is_rtl_or_land(mode)
+    return mode == COPTER_MODE_RTL
+        or mode == COPTER_MODE_LAND
+        or mode == COPTER_MODE_SMART_RTL
+        or mode == COPTER_MODE_AUTO_RTL
+end
+
 -- 与 AP_GPS::istate_time_to_epoch_ms 一致（libraries/AP_GPS/AP_GPS.h）
 local AP_MSEC_PER_WEEK    = 604800000
 local UNIX_OFFSET_MSEC    = 17000 * 86400 + 52 * 10 * AP_MSEC_PER_WEEK - 18000
@@ -1014,14 +1028,25 @@ end
 -- uom_close 为模块级函数（非 local），PPP 断开时也可调用
 uom_close = function() end
 
--- 云平台下行 code=6：禁飞区状态 → PreArm 禁止解锁；首次进入时飞入告警
+-- 云平台下行 code=6：禁飞区状态 → PreArm 禁止解锁；飞入时在飞强制 RTL
 local function uom_apply_nfz_from_cloud(inside, message)
     local was_inside = uom.in_nfz_zone
     uom.in_nfz_zone = inside
 
     if inside and not was_inside then
         -- 上电在区内 / 解锁后飞入：边沿触发，避免重复刷屏
-        gcs:send_text(MAV_SEVERITY.CRITICAL, "已进入禁飞区，请立刻返航或降落！")
+        if arming:is_armed() and vehicle:get_likely_flying() then
+            local mode = vehicle:get_mode()
+            if uom_mode_is_rtl_or_land(mode) then
+                gcs:send_text(MAV_SEVERITY.CRITICAL, "已进入禁飞区")
+            elseif vehicle:set_mode(COPTER_MODE_RTL) then
+                gcs:send_text(MAV_SEVERITY.CRITICAL, "已进入禁飞区，正在强制返航")
+            else
+                gcs:send_text(MAV_SEVERITY.CRITICAL, "已进入禁飞区，请立刻返航或降落！")
+            end
+        else
+            gcs:send_text(MAV_SEVERITY.CRITICAL, "已进入禁飞区，无人机禁止解锁")
+        end
     end
 
     if uom.auth_id then

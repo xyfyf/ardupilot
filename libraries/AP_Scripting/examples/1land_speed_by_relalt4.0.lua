@@ -15,8 +15,16 @@
     2) 使用 param:set（内存），关机前若需在地面站保留数值，请手动保存参数或重新写入基准。
     3) 新固件多为 m/s（LAND_SPD_MS、WP_SPD_DN）；旧固件为 cm/s（LAND_SPEED、WPNAV_SPEED_DN 等），
        脚本会按是否存在参数名自动选用。
+    4) 近地释放：相对 Home 低于 0.1 m 时强制恢复基准参数（脚本内写死，不可调）。否则 AltHold 接地后
+       PILOT_SPEED_DN 仍为缓降值，着陆检测与自动上锁会延迟。
+
+    版本：
+      4.0 近地释放 0.1 m 写死（合并 2.0 逻辑）
+      2.0 近地释放，修复 AltHold 接地后自动上锁延迟
+      1.0 按相对 Home 高度切换缓降参数
 --]]
 
+local SCRIPT_VERSION = "4.0"
 local MAV_SEVERITY = { INFO = 6, NOTICE = 5, WARNING = 4 }
 
 -- 脚本专用参数表（避免与其它脚本冲突可调 KEY）
@@ -87,6 +95,9 @@ local P_RATE_MS = bind_add_param("RATE_MS", 5, 250)
   @User: Standard
 --]]
 local P_ONLY_ARMED = bind_add_param("ONLY_ARMED", 6, 1)
+
+-- 近地释放高度 (m)，写死：低于此高度恢复基准参数，便于着陆检测与自动上锁
+local RELEASE_ALT_M = 0.1
 
 -- 内部：是否已从飞控读取过基准
 local baseline_captured = false
@@ -278,6 +289,11 @@ function update()
         end
     end
 
+    -- 近地释放：低于 RELEASE_ALT_M(0.1m) 时恢复 PILOT_SPEED_DN 等基准
+    if altm < RELEASE_ALT_M then
+        should_slow = false
+    end
+
     if should_slow and not in_slow_zone then
         apply_slow(slow)
         in_slow_zone = true
@@ -289,5 +305,5 @@ function update()
     return update, next_ms
 end
 
-gcs:send_text(MAV_SEVERITY.NOTICE, "LNDS: set LNDS_ENABLE=1 to enable")
+gcs:send_text(MAV_SEVERITY.NOTICE, string.format("LNDS v%s loaded", SCRIPT_VERSION))
 return update()

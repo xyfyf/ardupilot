@@ -50,7 +50,8 @@ DMA_NOSHARE SPI1* SPI2* USART1*
 | `SCR_SDEV1_PROTO` | **48** | PPP 协议桥接 |
 | `NET_ENABLE` | **1** | 开启网络栈 |
 | `SCR_ENABLE` | **1** | 开启 Lua 脚本引擎 |
-| `SCR_HEAP_SIZE` | **204800** | 堆内存（不足会 OOM 崩溃） |
+| `SCR_HEAP_SIZE` | **409600** | Lua 堆：LTE_modem+UOM+禁飞区共用；勿超 ~450000 会整机 OOM |
+| `NFZ_PAGE_SIZE` | **10** | 禁飞区 HTTP 每页条数；勿 9999（JSON 过大） |
 
 ### 3.2 LTE 模组参数（由脚本动态注册）
 
@@ -248,7 +249,8 @@ SCR_SDEV_EN         1
 SCR_SDEV1_PROTO     48
 NET_ENABLE          1
 SCR_ENABLE          1
-SCR_HEAP_SIZE       204800
+SCR_HEAP_SIZE       409600
+NFZ_PAGE_SIZE       10
 
 # ── LTE 驱动 ──
 LTE_ENABLE          1
@@ -267,8 +269,6 @@ LTE_UOM_IP3         113
 LTE_UOM_PORT        1883
 
 # ── Remote ID（经 MP Remote ID 界面写入，脚本自动持久化）──
-# LTE_UAS_W01~10    对应 UAS ID 字符串（20字符分10组存储）
-# LTE_OP_W01~10     对应 Operator ID
 # LTE_OP_LAT/LNG/ALT 操控员位置
 
 # ── Remote ID 模块 ──

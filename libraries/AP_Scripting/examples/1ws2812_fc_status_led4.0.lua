@@ -1,5 +1,5 @@
 --[[
-  WS2812 / NeoPixel 外接灯条 — 定制版混合灯语 (基于 A3 & 开源标准)
+  WS2812 / NeoPixel 外接灯条 — 定制版混合灯语 v4.0 (基于 A3 & 开源标准)
   
   依据要求复刻：
   - 自检: 红绿黄连续闪烁
@@ -7,9 +7,10 @@
   - RC丢失: 黄灯快闪
   - 低电量: 1级红灯慢闪，2级红灯快闪
   - 罗盘异常: 红黄交替闪烁
-  - RTK模式: 蓝灯闪烁
-  - GPS模式: 绿灯双闪
+  - RTK模式: 绿灯双闪
+  - GPS模式: 绿灯慢闪
   - 姿态模式: 黄灯慢闪
+  - 上述三种模式下解锁成功: 对应颜色常亮 3 秒后恢复闪烁
 --]]
 
 ---@diagnostic disable: need-check-nil
@@ -19,6 +20,7 @@ local LED_SERVO_FUNCTION = 94  -- 对应地面站 SERVOx_FUNCTION = 94 (Scriptin
 local NUM_LEDS = 8             -- 你的灯珠数量 (请根据实际情况修改)
 local BRIGHTNESS = 90          -- 全局亮度 (1～255，建议不要太高以免刺眼或过载)
 local UPDATE_MS = 50           -- 刷新率（50ms = 20Hz）
+local ARM_HOLD_MS = 3000       -- 解锁成功后常亮保持时长（毫秒）
 
 -- ========================= ArduCopter 模式号 =========================
 local MODE_STABILIZE = 0
@@ -60,11 +62,11 @@ local P_BATT_LVL2 = { {255, 0, 0, 150}, {0, 0, 0, 150} }
 -- 5. 指南针异常: 红黄交替闪烁
 local P_COMPASS_ERR = { {255, 0, 0, 400}, {255, 200, 0, 400} }
 
--- 6. RTK模式: 蓝灯闪烁
-local P_RTK = { {0, 0, 255, 500}, {0, 0, 0, 500} }
+-- 6. RTK模式: 绿灯双闪（测试用）
+local P_RTK = { {0, 255, 0, 150}, {0, 0, 0, 150}, {0, 255, 0, 150}, {0, 0, 0, 800} }
 
--- 7. GPS模式: 绿灯双闪
-local P_GPS = { {0, 255, 0, 150}, {0, 0, 0, 150}, {0, 255, 0, 150}, {0, 0, 0, 800} }
+-- 7. GPS模式: 绿灯慢闪（测试用）
+local P_GPS = { {0, 255, 0, 500}, {0, 0, 0, 500} }
 
 -- 8. 姿态模式: 黄灯慢闪
 local P_ATTI = { {255, 200, 0, 800}, {0, 0, 0, 800} }
@@ -75,6 +77,26 @@ local led_chan = nil
 local init_ok = false
 local current_pattern = nil
 local pattern_start_ms = 0
+
+-- 解锁常亮：仅在 RTK / GPS / 姿态 三种灯语下，检测上锁→解锁边沿
+local prev_armed = false
+local arm_hold_until_ms = 0
+local arm_hold_rgb = nil       -- {R, G, B}，解锁瞬间锁定，3 秒内不变
+
+-- 是否为三种“飞行模式”灯语（非故障/低压等更高优先级）
+local function is_mode_fly_pattern(pat)
+    return pat == P_RTK or pat == P_GPS or pat == P_ATTI
+end
+
+-- 取该灯语常亮时的 RGB（与闪烁亮段颜色一致）
+local function solid_rgb_for_pattern(pat)
+    if pat == P_RTK or pat == P_GPS then
+        return 0, 255, 0
+    elseif pat == P_ATTI then
+        return 255, 200, 0
+    end
+    return nil
+end
 
 -- 物理输出到 WS2812
 local function strip_set_send(chan, r, g, b)
@@ -172,6 +194,30 @@ end
 -- 根据时间轴解析 Pattern 并输出颜色
 local function run_pattern_engine(now)
     local target_pattern = pick_pattern()
+
+    -- 解锁边沿：由未解锁→已解锁，且当前为 RTK/GPS/姿态 灯语时，启动 3 秒常亮
+    local armed = arming:is_armed()
+    if armed and not prev_armed and is_mode_fly_pattern(target_pattern) then
+        local r, g, b = solid_rgb_for_pattern(target_pattern)
+        if r ~= nil then
+            arm_hold_rgb = { r, g, b }
+            arm_hold_until_ms = now + ARM_HOLD_MS
+        end
+    end
+    prev_armed = armed
+
+    -- 常亮窗口内：仍显示解锁时颜色；若出现更高优先级灯语则让位
+    if arm_hold_rgb and now < arm_hold_until_ms then
+        if is_mode_fly_pattern(target_pattern) then
+            strip_set_send(led_chan, arm_hold_rgb[1], arm_hold_rgb[2], arm_hold_rgb[3])
+            return
+        end
+        -- 故障/RC丢失等打断常亮，清除保持状态
+        arm_hold_rgb = nil
+        arm_hold_until_ms = 0
+    elseif arm_hold_rgb and now >= arm_hold_until_ms then
+        arm_hold_rgb = nil
+    end
 
     -- 如果状态发生变化，重置序列时间轴，确保灯语从头开始闪烁
     if target_pattern ~= current_pattern then
