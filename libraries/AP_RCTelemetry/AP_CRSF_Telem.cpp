@@ -2020,10 +2020,13 @@ static bool radar_wind_sway_excessive(void)
 }
 
 /*
-  罗盘未校准或一致性/健康异常（payload[4] bit2）
-  判定口径与飞控 pre-arm（AP_Arming::compass_checks）保持一致：
+  罗盘未校准或健康异常（payload[4] bit2）
+  判定口径与飞控 pre-arm（AP_Arming::compass_checks）保持一致，并加两个收敛条件：
+   0) **仅在"参与 yaw 解算的罗盘恰好只有 1 个"时才告警**
+      （多罗盘场景下 EKF 自带冗余切换，无需骚扰飞手；
+       由此 consistent() 检查也自动失去意义，故省略）
    1) 若 use_for_yaw(0)==false 视为正常（用户禁用罗盘 → 不告警）
-   2) healthy / configured(failure_msg) / consistent 任一失败视为异常
+   2) healthy / configured(failure_msg) 任一失败视为异常
    3) Copter 永远要求 configured；Plane/Rover 若 COMPASS_LEARN==INFLIGHT 则跳过
    4) 连续 RADAR_COMPASS_DEBOUNCE 次（约 1s）异常才置位，避免开机/瞬时跳变误报
  */
@@ -2039,7 +2042,22 @@ static bool radar_compass_abnormal(void)
         return false;
     }
     if (!compass.use_for_yaw(0)) {
-        // 用户禁用罗盘，与 pre-arm 行为一致：直接视为正常
+        // 用户禁用主罗盘，与 pre-arm 行为一致：直接视为正常
+        fail_count = 0;
+        return false;
+    }
+
+    // 仅在"参与 yaw 解算的罗盘只有 1 个"时才告警；多罗盘冗余场景不报
+    uint8_t yaw_count = 0;
+    for (uint8_t i = 0; i < compass.get_count(); i++) {
+        if (compass.use_for_yaw(i)) {
+            yaw_count++;
+            if (yaw_count > 1) {
+                break;
+            }
+        }
+    }
+    if (yaw_count != 1) {
         fail_count = 0;
         return false;
     }
@@ -2058,9 +2076,6 @@ static bool radar_compass_abnormal(void)
             if (!compass.configured(failure_msg, ARRAY_SIZE(failure_msg))) {
                 abnormal = true;
             }
-        }
-        if (!abnormal && compass.get_count() > 0 && !compass.consistent()) {
-            abnormal = true;
         }
     }
 
