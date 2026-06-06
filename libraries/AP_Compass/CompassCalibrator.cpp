@@ -250,24 +250,27 @@ void CompassCalibrator::pull_sample()
         return;
     }
 
-    // ---- IMU 陀螺仪积分旋转追踪（在 buffer 满之前/之后均持续运行）----
-    // 水平阶段(phase 0)：绕体轴 Z 旋转（drone 近似水平，gyro.z ≈ 偏航角速率）
-    // 朝下阶段(phase 1)：机头朝下，偏航映射到体轴 X，用 gyro.length() 覆盖任意旋转轴
+    // ---- IMU 陀螺仪积分旋转追踪 ----
+    // 水平阶段(phase 0)：从进入阶段起就积分，累计 ≥2π 才允许切到朝下阶段
+    // 朝下阶段(phase 1)：仅在样本 buffer 满之后才开始积分，确保用户在样本收齐
+    //   之后还要再转完整一圈，防止样本采集期间的半圈旋转提前"透支"旋转量
     if (_status == Status::RUNNING_STEP_ONE) {
         const uint32_t now_ms = AP_HAL::millis();
         if (_rot_last_time_ms > 0) {
             const float dt = constrain_float((now_ms - _rot_last_time_ms) * 1.0e-3f, 0.0f, 0.2f);
             const Vector3f gyro = AP::ahrs().get_gyro();
             if (_phase == 0) {
+                // 水平阶段：体轴 Z 近似偏航轴
                 _phase0_rot_accum += fabsf(gyro.z) * dt;
-            } else {
+            } else if (_samples_collected >= COMPASS_CAL_NUM_SAMPLES) {
+                // 朝下阶段：buffer 满后才开始计圈，用矢量模长覆盖任意旋转轴方向
                 _phase1_rot_accum += gyro.length() * dt;
             }
         }
         _rot_last_time_ms = now_ms;
     }
 
-    // 样本 buffer 已满时只需等待旋转完成（由 _fitting() 把门），不再采样
+    // 样本 buffer 已满时：旋转积分仍在上方继续，但不再采样
     if (_samples_collected >= COMPASS_CAL_NUM_SAMPLES) {
         return;
     }
@@ -306,7 +309,12 @@ void CompassCalibrator::pull_sample()
             GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "MagCal #%u: 水平完成 请机头朝下旋转", (unsigned)(_compass_idx + 1));
         }
     }
-    // 阶段1 不再提前撤销样本；_fitting() 会在 _phase1_rot_accum >= 2π 时才开始解算
+    // 阶段1：样本刚好收满时，通知用户并重置旋转计时器；
+    //   _fitting() 等 _phase1_rot_accum≥2π 后才开始解算
+    else if (_samples_collected == COMPASS_CAL_NUM_SAMPLES) {
+        _rot_last_time_ms = 0;  // 从零开始干净地计算朝下旋转量
+        GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "MagCal #%u: 样本已满 请保持朝下旋转一圈", (unsigned)(_compass_idx + 1));
+    }
 }
 
 
