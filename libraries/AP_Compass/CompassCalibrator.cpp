@@ -246,23 +246,44 @@ void CompassCalibrator::pull_sample()
         mag_sample = _last_sample;
     }
 
-    if (!_running() || _samples_collected >= COMPASS_CAL_NUM_SAMPLES) {
+    if (!_running()) {
+        return;
+    }
+
+    // ---- IMU 陀螺仪积分旋转追踪（在 buffer 满之前/之后均持续运行）----
+    // 水平阶段(phase 0)：绕体轴 Z 旋转（drone 近似水平，gyro.z ≈ 偏航角速率）
+    // 朝下阶段(phase 1)：机头朝下，偏航映射到体轴 X，用 gyro.length() 覆盖任意旋转轴
+    if (_status == Status::RUNNING_STEP_ONE) {
+        const uint32_t now_ms = AP_HAL::millis();
+        if (_rot_last_time_ms > 0) {
+            const float dt = constrain_float((now_ms - _rot_last_time_ms) * 1.0e-3f, 0.0f, 0.2f);
+            const Vector3f gyro = AP::ahrs().get_gyro();
+            if (_phase == 0) {
+                _phase0_rot_accum += fabsf(gyro.z) * dt;
+            } else {
+                _phase1_rot_accum += gyro.length() * dt;
+            }
+        }
+        _rot_last_time_ms = now_ms;
+    }
+
+    // 样本 buffer 已满时只需等待旋转完成（由 _fitting() 把门），不再采样
+    if (_samples_collected >= COMPASS_CAL_NUM_SAMPLES) {
         return;
     }
 
     // 两阶段姿态过滤：仅在 STEP_ONE 采集阶段约束姿态
-    // STEP_TWO 期间 thin_samples() 会删掉部分样本，补足样本时不限姿态
     if (_status == Status::RUNNING_STEP_ONE) {
         const float pitch_rad = mag_sample.att.get_pitch_rad();
         if (_phase == 0) {
             // 阶段0：水平旋转，pitch > -20°
             if (pitch_rad < COMPASS_CAL_PHASE1_PITCH_MIN) {
-                return;  // 未水平，丢弃
+                return;
             }
         } else {
             // 阶段1：机头朝下旋转，pitch < -30°
             if (pitch_rad > COMPASS_CAL_PHASE2_PITCH_MAX) {
-                return;  // 俯仰不够，丢弃
+                return;
             }
         }
     }
@@ -271,46 +292,21 @@ void CompassCalibrator::pull_sample()
         return;
     }
 
-    // ---- 累计偏航旋转追踪 ----
-    const float cur_yaw = mag_sample.att.get_yaw_rad();
-    if (_prev_yaw_valid) {
-        float delta = cur_yaw - _prev_yaw_rad;
-        // 归一化到 (-π, π]
-        if (delta > M_PI)  { delta -= 2.0f * M_PI; }
-        if (delta < -M_PI) { delta += 2.0f * M_PI; }
-        if (_phase == 0) {
-            _phase0_yaw_accum += fabsf(delta);
-        } else {
-            _phase1_yaw_accum += fabsf(delta);
-        }
-    }
-    _prev_yaw_rad   = cur_yaw;
-    _prev_yaw_valid = true;
-
     update_completion_mask(mag_sample.get());
     _sample_buffer[_samples_collected] = mag_sample;
     _samples_collected++;
 
-    // 阶段0：样本足够且已旋转 ≥360° 才切换到阶段1
+    // 阶段0：样本足够且 IMU 检测到已旋转 ≥360° 才切换到阶段1
     if (_phase == 0) {
         _phase1_samples++;
         if (_phase1_samples >= COMPASS_CAL_PHASE1_SAMPLES &&
-            _phase0_yaw_accum >= (2.0f * M_PI)) {
+            _phase0_rot_accum >= (2.0f * M_PI)) {
             _phase = 1;
-            _prev_yaw_valid = false;  // 重置 yaw 追踪，避免跨阶段跳变
+            _rot_last_time_ms = 0;  // 重置积分时间戳，避免跨阶段 dt 突变
             GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "MagCal #%u: 水平完成 请机头朝下旋转", (unsigned)(_compass_idx + 1));
         }
     }
-    // 阶段1：样本收满且已旋转 ≥360°，总样本数才允许凑满（否则继续等）
-    else {
-        const uint16_t phase2_samples = COMPASS_CAL_NUM_SAMPLES - COMPASS_CAL_PHASE1_SAMPLES;
-        const uint16_t phase2_collected = _samples_collected - _phase1_samples;
-        if (phase2_collected >= phase2_samples &&
-            _phase1_yaw_accum < (2.0f * M_PI)) {
-            // 朝下圈没转满，撤销刚刚加入的这个点
-            _samples_collected--;
-        }
-    }
+    // 阶段1 不再提前撤销样本；_fitting() 会在 _phase1_rot_accum >= 2π 时才开始解算
 }
 
 
@@ -411,7 +407,12 @@ bool CompassCalibrator::_running() const
 // fitting method for use in thread
 bool CompassCalibrator::_fitting() const
 {
-    return _running() && (_samples_collected == COMPASS_CAL_NUM_SAMPLES);
+    if (!_running() || _samples_collected < COMPASS_CAL_NUM_SAMPLES) {
+        return false;
+    }
+    // 样本集满后还需等待阶段1（机头朝下）旋转满一圈才开始椭球拟合
+    // 阶段0的旋转满圈已在 pull_sample() 里作为进入阶段1的前提条件
+    return _phase1_rot_accum >= (2.0f * M_PI);
 }
 
 // initialize fitness before starting a fit
@@ -439,11 +440,10 @@ void CompassCalibrator::reset_state()
     _params.scale_factor = 0;
 
     _phase = 0;
-    _phase1_samples = 0;
-    _phase0_yaw_accum = 0.0f;
-    _phase1_yaw_accum = 0.0f;
-    _prev_yaw_rad     = 0.0f;
-    _prev_yaw_valid   = false;
+    _phase1_samples    = 0;
+    _phase0_rot_accum  = 0.0f;
+    _phase1_rot_accum  = 0.0f;
+    _rot_last_time_ms  = 0;
 
     memset(_completion_mask, 0, sizeof(_completion_mask));
     initialize_fit();

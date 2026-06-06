@@ -265,11 +265,11 @@ private:
     uint8_t  _phase;            // 当前采样阶段
     uint16_t _phase1_samples;   // 阶段0已接受样本数
 
-    // 各阶段偏航累计旋转量（rad），需达到 2π 才允许进入下一阶段 / 结束收集
-    float    _phase0_yaw_accum; // 阶段0累计旋转
-    float    _phase1_yaw_accum; // 阶段1累计旋转
-    float    _prev_yaw_rad;     // 上一帧 yaw，用于差分
-    bool     _prev_yaw_valid;   // 是否已有上一帧 yaw
+    // 各阶段 IMU 陀螺仪积分旋转量（rad），需达到 2π 才允许进入下一阶段 / 触发解算
+    // 积分在 pull_sample() 中进行（10 Hz），精度满足 360° 检测需求
+    float    _phase0_rot_accum; // 阶段0 IMU 累计旋转（rad，水平阶段用 gyro.z）
+    float    _phase1_rot_accum; // 阶段1 IMU 累计旋转（rad，朝下阶段用 gyro.length()）
+    uint32_t _rot_last_time_ms; // 上次陀螺仪积分时间戳（ms）
 
     Status _requested_status;
     bool   _status_set_requested;
