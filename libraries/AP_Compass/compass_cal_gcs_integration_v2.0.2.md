@@ -91,12 +91,9 @@ master.mav.command_long_send(
 |---|---|---|
 | 2 | 0 → 50 | 第1步：水平旋转中… |
 | 2 | 50 → 99 | 第2步：采样中（请保持机头朝下）… |
-| 2 | 100（样本满，等待旋转） | 第2步：样本已满，请继续朝下旋转一圈 |
 | 3 | — | 计算中… |
 | 4 | — | ✓ 成功，请重启 |
 | ≥5 | — | ✗ 失败，请重试 |
-
-> `completion_pct` 达到 100 后状态仍为 2 时，说明飞控正在等待朝下旋转满一圈，地面站**不应显示"完成"**，需继续提示用户旋转。
 
 ---
 
@@ -135,7 +132,6 @@ master.mav.command_long_send(
 |------|---------|---------|
 | 校准启动 | `MagCal #N: 请保持水平旋转一圈` | NOTICE |
 | 水平阶段完成，切换到朝下 | `MagCal #N: 水平完成 请机头朝下旋转` | NOTICE |
-| 朝下样本采满，等待转圈 | `MagCal #N: 样本已满 请保持朝下旋转一圈` | NOTICE |
 | 校准成功 | `MagCal #N: 指南针校准成功` | INFO |
 
 > `N` 为罗盘编号，从 **1** 开始（`compass_id + 1`）。  
@@ -155,10 +151,7 @@ master.mav.command_long_send(
   │                                  │  用户水平旋转 ≥360°
   │ ◄── STATUSTEXT: "MagCal #1: 水平完成 请机头朝下旋转"
   │ ◄── MAG_CAL_PROGRESS  status=2, pct 50→100  （朝下采样中）
-  │                                  │  用户机头朝下旋转，样本采满
-  │ ◄── STATUSTEXT: "MagCal #1: 样本已满 请保持朝下旋转一圈"
-  │ ◄── MAG_CAL_PROGRESS  status=2, pct=100     （等待旋转）
-  │                                  │  用户继续朝下旋转 ≥360°
+  │                                  │  用户机头朝下旋转满一整圈（采样+旋转同步完成）
   │ ◄── MAG_CAL_PROGRESS  status=3             （椭球拟合中）
   │ ◄── STATUSTEXT: "MagCal #1: 指南针校准成功"
   │ ◄── MAG_CAL_REPORT    status=4, autosaved=1
@@ -190,11 +183,7 @@ master.mav.command_long_send(
   │                │                                │
   │ ◄── PROGRESS   │ #1 status=2, pct 50→100       │
   │ ◄── PROGRESS   │                 #2 status=2, pct 50→100
-  │                │    ── 用户机头朝下旋转，采样 ── │
-  │                │                                │
-  │ ◄── STATUSTEXT: "MagCal #1: 样本已满 请保持朝下旋转一圈"
-  │ ◄── STATUSTEXT: "MagCal #2: 样本已满 请保持朝下旋转一圈"
-  │                │    ── 用户继续朝下旋转一圈 ──── │
+  │                │    ── 用户机头朝下旋转满一圈 ── │
   │                │                                │
   │ ◄── PROGRESS   │ #1 status=3（拟合中）          │
   │ ◄── PROGRESS   │                 #2 status=3
@@ -298,7 +287,6 @@ def show_result():
 | `fitness > 16` | 校准精度较低 | 警告，建议重新校准 |
 | `autosaved = 0` | 未自动保存 | 提示手动执行 `MAV_CMD_PREFLIGHT_STORAGE` |
 | `PreArm: Check mag field (xy diff > 100)` | 两颗罗盘校准结果差异过大 | 提示重新校准全部罗盘 |
-| `pct = 100` 且 `status = 2` 长时间不变 | 等待朝下转圈，用户未继续旋转 | 提示"请继续保持机头朝下旋转一整圈" |
 | #1 成功但 #2 失败 | 某颗磁力计数据质量差 | 提示**重新校准全部**（两颗需同时完成） |
 
 ---

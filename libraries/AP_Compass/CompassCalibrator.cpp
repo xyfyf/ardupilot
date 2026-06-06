@@ -309,11 +309,10 @@ void CompassCalibrator::pull_sample()
             GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "MagCal #%u: 水平完成 请机头朝下旋转", (unsigned)(_compass_idx + 1));
         }
     }
-    // 阶段1：样本刚好收满时，通知用户并重置旋转计时器；
+    // 阶段1：样本刚好收满时，重置旋转计时器，从零起算朝下旋转量；
     //   _fitting() 等 _phase1_rot_accum≥2π 后才开始解算
     else if (_samples_collected == COMPASS_CAL_NUM_SAMPLES) {
-        _rot_last_time_ms = 0;  // 从零开始干净地计算朝下旋转量
-        GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "MagCal #%u: 样本已满 请保持朝下旋转一圈", (unsigned)(_compass_idx + 1));
+        _rot_last_time_ms = 0;
     }
 }
 
