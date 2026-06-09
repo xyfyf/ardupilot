@@ -36,6 +36,7 @@
 #endif
 #if AP_COMPASS_ENABLED
 #include <AP_Compass/AP_Compass.h>
+#include <AP_Declination/AP_Declination.h>
 #endif
 #include <AP_InertialSensor/AP_InertialSensor.h>
 #if AP_FENCE_ENABLED
@@ -2020,73 +2021,106 @@ static bool radar_wind_sway_excessive(void)
 }
 
 /*
-  罗盘未校准或健康异常（payload[4] bit2）
-  判定口径与飞控 pre-arm（AP_Arming::compass_checks）保持一致，并加两个收敛条件：
-   0) **仅在"参与 yaw 解算的罗盘恰好只有 1 个"时才告警**
-      （多罗盘场景下 EKF 自带冗余切换，无需骚扰飞手；
-       由此 consistent() 检查也自动失去意义，故省略）
-   1) 若 use_for_yaw(0)==false 视为正常（用户禁用罗盘 → 不告警）
-   2) healthy / configured(failure_msg) 任一失败视为异常
-   3) Copter 永远要求 configured；Plane/Rover 若 COMPASS_LEARN==INFLIGHT 则跳过
-   4) 连续 RADAR_COMPASS_DEBOUNCE 次（约 1s）异常才置位，避免开机/瞬时跳变误报
+  罗盘异常（payload[4] bit2）
+  口径完全等同飞控 pre-arm 的 AP_Arming::compass_checks()，逐项复刻：
+    - 是否走具体检查受 ARMING_CHECK 的 ALL(bit0) / COMPASS(bit2) 控制
+    - 校准中 / 校准后需重启 → 异常
+    - use_for_yaw(0)==false → 视为正常
+    - healthy / configured / offsets 长度 / 磁场强度 [185, 875]mGauss
+    - 多罗盘 consistent / 地磁模型差（受 ARMING_MAGTHRESH 控制）
+  注：AP_Arming::compass_checks() 本身为 protected，无法直接调用，故复刻；
+  未来若 pre-arm 改动，请同步本函数。
  */
 static bool radar_compass_abnormal(void)
 {
 #if AP_COMPASS_ENABLED
-    static uint8_t fail_count = 0;
-    static const uint8_t RADAR_COMPASS_DEBOUNCE = 5U; // ~1s @5Hz 调度
+    // 与 pre-arm 一致的 mag field 上下限（原宏 AP_ARMING_COMPASS_MAGFIELD_MIN/MAX 私有）
+    static const float MAGFIELD_MIN = 185.0f;
+    static const float MAGFIELD_MAX = 875.0f;
 
     Compass &compass = AP::compass();
-    if (!compass.available()) {
-        fail_count = 0;
-        return false;
-    }
-    if (!compass.use_for_yaw(0)) {
-        // 用户禁用主罗盘，与 pre-arm 行为一致：直接视为正常
-        fail_count = 0;
-        return false;
-    }
 
-    // 仅在"参与 yaw 解算的罗盘只有 1 个"时才告警；多罗盘冗余场景不报
-    uint8_t yaw_count = 0;
-    for (uint8_t i = 0; i < compass.get_count(); i++) {
-        if (compass.use_for_yaw(i)) {
-            yaw_count++;
-            if (yaw_count > 1) {
-                break;
-            }
-        }
+#if COMPASS_CAL_ENABLED
+    if (compass.is_calibrating()) {
+        return true;
     }
-    if (yaw_count != 1) {
-        fail_count = 0;
-        return false;
+    if (compass.compass_cal_requires_reboot()) {
+        return true;
     }
-
-    bool abnormal = false;
-    if (!compass.healthy()) {
-        abnormal = true;
-    } else {
-#if APM_BUILD_COPTER_OR_HELI || APM_BUILD_TYPE(APM_BUILD_Blimp)
-        const bool need_configured = true;
-#else
-        const bool need_configured = !compass.learn_offsets_enabled();
 #endif
-        if (need_configured) {
-            char failure_msg[64] = {};
-            if (!compass.configured(failure_msg, ARRAY_SIZE(failure_msg))) {
-                abnormal = true;
+
+    // 受 ARMING_CHECK 控制：ALL(bit0) 或 COMPASS(bit2) 任一置位才走后续检查
+    {
+        enum ap_var_type ptype;
+        AP_Param *p = AP_Param::find("ARMING_CHECK", &ptype);
+        if (p != nullptr && ptype == AP_PARAM_INT32) {
+            const uint32_t mask = (uint32_t)((AP_Int32 *)p)->get();
+            const uint32_t ALL_BIT = 1U << 0;
+            const uint32_t COMPASS_BIT = 1U << 2;
+            if ((mask & (ALL_BIT | COMPASS_BIT)) == 0) {
+                return false;
             }
         }
     }
 
-    if (abnormal) {
-        if (fail_count < RADAR_COMPASS_DEBOUNCE) {
-            fail_count++;
-        }
-    } else {
-        fail_count = 0;
+    if (!compass.use_for_yaw(0)) {
+        return false;
     }
-    return fail_count >= RADAR_COMPASS_DEBOUNCE;
+
+    if (!compass.healthy()) {
+        return true;
+    }
+
+#if APM_BUILD_COPTER_OR_HELI || APM_BUILD_TYPE(APM_BUILD_Blimp)
+    const bool need_configured = true;
+#else
+    const bool need_configured = !compass.learn_offsets_enabled();
+#endif
+    if (need_configured) {
+        char failure_msg[64] = {};
+        if (!compass.configured(failure_msg, ARRAY_SIZE(failure_msg))) {
+            return true;
+        }
+    }
+
+    if (compass.get_offsets().length() > compass.get_offsets_max()) {
+        return true;
+    }
+
+    const float mag_field = compass.get_field().length();
+    if (mag_field > MAGFIELD_MAX || mag_field < MAGFIELD_MIN) {
+        return true;
+    }
+
+    if (!compass.consistent()) {
+        return true;
+    }
+
+#if AP_AHRS_ENABLED
+    {
+        int16_t mag_thresh = 0;
+        enum ap_var_type ptype;
+        AP_Param *p = AP_Param::find("ARMING_MAGTHRESH", &ptype);
+        if (p != nullptr && ptype == AP_PARAM_INT16) {
+            mag_thresh = ((AP_Int16 *)p)->get();
+        }
+        AP_AHRS &ahrs = AP::ahrs();
+        Location ahrs_loc;
+        if (mag_thresh > 0 && ahrs.use_compass() && ahrs.get_location(ahrs_loc)) {
+            const Vector3f veh_mag_field_ef = ahrs.get_rotation_body_to_ned() * compass.get_field();
+            const Vector3f earth_field_mgauss = AP_Declination::get_earth_field_ga(ahrs_loc) * 1000.0f;
+            const Vector3f diff_mgauss = veh_mag_field_ef - earth_field_mgauss;
+            if (MAX(fabsf(diff_mgauss.x), fabsf(diff_mgauss.y)) > mag_thresh) {
+                return true;
+            }
+            if (fabsf(diff_mgauss.z) > mag_thresh * 2.0f) {
+                return true;
+            }
+        }
+    }
+#endif
+
+    return false;
 #else
     return false;
 #endif
