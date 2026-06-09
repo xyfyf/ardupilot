@@ -41,18 +41,16 @@ void Copter::init_ardupilot()
     // setup telem slots with serial ports
     gcs().setup_uarts();
 
-    // Print Custom SNs to GCS
-    const CustomSNData& sn = CustomSN::get_data();
-    if (sn.magic == CUSTOM_SN_MAGIC) {
-        gcs().send_text(MAV_SEVERITY_INFO, "Product SN: %.20s", sn.product_sn);
-        gcs().send_text(MAV_SEVERITY_INFO, "FC SN: %.20s", sn.fc_sn);
-        gcs().send_text(MAV_SEVERITY_INFO, "Frame SN: %.20s", sn.frame_sn);
-        gcs().send_text(MAV_SEVERITY_INFO, "Machine SN: %.20s", sn.machine_sn);
+    // Print custom SNs (from EFT nameplate) to GCS
+    if (CustomSN::is_valid()) {
+        const CustomSNData& sn = CustomSN::get_data();
+        gcs().send_text(MAV_SEVERITY_INFO, "Product Model: %.*s", CUSTOM_SN_FIELD_LEN, sn.product_model);
+        gcs().send_text(MAV_SEVERITY_INFO, "Factory SN:    %.*s", CUSTOM_SN_FIELD_LEN, sn.factory_sn);
+        gcs().send_text(MAV_SEVERITY_INFO, "Frame SN:      %.*s", CUSTOM_SN_FIELD_LEN, sn.frame_sn);
+        gcs().send_text(MAV_SEVERITY_INFO, "FC SN:         %.*s", CUSTOM_SN_FIELD_LEN, sn.fc_sn);
     } else {
         gcs().send_text(MAV_SEVERITY_INFO, "Custom SN: Not Initialized");
     }
-
-
 
 
 #if OSD_ENABLED
