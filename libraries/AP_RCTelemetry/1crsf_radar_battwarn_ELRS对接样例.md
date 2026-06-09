@@ -58,7 +58,7 @@
 |:---:|:---|
 | 0 | 风速过大，请尽快降落或返航 |
 | 1 | 您已接近禁飞区，飞行器将自动迫降（**当前固件不置位**） |
-| 2 | 指南针异常，请校准（口径完全等同飞控 PreArm `compass_checks`：覆盖 healthy / configured / offsets / 磁场强度 / 多罗盘一致性 / 地磁模型差；受 `ARMING_CHECK` bit2 控制） |
+| 2 | 指南针异常，请校准（**仅在未解锁时检查**；0 罗盘直接报异常；1 罗盘按 PreArm `compass_checks` 口径判定（healthy / configured / offsets / 磁场强度 / 地磁模型差，受 `ARMING_CHECK` bit2 控制）；2~3 罗盘冗余场景由 EKF 处理，不上报） |
 | 3 | IMU 异常，请重启飞行器 |
 | 4 | 电子围栏已触发 |
 | 5 | GNSS 已丢失，请立即降落 |

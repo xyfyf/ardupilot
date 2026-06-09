@@ -2022,12 +2022,17 @@ static bool radar_wind_sway_excessive(void)
 
 /*
   罗盘异常（payload[4] bit2）
-  口径完全等同飞控 pre-arm 的 AP_Arming::compass_checks()，逐项复刻：
+  仅在"飞控未解锁"时检查；armed 后任何罗盘异常都不打扰飞手（避免误报）。
+  按识别到的罗盘数量决定：
+    - 0 个：直接报异常（连罗盘都没识别到）
+    - 1 个：走 pre-arm 一致检查（无冗余备份，需严格把关）
+    - 2~3 个：不报（EKF 自带 lane switch 冗余）
+  对 "1 个罗盘" 场景做与 pre-arm 完全一致的检查：
     - 是否走具体检查受 ARMING_CHECK 的 ALL(bit0) / COMPASS(bit2) 控制
     - 校准中 / 校准后需重启 → 异常
-    - use_for_yaw(0)==false → 视为正常
+    - use_for_yaw(0)==false → 视为正常（用户禁用主罗盘）
     - healthy / configured / offsets 长度 / 磁场强度 [185, 875]mGauss
-    - 多罗盘 consistent / 地磁模型差（受 ARMING_MAGTHRESH 控制）
+    - 地磁模型差（受 ARMING_MAGTHRESH 控制；单罗盘场景下 consistent 检查无意义，保留无副作用）
   注：AP_Arming::compass_checks() 本身为 protected，无法直接调用，故复刻；
   未来若 pre-arm 改动，请同步本函数。
  */
@@ -2038,7 +2043,24 @@ static bool radar_compass_abnormal(void)
     static const float MAGFIELD_MIN = 185.0f;
     static const float MAGFIELD_MAX = 875.0f;
 
+    // 门闸 1：飞控已解锁 → 不报
+    if (AP_Notify::flags.armed) {
+        return false;
+    }
+
     Compass &compass = AP::compass();
+
+    // 门闸 2：按识别到的罗盘数量分流
+    const uint8_t compass_count = compass.get_count();
+    if (compass_count == 0) {
+        // 连一个罗盘都没识别到 → 直接报异常
+        return true;
+    }
+    if (compass_count > 1) {
+        // 多罗盘冗余，EKF 自带 lane switch，不打扰飞手
+        return false;
+    }
+    // compass_count == 1：继续走 pre-arm 一致的检查
 
 #if COMPASS_CAL_ENABLED
     if (compass.is_calibrating()) {
