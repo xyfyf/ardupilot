@@ -13,8 +13,12 @@ static void failsafe_check_static()
     copter.failsafe_check();
 }
 
+#include "CustomSN.h"
+
 void Copter::init_ardupilot()
 {
+    CustomSN::init();
+
     // init winch
 #if AP_WINCH_ENABLED
     g2.winch.init();
@@ -36,6 +40,20 @@ void Copter::init_ardupilot()
 
     // setup telem slots with serial ports
     gcs().setup_uarts();
+
+    // Print Custom SNs to GCS
+    const CustomSNData& sn = CustomSN::get_data();
+    if (sn.magic == CUSTOM_SN_MAGIC) {
+        gcs().send_text(MAV_SEVERITY_INFO, "Product SN: %.20s", sn.product_sn);
+        gcs().send_text(MAV_SEVERITY_INFO, "FC SN: %.20s", sn.fc_sn);
+        gcs().send_text(MAV_SEVERITY_INFO, "Frame SN: %.20s", sn.frame_sn);
+        gcs().send_text(MAV_SEVERITY_INFO, "Machine SN: %.20s", sn.machine_sn);
+    } else {
+        gcs().send_text(MAV_SEVERITY_INFO, "Custom SN: Not Initialized");
+    }
+
+
+
 
 #if OSD_ENABLED
     osd.init();
