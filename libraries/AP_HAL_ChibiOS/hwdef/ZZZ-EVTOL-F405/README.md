@@ -1,6 +1,6 @@
 # ZZZ EVTOL-F405
 
-消费级垂起 / QuadPlane 飞控核心板：**STM32F405 + BMI270 + AT7456E 模拟 OSD + 板载罗盘 + SPL06**，外置 **`ZZZ-EVTOL-PDB-B`**，与 **`ZZZ-EVTOL-H743`** 共用（**不** 配 `ZZZ-EVTOL-H753` / PDB-A）。
+消费级垂起 / QuadPlane 飞控核心板：**STM32F405 + BMI270 + AT7456E 模拟 OSD + SPL06 + SDIO**，外置 **`ZZZ-EVTOL-PDB-B`**，与 **`ZZZ-EVTOL-H743`** 共用（**不** 配 `ZZZ-EVTOL-H753` / PDB-A）。
 
 ## 传感器与 OSD
 
@@ -8,10 +8,9 @@
 |------|------|------|
 | BMI270 | SPI1 | 六轴 IMU（**无磁力计**） |
 | **AT7456E** | **SPI2 PB12** | **标配模拟 OSD**；CVBS **J_VTX_ANA** |
-| QMC5883P / **IST8310** 二选一 | I2C1 `0x0D` / `0x0E` | **板载罗盘** |
 | SPL06 | I2C1 `0x76` | 气压计 |
-| W25Q128 | SPI3 | 黑匣子日志 |
-| 外置罗盘 | GPS 座 I2C 分支 | 自动探测 |
+| MicroSD | SDIO | 黑匣子日志 |
+| 外置罗盘 | GPS 座 I2C 分支 | 自动探测 QMC5883P / IST8310 |
 
 ## 图传（二选一，勿同时混接视频）
 
@@ -25,19 +24,19 @@
 
 ## 磁力计硬件注意
 
-1. 板载罗盘（5883P 或 IST8310）布置在 PCB 边缘，与 PDB 8P 电源入口保持 ≥15 mm；**同一位置只贴一颗**。  
-2. GPS 连接器 I2C 与板载 mag 并联时，外置罗盘使用 `I2C:ALL_EXTERNAL` 探测。  
-3. 首飞前检查地面站 **HW ID** 中 onboard + external 均正常。
+1. BMI270 无磁力计，罗盘走 GPS 连接器 I2C 外置。  
+2. 外置罗盘使用 `I2C:ALL_EXTERNAL` 探测。  
+3. 首飞前检查地面站 **HW ID** 中 external compass 正常。
 
 ## 接口摘要
 
-- **PWM1–4**：垂起电机（**四路 DShot BIDIR**）  
+- **PWM1–4**：垂起电机（PWM1/2 支持 DShot BIDIR）  
 - **LED**：PC6 / PC7（**PA13/14 专用于 SWD**）  
-- **PWM5–10**：舵面 / 副翼 / 襟翼  
+- **PWM5–7**：舵面 / 副翼 / 襟翼  
 - **USART3**：GPS  
 - **USART2**：RC（CRSF / SBUS）  
 - **UART4**：MSP DisplayPort（HD 图传）  
-- **ADC PC5**：模拟空速  
+- **I2C1**：SPL06 / 外置罗盘 / 数字空速扩展
 
 ## 编译
 

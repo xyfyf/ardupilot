@@ -1,7 +1,7 @@
 # hw definition file for processing by chibios_pins.py
 # ZZZ EVTOL-H753 bootloader
 
-MCU STM32H7xx STM32H753xx
+MCU STM32H7xx STM32H743xx
 
 APJ_BOARD_ID AP_HW_ZZZ-EVTOL-H753
 
@@ -26,7 +26,7 @@ PA12 OTG_FS_DP OTG1
 PA13 JTMS-SWDIO SWD
 PA14 JTCK-SWCLK SWD
 
-# Keep VTX and PDB power enabled during bootloader
+# Keep VTX and PDB power disabled during bootloader
 PB2 VTX_PWR OUTPUT LOW
 PE2  PDB_EN OUTPUT LOW
 
@@ -36,7 +36,6 @@ define HAL_LED_ON 0
 # CS pins high during flash
 PC15 IMU1_CS CS
 PC13 IMU2_CS CS
-PB12 MAX7456_CS CS
 
 define CH_CFG_USE_MEMCORE 1
 define CH_CFG_USE_HEAP 1

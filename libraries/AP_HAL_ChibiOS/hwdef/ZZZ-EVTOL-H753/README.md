@@ -15,14 +15,14 @@ ZZZ EVTOL-H753（原 ZZZ-H743-Wing 工程）为 **行业级固定翼 / VTOL** �
 | MCU | **STM32H753VIT6**，480MHz，2MB Flash（硬件加密） |
 | IMU | 双 ICM-42688-P（SPI1 + SPI4） |
 | 气压计 | SPL06 / DPS310（I2C2） |
-| OSD | AT7456 模拟 OSD（SPI2） |
+| OSD | 数字图传 MSP DisplayPort（USART3） |
 | 存储 | microSD，SDMMC 4-bit |
 | PWM | 13 路（部分 BIDIR，支持 VTOL DShot 遥测） |
 | 串口 | 8× UART + 2× USB |
 | CAN | **2×** CAN1（PD0/1）+ CAN2（**PB5/PD10**） |
 | 电源采样 | 双路 V/I ADC（来自外置 PDB） |
-| 空速 | 模拟 ADC（PC4） |
-| 罗盘 | **板载 QMC5883P / IST8310 二选一**（I2C2）+ GPS 座外置（I2C1） |
+| 空速 | I2C 数字空速扩展 |
+| 罗盘 | GPS 座外置罗盘（I2C1） |
 
 ---
 
@@ -143,8 +143,8 @@ ZZZ EVTOL-H753（原 ZZZ-H743-Wing 工程）为 **行业级固定翼 / VTOL** �
 
 ## Compass
 
-- **板载**：QMC5883P（`0x0D`）或 IST8310（`0x0E`）**二选一**，I2C2（与 SPL06/DPS310 同总线，远离 PDB 大电流）  
-- **外置**：GPS 六芯线 I2C1，自动探测 IST8310 / QMC5883 等  
+- **外置**：GPS 六芯线 I2C1，自动探测 IST8310 / QMC5883P 等  
+- **板载**：当前 `hwdef.dat` 未声明板载罗盘，I2C2 仅用于 SPL06 / DPS310  
 - 上电后完成罗盘校准；飞行中可优先使用 GPS 罗盘（地面站设置优先级）
 
 ## Battery Monitoring

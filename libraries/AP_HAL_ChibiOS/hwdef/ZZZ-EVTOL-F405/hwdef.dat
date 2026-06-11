@@ -1,6 +1,6 @@
 # hw definition file for ZZZ EVTOL-F405 consumer VTOL flight controller
 # STM32F405 + BMI270 + SPL06 + AT7456E(标配) + SDMMC (PDB-B)
-# Core board: ZZZ-EVTOL-PDB-B with ZZZ-EVTOL-H743 only (not H753 / PDB-A)
+# Core board: ZZZ-EVTOL-PDB-B with ZZZ-EVTOL-F405 / H743 (not H753 / PDB-A)
 
 MCU STM32F4xx STM32F405xx
 

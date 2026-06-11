@@ -1092,6 +1092,9 @@ AP_HW_Accton_Godwit_GA1        7120
 # please fill gaps in the above ranges rather than adding past ID #7199
 
 # IDs 7120-7129 reserved for EFT
+AP_HW_ZZZ-EVTOL-H753                7121
+AP_HW_ZZZ-EVTOL-F405                7122
+AP_HW_ZZZ-EVTOL-H743                7123
 AP_HW_EFT_CAAC                      8000
 
 # OpenDroneID enabled boards. Use 10000 + the base board ID

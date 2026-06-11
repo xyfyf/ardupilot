@@ -6,8 +6,8 @@ SERVO2_FUNCTION,34
 SERVO3_FUNCTION,35
 SERVO4_FUNCTION,36
 
-# --- Compass: onboard QMC5883L + optional GPS module compass ---
-# Run compass calibration after install; prefer GPS mag when GPS has compass
+# --- Compass: external GPS module compass ---
+# Run compass calibration after install
 COMPASS_ENABLE,1
 COMPASS_AUTODEC,1
 COMPASS_OFFS_MAX,1800
@@ -28,6 +28,3 @@ RELAY1_PIN,81
 # Enable QuadPlane (set Q_ENABLE and frame class in GCS for first-time users)
 Q_ENABLE,1
 Q_FRAME_CLASS,1
-
-# Airspeed for transition (analog pitot on ADC PC5)
-ARSPD_TYPE,1
