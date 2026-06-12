@@ -3,6 +3,11 @@
 
   逻辑：开机后一段时间内监听 DroneCAN NodeStatus，根据雷达节点是否在线，用 param:set
   仅修改内存中的 PRX1_TYPE（不写 Flash），从而尽量避免「改参 + 重启」的笨拙流程。
+  同时根据检测结果自适应 ARMING_CHECK 的 Rangefinder 位（bit 15）：
+  - 检测到雷达 → 置 1，恢复正常测距仪解锁前检查
+  - 没检测到雷达 → 置 0，让飞控不接雷达也能正常解锁/起飞，不报错
+  注意：若原 ARMING_CHECK 置 1（即 ALL 总开关），关闭 Rangefinder 时会自动把 ALL
+  展开为 bits 1..19 的显式位再清 bit 15，避免 ALL 强制覆盖单独清位无效的问题。
 
   为何可以不全重启：
   - PRX 后端在 init() 时按类型创建；DroneCAN 类可在类型已为 DroneCAN 且收到报文时延迟创建驱动
@@ -22,6 +27,13 @@ local TARGET_PRX_TYPE = 14 -- 原生 DroneCAN 避障雷达通常为 14；测距�
 local RADAR_NODE_ID = 120 -- 【必改】地面站 UAVCAN 里看到的雷达 Node ID
 
 local prx_param = Parameter("PRX1_TYPE")
+local arming_check_param = Parameter("ARMING_CHECK")
+
+-- ARMING_CHECK bit 定义（与 AP_Arming.h 的 enum class Check 对应）
+local ARMING_CHECK_ALL_BIT  = 1 << 0  -- bit 0：所有检查总开关（置 1 时单独清其他位无效）
+local ARMING_CHECK_RNGFND   = 1 << 15 -- bit 15：Rangefinder
+-- 当需要把 ALL 展开为显式位时使用：bits 1..19 全开（覆盖常规检查项，含/不含 Rangefinder 由后续运算决定）
+local ARMING_CHECK_EXPANDED = 0xFFFFE
 
 -- DroneCAN Handle：NodeStatus id 341
 local NODESTATUS_ID = 341
@@ -45,6 +57,46 @@ local function set_prx_type_memory_only(v)
         gcs:send_text(4, "param set PRX1_TYPE err")
         return false
     end
+    return true
+end
+
+--- 仅写 RAM 切换 ARMING_CHECK 的 Rangefinder 位
+-- enable=true  → 置 1（雷达检测到，恢复测距仪解锁前检查）
+-- enable=false → 置 0（无雷达，跳过测距仪检查，避免无雷达起不来）
+-- 行为说明（重要）：
+-- 1) 若 ALL(bit0)=0（你这种"显式勾选"模式）：只动 bit 15，其他位完全不变
+-- 2) 若 ALL(bit0)=1（默认全开模式）且要关 Rangefinder：必须先把 ALL 展开为显式位
+--    （bits 1..19 全开），然后再清 bit 15；否则 ALL 会强制启用所有检查
+local function set_arming_rangefinder_check(enable)
+    local cur = arming_check_param:get()
+    if cur == nil then
+        gcs:send_text(4, "param get ARMING_CHECK err")
+        return false
+    end
+    cur = math.floor(cur)
+    local original = cur
+
+    local target
+    if enable then
+        target = cur | ARMING_CHECK_RNGFND
+    else
+        if (cur & ARMING_CHECK_ALL_BIT) ~= 0 then
+            cur = (cur & (~ARMING_CHECK_ALL_BIT)) | ARMING_CHECK_EXPANDED
+            gcs:send_text(6, string.format("ARMING_CHECK ALL expanded: %d -> %d", original, cur))
+        end
+        target = cur & (~ARMING_CHECK_RNGFND)
+    end
+
+    if target == original then
+        gcs:send_text(6, string.format("ARMING_CHECK unchanged: %d", original))
+        return true
+    end
+
+    if not arming_check_param:set(target) then
+        gcs:send_text(4, "param set ARMING_CHECK err")
+        return false
+    end
+    gcs:send_text(6, string.format("ARMING_CHECK: %d -> %d", original, target))
     return true
 end
 
@@ -84,6 +136,16 @@ function update()
             -- set_prx_type_memory_only(0)
         else
             gcs:send_text(6, "Radar state matched")
+        end
+
+        -- 同步 ARMING_CHECK 的 Rangefinder 位：检测到雷达 → 启用，未检测到 → 禁用
+        -- 仅写内存，避免污染 EEPROM；下次重启脚本会再次按当前情况设置
+        if set_arming_rangefinder_check(radar_seen) then
+            if radar_seen then
+                gcs:send_text(6, "ARMING_CHECK: Rangefinder enabled")
+            else
+                gcs:send_text(6, "ARMING_CHECK: Rangefinder disabled (no radar)")
+            end
         end
 
         check_done = true
