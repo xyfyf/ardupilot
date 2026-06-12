@@ -2280,7 +2280,7 @@ static void radar_pack_warning_flags(uint8_t &payload4, uint8_t &payload5)
 /*
   前向雷达距离 + 低电量 + 扩展告警，打包为 FrSky passthrough 0x5010 单包帧直接注入 CRSF 调度器。
   data（uint32 小端）：
-    bits[15:0]  = 前向距离，单位 cm（无效时为 0）
+    bits[15:0]  = 前向距离，单位 cm（无效时为 0；仅在解锁且离地高度 > 0.5m 时上报真实值）
     bits[19:16] = AVOID_MARGIN 参数值（4-bit，0~15m）
     bits[23:20] = AVOID_DIST_MAX 参数值（4-bit，0~15m）
     bit[28]     = 低电量标志（1 = 飞控已触发低电量/临界保护）
@@ -2290,16 +2290,29 @@ static void radar_pack_warning_flags(uint8_t &payload4, uint8_t &payload5)
 void AP_CRSF_Telem::calc_radar_data()
 {
     // --- 1. 读取前向测距仪距离（instance 0）---
+    // 门控条件：仅当 飞机已解锁 且 离地高度 > 0.5 m 时才上报真实距离，
+    // 否则 dist_valid 保持 false，data 的 bits[15:0] 发送 0（无效），
+    // 避免地面 / 起飞前的杂散距离干扰地面站显示。
     bool dist_valid = false;
     float dist_m = 0.0f;
 
+    bool radar_gate_open = false;
+    if (hal.util->get_soft_armed()) {
+        const float alt_above_home_m = get_nav_alt_m(Location::AltFrame::ABOVE_HOME);
+        if (alt_above_home_m > 0.5f) {
+            radar_gate_open = true;
+        }
+    }
+
 #if AP_RANGEFINDER_ENABLED
-    RangeFinder *rf = AP::rangefinder();
-    if (rf != nullptr) {
-        AP_RangeFinder_Backend *backend = rf->get_backend(0);
-        if (backend != nullptr && backend->status() == RangeFinder::Status::Good) {
-            dist_m = backend->distance();
-            dist_valid = true;
+    if (radar_gate_open) {
+        RangeFinder *rf = AP::rangefinder();
+        if (rf != nullptr) {
+            AP_RangeFinder_Backend *backend = rf->get_backend(0);
+            if (backend != nullptr && backend->status() == RangeFinder::Status::Good) {
+                dist_m = backend->distance();
+                dist_valid = true;
+            }
         }
     }
 #endif
