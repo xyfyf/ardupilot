@@ -28,6 +28,10 @@ extern AP_IOMCU iomcu;
 #endif
 #include <AP_Scripting/AP_Scripting.h>
 
+#ifndef HAL_EARLY_RCOUT_INIT_AFTER_PARAMS
+#define HAL_EARLY_RCOUT_INIT_AFTER_PARAMS 0
+#endif
+
 #define SCHED_TASK(func, rate_hz, max_time_micros, prio) SCHED_TASK_CLASS(AP_Vehicle, &vehicle, func, rate_hz, max_time_micros, prio)
 
 /*
@@ -325,6 +329,12 @@ void AP_Vehicle::setup()
     // values from storage:
     AP_Param::check_var_info();
     load_parameters();
+
+#if HAL_EARLY_RCOUT_INIT_AFTER_PARAMS
+    // Start PWM outputs as soon as parameters are available, before slower
+    // vehicle peripherals finish initialising.
+    hal.rcout->init();
+#endif
 
 #if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS
     if (AP_BoardConfig::get_sdcard_slowdown() != 0) {

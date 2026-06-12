@@ -54,8 +54,76 @@ struct boardinfo board_info = {
 #define HAL_BOOTLOADER_TIMEOUT 5000
 #endif
 
+#ifndef HAL_BOOTLOADER_EARLY_PWM_1000_400HZ
+#define HAL_BOOTLOADER_EARLY_PWM_1000_400HZ 0
+#endif
+
 #ifndef HAL_STAY_IN_BOOTLOADER_VALUE
 #define HAL_STAY_IN_BOOTLOADER_VALUE 0
+#endif
+
+#if HAL_BOOTLOADER_EARLY_PWM_1000_400HZ
+static void setup_timer_pwm_1000us_400hz(stm32_tim_t *tim, uint32_t tim_clock, uint32_t ccer, bool has_bdtr)
+{
+    constexpr uint32_t pwm_tick_hz = 1000000U;
+    constexpr uint32_t pwm_rate_hz = 400U;
+    constexpr uint32_t pwm_high_us = 1000U;
+
+    tim->CR1 = 0;
+    tim->DIER = 0;
+    tim->SR = 0;
+    tim->CNT = 0;
+    tim->PSC = (tim_clock / pwm_tick_hz) - 1U;
+    tim->ARR = (pwm_tick_hz / pwm_rate_hz) - 1U;
+    tim->CCR[0] = pwm_high_us;
+    tim->CCR[1] = pwm_high_us;
+    tim->CCR[2] = pwm_high_us;
+    tim->CCR[3] = pwm_high_us;
+    tim->CCMR1 = STM32_TIM_CCMR1_OC1M(6) | STM32_TIM_CCMR1_OC1PE |
+                 STM32_TIM_CCMR1_OC2M(6) | STM32_TIM_CCMR1_OC2PE;
+    tim->CCMR2 = STM32_TIM_CCMR2_OC3M(6) | STM32_TIM_CCMR2_OC3PE |
+                 STM32_TIM_CCMR2_OC4M(6) | STM32_TIM_CCMR2_OC4PE;
+    tim->CCER = ccer;
+    tim->EGR = STM32_TIM_EGR_UG;
+    tim->SR = 0;
+    if (has_bdtr) {
+        tim->BDTR = STM32_TIM_BDTR_MOE;
+    }
+    tim->CR1 = STM32_TIM_CR1_ARPE | STM32_TIM_CR1_URS | STM32_TIM_CR1_CEN;
+}
+
+static void bootloader_early_pwm_1000us_400hz()
+{
+    constexpr uint32_t pwm_gpio_mode = PAL_MODE_ALTERNATE(1) |
+                                       PAL_STM32_OTYPE_PUSHPULL |
+                                       PAL_STM32_OSPEED_HIGHEST |
+                                       PAL_STM32_PUPDR_FLOATING;
+
+    rccEnableTIM1(false);
+    rccResetTIM1();
+    rccEnableTIM2(false);
+    rccResetTIM2();
+
+    setup_timer_pwm_1000us_400hz(STM32_TIM1, STM32_TIMCLK2,
+                                 STM32_TIM_CCER_CC1E |
+                                 STM32_TIM_CCER_CC2E |
+                                 STM32_TIM_CCER_CC3E |
+                                 STM32_TIM_CCER_CC4E,
+                                 true);
+    setup_timer_pwm_1000us_400hz(STM32_TIM2, STM32_TIMCLK1,
+                                 STM32_TIM_CCER_CC3E |
+                                 STM32_TIM_CCER_CC4E,
+                                 false);
+
+    // EFT_CAAC PWM1-PWM6: PA8 TIM1_CH1, PB11 TIM2_CH4,
+    // PB10 TIM2_CH3, PE14 TIM1_CH4, PE13 TIM1_CH3, PE11 TIM1_CH2.
+    palSetPadMode(GPIOA, 8, pwm_gpio_mode);
+    palSetPadMode(GPIOB, 10, pwm_gpio_mode);
+    palSetPadMode(GPIOB, 11, pwm_gpio_mode);
+    palSetPadMode(GPIOE, 11, pwm_gpio_mode);
+    palSetPadMode(GPIOE, 13, pwm_gpio_mode);
+    palSetPadMode(GPIOE, 14, pwm_gpio_mode);
+}
 #endif
 
 #if EXT_FLASH_SIZE_MB
@@ -70,6 +138,10 @@ int main(void)
 {
 #ifdef AP_BOOTLOADER_CUSTOM_HERE4
     custom_startup();
+#endif
+
+#if HAL_BOOTLOADER_EARLY_PWM_1000_400HZ
+    bootloader_early_pwm_1000us_400hz();
 #endif
 
     flash_init();

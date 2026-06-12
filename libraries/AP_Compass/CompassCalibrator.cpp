@@ -366,28 +366,70 @@ void CompassCalibrator::update_cal_status()
     cal_state.attempt = _attempt;
     memcpy(cal_state.completion_mask, _completion_mask, sizeof(completion_mask_t));
     cal_state.completion_pct = 0.0f;
-    // first sampling step is 1/3rd of the progress bar
-    // never return more than 99% unless _status is Status::SUCCESS
+
+    // 两阶段校准进度分配（"深度感知"算法）：
+    //   0%   ~ 50%   水平阶段(phase 0)：min(样本进度, IMU旋转进度)
+    //                两项都需达成才能切阶段，取较慢者作为瓶颈，进度单调推进
+    //   50%  ~ 95%   朝下阶段(phase 1)：朝下采样 (+25) 与 IMU 旋转 (+20) 加权
+    //                朝下流程是"先采样，采满后才计圈"，两项串行，故独立累加
+    //   95%  ~ 97%   STEP_ONE 末段 sphere_fit (10 步)
+    //   97%  ~ 99%   STEP_TWO 椭球+精修 (35 步)
+    //   100%         SUCCESS
+    // 非 SUCCESS 状态最终再统一夹到 ≤ 99%，避免"100% 却尚未成功"的歧义
     switch (_status) {
         case Status::NOT_STARTED:
         case Status::WAITING_TO_START:
             cal_state.completion_pct = 0.0f;
             break;
+
         case Status::RUNNING_STEP_ONE:
-            cal_state.completion_pct = 33.3f * _samples_collected/COMPASS_CAL_NUM_SAMPLES;
+            if (_phase == 0) {
+                // 水平阶段：0% → 50%
+                const float sample_p = constrain_float(
+                    (float)_phase1_samples / (float)COMPASS_CAL_PHASE1_SAMPLES, 0.0f, 1.0f);
+                const float rot_p = constrain_float(
+                    _phase0_rot_accum / (2.0f * M_PI), 0.0f, 1.0f);
+                cal_state.completion_pct = 50.0f * MIN(sample_p, rot_p);
+            } else {
+                // 朝下阶段（采样 + 旋转）：50% → 95%
+                const uint16_t p1_need = COMPASS_CAL_NUM_SAMPLES - COMPASS_CAL_PHASE1_SAMPLES;
+                const uint16_t p1_done = (_samples_collected > COMPASS_CAL_PHASE1_SAMPLES)
+                                         ? (uint16_t)(_samples_collected - COMPASS_CAL_PHASE1_SAMPLES)
+                                         : (uint16_t)0;
+                const float sample_p = constrain_float(
+                    (float)p1_done / (float)p1_need, 0.0f, 1.0f);
+                const float rot_p = constrain_float(
+                    _phase1_rot_accum / (2.0f * M_PI), 0.0f, 1.0f);
+                cal_state.completion_pct = 50.0f + 25.0f * sample_p + 20.0f * rot_p;
+
+                // STEP_ONE 末段 sphere_fit (10 步)：95% → 97%
+                const float fit_p = constrain_float((float)_fit_step / 10.0f, 0.0f, 1.0f);
+                cal_state.completion_pct += 2.0f * fit_p;
+            }
             break;
-        case Status::RUNNING_STEP_TWO:
-            cal_state.completion_pct = 33.3f + 65.7f*((float)(_samples_collected-_samples_thinned)/(COMPASS_CAL_NUM_SAMPLES-_samples_thinned));
+
+        case Status::RUNNING_STEP_TWO: {
+            // 椭球 + 精修共 35 步：97% → 99%
+            const float fit_p = constrain_float((float)_fit_step / 35.0f, 0.0f, 1.0f);
+            cal_state.completion_pct = 97.0f + 2.0f * fit_p;
             break;
+        }
+
         case Status::SUCCESS:
             cal_state.completion_pct = 100.0f;
             break;
+
         case Status::FAILED:
         case Status::BAD_ORIENTATION:
         case Status::BAD_RADIUS:
             cal_state.completion_pct = 0.0f;
             break;
     };
+
+    // 仅 SUCCESS 允许 100%，其它状态最高停在 99%
+    if (_status != Status::SUCCESS) {
+        cal_state.completion_pct = MIN(cal_state.completion_pct, 99.0f);
+    }
 }
 
 
