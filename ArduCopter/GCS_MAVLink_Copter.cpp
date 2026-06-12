@@ -1267,6 +1267,29 @@ void GCS_MAVLINK_Copter::handle_message(const mavlink_message_t &msg)
         copter.g2.toy_mode.handle_message(msg);
         break;
 #endif
+    case MAVLINK_MSG_ID_PARAM_SET: {
+        // Enforce write-once semantics for factory SN parameters. Once a
+        // SN group has been programmed (any chunk in the group is non-zero
+        // at boot), further MAVLink writes to that group are rejected and
+        // the current value is sent back so the GCS does not believe it
+        // succeeded.
+        mavlink_param_set_t packet;
+        mavlink_msg_param_set_decode(&msg, &packet);
+        char key[AP_MAX_NAME_SIZE + 1];
+        strncpy(key, packet.param_id, AP_MAX_NAME_SIZE);
+        key[AP_MAX_NAME_SIZE] = 0;
+        if (copter.g2.factory_sn.is_param_locked(key)) {
+            enum ap_var_type var_type;
+            AP_Param *vp = AP_Param::find(key, &var_type);
+            if (vp != nullptr) {
+                send_parameter_value(key, var_type, vp->cast_to_float(var_type));
+            }
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "Factory SN locked (%s)", key);
+            break;
+        }
+        GCS_MAVLINK::handle_message(msg);
+        break;
+    }
     default:
         GCS_MAVLINK::handle_message(msg);
         break;

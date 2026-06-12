@@ -4,6 +4,7 @@
 
 #include <AP_Common/AP_Common.h>
 #include "RC_Channel_Copter.h"
+#include "FactorySN.h"
 #include <AP_Proximity/AP_Proximity.h>
 
 #if MODE_FOLLOW_ENABLED
@@ -701,6 +702,10 @@ public:
     AP_Float rc_tuning2_min;
     AP_Float rc_tuning2_max;
 #endif  // AP_RC_TRANSMITTER_TUNING_ENABLED
+
+    // Factory-programmed serial numbers (SN_PROD*, SN_FACT*, SN_FRM*, SN_FC*).
+    // Write-once via MAVLink/GCS, then read-only after reboot.
+    FactorySN factory_sn;
 };
 
 extern const AP_Param::Info        var_info[];

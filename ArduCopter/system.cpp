@@ -13,11 +13,10 @@ static void failsafe_check_static()
     copter.failsafe_check();
 }
 
-#include "CustomSN.h"
-
 void Copter::init_ardupilot()
 {
-    CustomSN::init();
+    // Lock factory SN groups whose values were already programmed in EEPROM.
+    g2.factory_sn.snapshot_lock_state();
 
     // init winch
 #if AP_WINCH_ENABLED
@@ -41,17 +40,8 @@ void Copter::init_ardupilot()
     // setup telem slots with serial ports
     gcs().setup_uarts();
 
-    // Print custom SNs (from EFT nameplate) to GCS
-    if (CustomSN::is_valid()) {
-        const CustomSNData& sn = CustomSN::get_data();
-        gcs().send_text(MAV_SEVERITY_INFO, "Product Model: %.*s", CUSTOM_SN_FIELD_LEN, sn.product_model);
-        gcs().send_text(MAV_SEVERITY_INFO, "Factory SN:    %.*s", CUSTOM_SN_FIELD_LEN, sn.factory_sn);
-        gcs().send_text(MAV_SEVERITY_INFO, "Frame SN:      %.*s", CUSTOM_SN_FIELD_LEN, sn.frame_sn);
-        gcs().send_text(MAV_SEVERITY_INFO, "FC SN:         %.*s", CUSTOM_SN_FIELD_LEN, sn.fc_sn);
-    } else {
-        gcs().send_text(MAV_SEVERITY_INFO, "Custom SN: Not Initialized");
-    }
-
+    // Print factory SNs to GCS
+    g2.factory_sn.send_banner();
 
 #if OSD_ENABLED
     osd.init();

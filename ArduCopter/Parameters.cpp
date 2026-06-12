@@ -1227,6 +1227,10 @@ const AP_Param::GroupInfo ParametersG2::var_info2[] = {
     AP_GROUPINFO("TUNE2", 13, ParametersG2, rc_tuning2_param, 0),
 #endif  // AP_RC_TRANSMITTER_TUNING_ENABLED
 
+    // @Group: SN_
+    // @Path: FactorySN.cpp
+    AP_SUBGROUPINFO(factory_sn, "SN_", 14, ParametersG2, FactorySN),
+
     // ID 62 is reserved for the AP_SUBGROUPEXTENSION
 
     AP_GROUPEND
