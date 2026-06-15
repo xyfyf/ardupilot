@@ -19,11 +19,16 @@
   MAVLink float-based parameter protocol. 7 x 3 = 21 chars capacity per
   SN (user spec: at most 20 chars).
 
-  Write-once semantics:
-    On boot we snapshot each group's "any non-zero" state. A group whose
-    snapshot is set is considered locked: MAVLink/GCS PARAM_SET on any
-    chunk in that group is denied. A factory operator can therefore write
-    all 7 chunks of a group in one session (lock activates at next boot).
+  Strict per-chunk write-once semantics:
+    Each SN_xxxN parameter becomes immutable the moment its current value
+    is non-zero. PARAM_SET to a non-zero chunk with a different value is
+    denied by the GCS_MAVLINK_Copter PARAM_SET intercept, regardless of
+    whether we have rebooted since the first write. Writes that supply
+    the SAME value (no-op refreshes) are allowed so periodic GCS sync
+    does not produce spurious "locked" warnings.
+
+    Consequence: each chunk MUST be written correctly on the very first
+    try. A typo cannot be repaired short of erasing EEPROM (re-flashing).
 */
 class FactorySN {
 public:
@@ -35,11 +40,10 @@ public:
     static constexpr uint8_t BYTES_PER_CHUNK = 3;
     static constexpr uint8_t MAX_CHARS = NUM_CHUNKS * BYTES_PER_CHUNK; // 21
 
-    // Sample current chunk values and lock groups whose stored value is non-zero.
-    // Call once during boot, after AP_Param::load_all().
-    void snapshot_lock_state();
-
-    // True if `name` is one of our SN_* params AND its group is locked.
+    // True if `name` is one of our SN_xxxN params AND its current value is
+    // non-zero. Locking is per-chunk and based on the live AP_Int32 value
+    // (NOT a boot snapshot), so it engages instantly after the first
+    // successful write.
     bool is_param_locked(const char *name) const;
 
     // Send each configured SN to all GCS connections via STATUSTEXT.
@@ -60,10 +64,12 @@ private:
     AP_Int32 _frame[NUM_CHUNKS];
     AP_Int32 _fc   [NUM_CHUNKS];
 
-    bool _locked[(uint8_t)Group::NUM_GROUPS];
-
     static Group group_for_param(const char *name);
     const AP_Int32 *chunks_for_group(Group g) const;
     static const char *label_for_group(Group g);
     static void decode_to_string(const AP_Int32 *chunks, char *dest, size_t dest_size);
+
+    // Parse the trailing digit ('1'..'7') of a SN_xxxN name to a chunk index 0..6.
+    // Returns -1 if the name does not end with a valid digit.
+    static int8_t chunk_index_of(const char *name);
 };

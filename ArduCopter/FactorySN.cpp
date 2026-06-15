@@ -148,27 +148,6 @@ const AP_Param::GroupInfo FactorySN::var_info[] = {
 FactorySN::FactorySN()
 {
     AP_Param::setup_object_defaults(this, var_info);
-    for (uint8_t i = 0; i < (uint8_t)Group::NUM_GROUPS; i++) {
-        _locked[i] = false;
-    }
-}
-
-void FactorySN::snapshot_lock_state()
-{
-    for (uint8_t g = 0; g < (uint8_t)Group::NUM_GROUPS; g++) {
-        const AP_Int32 *chunks = chunks_for_group((Group)g);
-        if (chunks == nullptr) {
-            continue;
-        }
-        bool any_set = false;
-        for (uint8_t i = 0; i < NUM_CHUNKS; i++) {
-            if (chunks[i].get() != 0) {
-                any_set = true;
-                break;
-            }
-        }
-        _locked[g] = any_set;
-    }
 }
 
 FactorySN::Group FactorySN::group_for_param(const char *name)
@@ -214,13 +193,39 @@ const char *FactorySN::label_for_group(Group g)
     }
 }
 
+int8_t FactorySN::chunk_index_of(const char *name)
+{
+    if (name == nullptr) {
+        return -1;
+    }
+    const size_t n = strlen(name);
+    if (n == 0) {
+        return -1;
+    }
+    const char last = name[n - 1];
+    if (last < '1' || last > (char)('0' + NUM_CHUNKS)) {
+        return -1;
+    }
+    return (int8_t)(last - '1');
+}
+
 bool FactorySN::is_param_locked(const char *name) const
 {
+    // Per-chunk strict lock: as soon as a SN_xxxN parameter holds a non-zero
+    // value, further PARAM_SET attempts that try to change it are denied.
     const Group g = group_for_param(name);
     if (g == Group::NONE) {
         return false;
     }
-    return _locked[(uint8_t)g];
+    const int8_t idx = chunk_index_of(name);
+    if (idx < 0 || idx >= (int8_t)NUM_CHUNKS) {
+        return false;
+    }
+    const AP_Int32 *chunks = chunks_for_group(g);
+    if (chunks == nullptr) {
+        return false;
+    }
+    return chunks[idx].get() != 0;
 }
 
 void FactorySN::decode_to_string(const AP_Int32 *chunks, char *dest, size_t dest_size)

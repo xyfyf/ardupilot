@@ -1268,11 +1268,12 @@ void GCS_MAVLINK_Copter::handle_message(const mavlink_message_t &msg)
         break;
 #endif
     case MAVLINK_MSG_ID_PARAM_SET: {
-        // Enforce write-once semantics for factory SN parameters. Once a
-        // SN group has been programmed (any chunk in the group is non-zero
-        // at boot), further MAVLink writes to that group are rejected and
-        // the current value is sent back so the GCS does not believe it
-        // succeeded.
+        // Enforce strict per-chunk write-once for factory SN parameters.
+        // Once a SN_xxxN parameter holds a non-zero value, any subsequent
+        // PARAM_SET that would actually change it is rejected (no boot
+        // snapshot dependency — the lock engages instantly). Same-value
+        // refreshes are allowed to pass through so periodic GCS sync does
+        // not produce spurious "locked" warnings.
         mavlink_param_set_t packet;
         mavlink_msg_param_set_decode(&msg, &packet);
         char key[AP_MAX_NAME_SIZE + 1];
@@ -1282,10 +1283,13 @@ void GCS_MAVLINK_Copter::handle_message(const mavlink_message_t &msg)
             enum ap_var_type var_type;
             AP_Param *vp = AP_Param::find(key, &var_type);
             if (vp != nullptr) {
-                send_parameter_value(key, var_type, vp->cast_to_float(var_type));
+                const float old_value = vp->cast_to_float(var_type);
+                if (!is_equal(old_value, packet.param_value)) {
+                    send_parameter_value(key, var_type, old_value);
+                    GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "Factory SN locked (%s)", key);
+                    break;
+                }
             }
-            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "Factory SN locked (%s)", key);
-            break;
         }
         GCS_MAVLINK::handle_message(msg);
         break;

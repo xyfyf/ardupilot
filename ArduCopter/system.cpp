@@ -15,9 +15,6 @@ static void failsafe_check_static()
 
 void Copter::init_ardupilot()
 {
-    // Lock factory SN groups whose values were already programmed in EEPROM.
-    g2.factory_sn.snapshot_lock_state();
-
     // init winch
 #if AP_WINCH_ENABLED
     g2.winch.init();
