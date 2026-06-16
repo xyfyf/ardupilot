@@ -1248,8 +1248,12 @@ bool AP_Arming::proximity_checks(bool report) const
     }
     char buffer[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1];
     if (!proximity->prearm_healthy(buffer, ARRAY_SIZE(buffer))) {
-        check_failed(report, "%s", buffer);
-        return false;
+        // Use Check::RANGEFINDER so that when ARMING_CHECK bit15 is cleared,
+        // this failure is demoted to DEBUG severity and does not block arming.
+        // This allows the vehicle to arm without a proximity sensor connected
+        // while still warning when the check is enabled.
+        check_failed(Check::RANGEFINDER, report, "%s", buffer);
+        return check_enabled(Check::RANGEFINDER) ? false : true;
     }
     return true;
 }

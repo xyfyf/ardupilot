@@ -1,12 +1,12 @@
 --[[
-  WS2812 / NeoPixel 外接灯条 — 定制版混合灯语 v5.0 (基于 A3 & 开源标准)
+  WS2812 外接灯条 — 灯语 v5.1
   
   依据要求复刻：
   - 自检: 红绿黄连续闪烁
   - 故障: 红灯常亮
   - RC丢失: 黄灯快闪
   - 低电量: 1级红灯慢闪，2级红灯快闪
-  - 罗盘异常: 红黄交替闪烁
+  - 罗盘异常: 红黄交替闪烁 (仅当"一个罗盘都没有"或"罗盘未校准"时触发)
   - RTK模式: 绿灯双闪
   - GPS模式: 绿灯慢闪
   - 姿态模式: 黄灯慢闪
@@ -15,6 +15,11 @@
   v5.0 改动:
   - 罗盘异常的判定条件与地面站 "Bad Compass Health" 保持一致 (compass:healthy(0))
     移除了原 v4.0 中过于敏感的 EKF 磁航向新息方差 (mag_var > 0.75) 判定，避免误报
+  v5.1 改动:
+  - 罗盘异常判定改为只关心"配置/校准"层面:
+      * 一个罗盘都没有 (没有任何 slot 同时满足 COMPASS_USE*=1 且 COMPASS_DEV_ID*>0)
+      * 或 任意启用的罗盘未校准 (COMPASS_OFS*_X/Y/Z 全为 0)
+    其它情况 (例如运行中 healthy 抖动、单罗盘) 不再报警，避免飞行中频繁误报
 --]]
 
 ---@diagnostic disable: need-check-nil
@@ -123,6 +128,47 @@ local function param_volt(name)
     return v
 end
 
+-- 判断某个罗盘 slot 是否"启用且在线"
+--   prefix_use: COMPASS_USE / COMPASS_USE2 / COMPASS_USE3
+--   prefix_id : COMPASS_DEV_ID / COMPASS_DEV_ID2 / COMPASS_DEV_ID3
+local function compass_slot_active(use_name, id_name)
+    local use = param:get(use_name)
+    local id  = param:get(id_name)
+    -- USE 参数缺失视为默认启用 (=1)
+    local enabled = (use == nil) or (use >= 0.5)
+    local online  = (id ~= nil) and (id > 0)
+    return enabled and online
+end
+
+-- 判断某个罗盘 slot 的校准偏移是否仍为 0 (即未做过校准)
+local function compass_slot_uncalibrated(ofs_prefix)
+    local x = param:get(ofs_prefix .. "_X")
+    local y = param:get(ofs_prefix .. "_Y")
+    local z = param:get(ofs_prefix .. "_Z")
+    if x == nil or y == nil or z == nil then
+        -- 参数不存在时认为"未校准"较保守，但实际 ofs 参数总是存在的
+        return false
+    end
+    return x == 0 and y == 0 and z == 0
+end
+
+-- 统计启用并在线的罗盘数量
+local function active_compass_count()
+    local n = 0
+    if compass_slot_active("COMPASS_USE",  "COMPASS_DEV_ID")  then n = n + 1 end
+    if compass_slot_active("COMPASS_USE2", "COMPASS_DEV_ID2") then n = n + 1 end
+    if compass_slot_active("COMPASS_USE3", "COMPASS_DEV_ID3") then n = n + 1 end
+    return n
+end
+
+-- 任意启用的罗盘未校准 → 视为整体未校准
+local function any_active_compass_uncalibrated()
+    if compass_slot_active("COMPASS_USE",  "COMPASS_DEV_ID")  and compass_slot_uncalibrated("COMPASS_OFS")  then return true end
+    if compass_slot_active("COMPASS_USE2", "COMPASS_DEV_ID2") and compass_slot_uncalibrated("COMPASS_OFS2") then return true end
+    if compass_slot_active("COMPASS_USE3", "COMPASS_DEV_ID3") and compass_slot_uncalibrated("COMPASS_OFS3") then return true end
+    return false
+end
+
 -- 状态机：按优先级选择当前应当显示的 Pattern
 local function pick_pattern()
     -- 1. 自检 (Booting / AHRS未就绪)
@@ -151,11 +197,11 @@ local function pick_pattern()
         return P_BATT_LVL1  -- 一级低压慢闪
     end
 
-    -- 5. 指南针异常: 判定条件与地面站 "Bad Compass Health" 保持一致
-    -- 地面站源码 (GCS_Common.cpp): control_sensors_health 只依赖 compass.healthy()
-    -- compass.healthy() 内部实现: (time - last_update_ms < 500)
-    -- 这里只用主罗盘 healthy 标志，避免脚本因 EKF 磁航向新息抖动误报
-    if not compass:healthy(0) then
+    -- 5. 指南针异常 (v5.1):
+    --    仅在以下两种"配置/校准层面"的问题下触发，避免运行中 healthy 抖动误报
+    --      a) 一个罗盘都没有 (没有任何 slot 启用并在线)
+    --      b) 任一启用的罗盘从未校准 (COMPASS_OFS*_X/Y/Z 全为 0)
+    if active_compass_count() == 0 or any_active_compass_uncalibrated() then
         return P_COMPASS_ERR
     end
 

@@ -174,6 +174,25 @@ void AP_RCProtocol_CRSF::apply_raw_aux15_16(const uint8_t *payload, uint16_t *ch
 }
 #endif
 
+uint16_t AP_RCProtocol_CRSF::crsf_raw_to_pwm_us(uint16_t raw)
+{
+    if (raw <= CRSF_DIGITAL_CHANNEL_MIN) {
+        return 1000U;
+    }
+    if (raw >= CRSF_DIGITAL_CHANNEL_MAX) {
+        return 2000U;
+    }
+    return 1000U + uint16_t((uint32_t(raw - CRSF_DIGITAL_CHANNEL_MIN) * 1000U) /
+                            (CRSF_DIGITAL_CHANNEL_MAX - CRSF_DIGITAL_CHANNEL_MIN));
+}
+
+void AP_RCProtocol_CRSF::decode_crsf_rc_channels_packed(const uint8_t *payload, uint8_t nchannels, uint16_t *values)
+{
+    for (uint8_t i = 0; i < nchannels; i++) {
+        values[i] = crsf_raw_to_pwm_us(decode_11bit_channel_raw(payload, i));
+    }
+}
+
 #define CRSF_BAUDRATE_1MBIT      1000000U
 #define CRSF_BAUDRATE_2MBIT      2000000U
 
@@ -468,8 +487,8 @@ bool AP_RCProtocol_CRSF::decode_crsf_packet()
 
     switch (_frame.type) {
         case CRSF_FRAMETYPE_RC_CHANNELS_PACKED:
-            // scale factors defined by TBS - TICKS_TO_US(x) ((x - 992) * 5 / 8 + 1500)
-            decode_11bit_channels((const uint8_t*)(&_frame.payload), CRSF_MAX_CHANNELS, _channels, 5U, 8U, 880U);
+            // CRSF raw 172-1811 -> PWM 1000-2000 us
+            decode_crsf_rc_channels_packed((const uint8_t*)(&_frame.payload), CRSF_MAX_CHANNELS, _channels);
 #if AP_CRSF_ELRS_RAW_AUX15_16_ENABLED
             apply_raw_aux15_16((const uint8_t*)(&_frame.payload), _channels);
 #endif

@@ -180,6 +180,3 @@ define HAL_STORAGE_SIZE 32768
 # Enable PPP networking backend for LTE modem support
 define AP_NETWORKING_BACKEND_PPP 1
 DMA_NOSHARE SPI1* SPI2* USART1*
-
-# ELRS CH15/CH16 透传 0-2047 原始 CRSF 数值（不做 PWM us 映射）
-define AP_CRSF_ELRS_RAW_AUX15_16_ENABLED 1

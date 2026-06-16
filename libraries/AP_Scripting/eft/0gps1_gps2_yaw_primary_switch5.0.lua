@@ -7,17 +7,20 @@
   功能 (3 种工作状态):
     1. GPS1 (ublox) + GPS2 (RTK) 都在线, GPS2 状态 >= 3D Fix:
          GPS1_TYPE      = 1   (Auto, 启用 ublox)
+         GPS2_TYPE      = 25  (UM982 / Unicore moving baseline, 启用 RTK)
          EK3_SRC1_YAW   = 2   (使用 GPS 双天线 yaw)
          GPS_PRIMARY    = 1   (优先 GPS2)
          COMPASS_USE    = 1   (启用外置罗盘 1, ublox 外接的)
-    2. 只识别到 GPS1 (GPS2 不在线 / 状态 < 3D Fix):
+    2. 只识别到 GPS1 (GPS2 不在线 / 状态 < 3D Fix), 即 RTK 断联:
          GPS1_TYPE      = 1
+         GPS2_TYPE      = 0   (禁用 GPS2, 消除 "GPS 2: not healthy" 告警)
          EK3_SRC1_YAW   = 1   (回退使用磁罗盘 yaw)
          GPS_PRIMARY    = 0   (优先 GPS1)
          COMPASS_USE    = 1   (启用外置罗盘 1)
     3. 只识别到 GPS2 RTK (ublox GPS1 被拔掉, gps:status(0)==0):
          GPS1_TYPE      = 0   (禁用 GPS1, 让飞控不再提示 "GPS 1: Bad fix" /
                                "GPS 1: not healthy")
+         GPS2_TYPE      = 25  (UM982 / Unicore moving baseline, 启用 RTK)
          EK3_SRC1_YAW   = 2   (使用 GPS 双天线 yaw)
          GPS_PRIMARY    = 1   (使用 GPS2; 保证 GPS1 不是 primary,
                                否则会触发 "GPS 1: primary but TYPE 0")
@@ -31,8 +34,11 @@
       因为 AP_GPS::update_instance() 在 drivers[0]==nullptr 时会调用
       detect_instance() 重新探测, 所以运行时把 GPS1_TYPE 从 0 改成 1
       也能让 ublox 被检测出来.
+    - 同理, 若发现 GPS2_TYPE == 0 (上次 RTK 断联时被脚本写成 0),
+      强制改回 25 (UM982), 让本次开机有机会重新检测到 RTK.
     - 经过 STARTUP_DELAY_MS + CONFIRM_COUNT 秒后仍然 gps:status(0)==0,
       且 GPS2 RTK 正常, 才会把 GPS1_TYPE 写回 0, 永久消除 GPS1 告警.
+      反之 RTK 长时间未上线, 才会把 GPS2_TYPE 写回 0.
 
   安全策略:
     - EK3_SRC1_YAW / GPS_PRIMARY 飞行中切换可能引发 EKF yaw 重对齐,
@@ -61,8 +67,9 @@ local PRIMARY_GPS1 = 0
 local PRIMARY_GPS2 = 1
 
 -- GPS_TYPE 选项 (见 AP_GPS::GPS_Type)
-local TYPE_NONE = 0     -- 关闭该 GPS 实例
-local TYPE_AUTO = 1     -- ublox 自动检测
+local TYPE_NONE  = 0     -- 关闭该 GPS 实例
+local TYPE_AUTO  = 1     -- ublox 自动检测
+local TYPE_UM982 = 25    -- UM982 / Unicore moving baseline NMEA (GPS2 RTK)
 
 -- COMPASS_USE 选项: 0=关闭, 1=启用. 这里只动 COMPASS_USE (外置罗盘 1, ublox 自带的),
 -- COMPASS_USE2 保留为 1 (飞控板内置罗盘) 避免 "Compass not healthy".
@@ -90,7 +97,7 @@ local function set_param_if_diff(name, value)
         if param:set_and_save(name, value) then
             return true
         else
-            gcs:send_text(SEV_WARN, string.format("Failed to set %s=%d", name, value))
+            gcs:send_text(SEV_WARN, string.format("%s set fail", name))
         end
     end
     return false
@@ -102,10 +109,17 @@ end
 local function probe_gps1_on_startup()
     local cur = param:get("GPS1_TYPE")
     if cur ~= nil and cur == TYPE_NONE then
-        if param:set_and_save("GPS1_TYPE", TYPE_AUTO) then
-            gcs:send_text(SEV_INFO,
-                "GPS1_TYPE=0 -> 1 (Auto): probing ublox for re-detection")
-        end
+        param:set_and_save("GPS1_TYPE", TYPE_AUTO)
+    end
+end
+
+-- 启动探测: 如果 GPS2_TYPE 当前为 0 (上次脚本判定 RTK 断联时写入), 拉回 25 (UM982)
+-- 让本次开机重新检测 RTK. 如果 RTK 仍未连接, 后面 STATE_GPS1_ONLY 判定通过后
+-- 还会再写回 0.
+local function probe_gps2_on_startup()
+    local cur = param:get("GPS2_TYPE")
+    if cur ~= nil and cur == TYPE_NONE then
+        param:set_and_save("GPS2_TYPE", TYPE_UM982)
     end
 end
 
@@ -140,34 +154,37 @@ end
 
 local function apply_state(state)
     if state == STATE_BOTH_OK then
+        -- 双 GPS 都在线: GPS2 必须先有 TYPE=25 才能正常出 yaw, 这里一并维护.
         local a = set_param_if_diff("GPS1_TYPE",    TYPE_AUTO)
+        local e = set_param_if_diff("GPS2_TYPE",    TYPE_UM982)
         local b = set_param_if_diff("EK3_SRC1_YAW", YAW_GPS)
         local c = set_param_if_diff("GPS_PRIMARY",  PRIMARY_GPS2)
         local d = set_param_if_diff("COMPASS_USE",  COMPASS_ON)
-        if a or b or c or d then
-            gcs:send_text(SEV_INFO,
-                "GPS1+GPS2(RTK) OK: GPS1_TYPE=1, EK3_SRC1_YAW=2(GPS), GPS_PRIMARY=1, COMPASS_USE=1")
+        if a or b or c or d or e then
+            gcs:send_text(SEV_INFO, "GPS: dual RTK")
         end
     elseif state == STATE_GPS1_ONLY then
+        -- RTK 断联: 把 GPS2_TYPE 写 0 关闭该实例, 消除 "GPS 2: not healthy" /
+        -- "GPS 2: Bad fix" 告警. EK3_SRC1_YAW 回退到磁罗盘.
         local a = set_param_if_diff("GPS1_TYPE",    TYPE_AUTO)
+        local e = set_param_if_diff("GPS2_TYPE",    TYPE_NONE)
         local b = set_param_if_diff("EK3_SRC1_YAW", YAW_COMPASS)
         local c = set_param_if_diff("GPS_PRIMARY",  PRIMARY_GPS1)
         local d = set_param_if_diff("COMPASS_USE",  COMPASS_ON)
-        if a or b or c or d then
-            gcs:send_text(SEV_WARN,
-                "GPS2 not detected: GPS1_TYPE=1, EK3_SRC1_YAW=1(Compass), GPS_PRIMARY=0, COMPASS_USE=1")
+        if a or b or c or d or e then
+            gcs:send_text(SEV_WARN, "GPS: GPS1 only")
         end
     elseif state == STATE_GPS2_ONLY then
-        -- 注意写入顺序: 先把 GPS_PRIMARY 切到 1 (GPS2),
+        -- 注意写入顺序: 先把 GPS_PRIMARY 切到 1 (GPS2), 并确保 GPS2_TYPE=25,
         -- 再把 GPS1_TYPE 设为 0, 避免 "GPS 1: primary but TYPE 0" 中间态告警.
         -- COMPASS_USE 也跟着关掉, 因为 ublox 拔掉后外置罗盘 1 同样不存在.
+        local e = set_param_if_diff("GPS2_TYPE",    TYPE_UM982)
         local a = set_param_if_diff("EK3_SRC1_YAW", YAW_GPS)
         local b = set_param_if_diff("GPS_PRIMARY",  PRIMARY_GPS2)
         local c = set_param_if_diff("GPS1_TYPE",    TYPE_NONE)
         local d = set_param_if_diff("COMPASS_USE",  COMPASS_OFF)
-        if a or b or c or d then
-            gcs:send_text(SEV_WARN,
-                "GPS1(ublox) absent, RTK only: GPS1_TYPE=0, COMPASS_USE=0 (silence GPS1 / compass warnings), EK3_SRC1_YAW=2, GPS_PRIMARY=1")
+        if a or b or c or d or e then
+            gcs:send_text(SEV_WARN, "GPS: RTK only")
         end
     end
 end
@@ -188,7 +205,7 @@ function update()
             local now = millis()
             if (now - last_warn_ms) > WARN_REPEAT_MS then
                 gcs:send_text(SEV_WARN, string.format(
-                    "Armed: GPS source state changed %s -> %s (params kept)",
+                    "GPS change %s->%s (armed)",
                     read_state_name(current_state), read_state_name(s)))
                 last_warn_ms = now
             end
@@ -232,5 +249,5 @@ function update()
 end
 
 probe_gps1_on_startup()
-gcs:send_text(SEV_INFO, "1gps1_gps2_yaw_primary_switch loaded")
+probe_gps2_on_startup()
 return update, STARTUP_DELAY_MS

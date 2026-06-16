@@ -339,6 +339,9 @@ private:
     void process_link_stats_tx_frame(const void* data);
     // crsf v3 decoding
     void decode_variable_bit_channels(const uint8_t* data, uint8_t frame_length, uint8_t nchannels, uint16_t *values);
+    // CRSF raw 172-1811 -> PWM 1000-2000 us
+    static uint16_t crsf_raw_to_pwm_us(uint16_t raw);
+    static void decode_crsf_rc_channels_packed(const uint8_t *payload, uint8_t nchannels, uint16_t *values);
 
 #if AP_CRSF_ELRS_RAW_AUX15_16_ENABLED
     // ELRS CH15/CH16 透传 0-2047 原始 CRSF 数值
