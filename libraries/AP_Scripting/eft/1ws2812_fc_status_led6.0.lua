@@ -27,7 +27,7 @@
 -- ========================= 可调配置 =========================
 local LED_SERVO_FUNCTION = 94  -- 对应地面站 SERVOx_FUNCTION = 94 (Scripting1)
 local NUM_LEDS = 8             -- 你的灯珠数量 (请根据实际情况修改)
-local BRIGHTNESS = 90          -- 全局亮度 (1～255，建议不要太高以免刺眼或过载)
+local BRIGHTNESS = 255       -- 全局亮度 (1～255，建议不要太高以免刺眼或过载)
 local UPDATE_MS = 50           -- 刷新率（50ms = 20Hz）
 local ARM_HOLD_MS = 3000       -- 解锁成功后常亮保持时长（毫秒）
 
