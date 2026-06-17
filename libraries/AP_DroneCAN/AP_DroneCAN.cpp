@@ -540,6 +540,7 @@ void AP_DroneCAN::loop(void)
         send_parameter_save_request();
         send_node_status();
         _dna_server.verify_nodes();
+        _dna_server.check_duplicate_recovery();
 
 #if AP_DRONECAN_SEND_GPS && AP_GPS_DRONECAN_ENABLED
         if (option_is_set(AP_DroneCAN::Options::SEND_GNSS) && !AP_GPS_DroneCAN::instance_exists(this)) {
@@ -1928,6 +1929,11 @@ bool AP_DroneCAN::check_and_reset_option(Options option)
         _options.set_and_save(int16_t(_options.get() & ~uint16_t(option)));
     }
     return ret;
+}
+
+void AP_DroneCAN::set_option_and_save(Options option)
+{
+    _options.set_and_save(uint16_t(_options.get()) | uint16_t(option));
 }
 
 // handle prearm check

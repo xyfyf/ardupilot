@@ -162,6 +162,9 @@ public:
     // 0. return true if it was set
     bool check_and_reset_option(Options option);
 
+    // set an option bit and save to storage
+    void set_option_and_save(Options option);
+
     CanardInterface& get_canard_iface() { return canard_iface; }
 
     Canard::Publisher<uavcan_equipment_indication_LightsCommand> rgb_led{canard_iface};

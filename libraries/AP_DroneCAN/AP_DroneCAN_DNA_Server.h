@@ -119,6 +119,8 @@ class AP_DroneCAN_DNA_Server
     enum ServerState server_state;
     uint8_t fault_node_id;
     char fault_node_name[15];
+    uint32_t dna_clear_boot_ms;
+    bool duplicate_recovery_active;
 
 
     // dynamic node ID allocation state variables
@@ -160,6 +162,9 @@ public:
 
     //Run through the list of seen node ids for verification
     void verify_nodes();
+
+    // when a duplicate node is detected while disarmed, clear DNA DB and reboot
+    void check_duplicate_recovery();
 };
 
 #endif

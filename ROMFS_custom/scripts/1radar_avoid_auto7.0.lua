@@ -31,12 +31,17 @@
       ARMING_CHECK bit15 = 0   (恒清零，避免雷达瞬时异常卡解锁)
       → 任一项有变化时提示 "REBOOT to enable avoidance"
 
-    radar_ok = false:
+    仅 NodeStatus 未见（雷达真离线）:
       RNGFND1_TYPE       = 0
       PRX1_TYPE          = 0
       AVOID_ENABLE       = 1   (仅 Fence，跳过近距避障)
-      ARMING_CHECK bit15 = 0   (恒清零)
-      → 不阻塞解锁
+
+    Node 在线但 RNGFND 未 Good（常见：上次被写成 TYPE=0 / 上电慢 / ADDR 不匹配）:
+      保持或写入 RNGFND1_TYPE=24、PRX1_TYPE=4，绝不写 0
+      AVOID_ENABLE       = 1   (暂不开避障，等重启后数据正常)
+      → 提示检查 RNGFND1_ADDR 或 REBOOT
+
+    两种失败路径均 ARMING_CHECK bit15 = 0，不阻塞解锁。
 
   备注：bit15 在两种状态下都清零，因为用户希望 PRX/RNGFND 的
   解锁前检查永不阻塞解锁，避障可用与否完全由 AVOID_ENABLE 与
@@ -68,8 +73,9 @@
 ------------------------------------------------------------------
 local RADAR_NODE_ID      = 120     -- 【必改】雷达的 DroneCAN Node ID
 local RANGEFINDER_ORIENT = 0       -- 雷达朝向：0=前, 25=下, 4=后, 2=右, 6=左
-local BOOT_DELAY_MS      = 12000   -- 无雷达时最长等待
+local BOOT_DELAY_MS      = 20000   -- 无雷达时最长等待（DNA 重启后雷达上电较慢）
 local CONFIRM_DELAY_MS   = 3000    -- Good 持续多久才认定稳定
+local INIT_DELAY_MS      = 1000    -- 脚本启动后首次检测延迟（原 3000 会吃掉过多窗口）
 
 local RC_CH              = 7       -- RC 切换通道
 local PWM_THRESHOLD      = 1500    -- > 阈值视为打开避障
@@ -129,6 +135,7 @@ local phase           = 1          -- 1=detect, 2=rc7 toggle, 0=disabled
 local radar_seen      = false      -- 收到了 RADAR_NODE_ID 的 NodeStatus
 local first_good_ms   = nil        -- rangefinder Good 起始时间
 local last_avoid_on   = nil        -- Phase 2 上次 AVOID 状态
+local rngfnd_enabled  = false      -- 已对在线节点写入 TYPE=24
 
 ------------------------------------------------------------------
 -- 工具：写参数（不变就跳过），返回 ok, changed
@@ -215,6 +222,37 @@ local function apply_radar_not_ok(reason_text)
     end
 end
 
+-- Node 在线但测距未 Good：保持 DroneCAN 驱动，避免 TYPE=0 导致永远无法 Good
+local function apply_radar_node_only(reason_text)
+    local _, c1 = set_param_persist(rngfnd_param, "RNGFND1_TYPE", TARGET_RNGFND_TYPE)
+    local _, c2 = set_param_persist(prx_param,    "PRX1_TYPE",    TARGET_PRX_TYPE)
+    set_param_persist(avoid_param, "AVOID_ENABLE", AVOID_OFF)
+    set_arming_rngfnd_check(false)
+
+    if c1 or c2 then
+        gcs:send_text(4, "Radar6.0: " .. reason_text ..
+                         ", TYPE saved, REBOOT then recheck")
+    else
+        gcs:send_text(4, "Radar6.0: " .. reason_text ..
+                         ", keep TYPE=24/4, AVOID off until Good")
+    end
+end
+
+local function ensure_rngfnd_driver_enabled()
+    if rngfnd_enabled then
+        return
+    end
+    local cur = rngfnd_param:get()
+    if cur ~= nil and math.floor(cur) == TARGET_RNGFND_TYPE then
+        rngfnd_enabled = true
+        return
+    end
+    if set_param_persist(rngfnd_param, "RNGFND1_TYPE", TARGET_RNGFND_TYPE) then
+        rngfnd_enabled = true
+        gcs:send_text(6, "Radar6.0: node seen, RNGFND1_TYPE=24 set, REBOOT if no data")
+    end
+end
+
 local function detect_step()
     if arming:is_armed() then
         -- 解锁前没完成检测就直接解锁了：保守按当前参数继续
@@ -234,6 +272,7 @@ local function detect_step()
         while msg do
             if source_node == RADAR_NODE_ID then
                 radar_seen = true
+                ensure_rngfnd_driver_enabled()
             end
             msg, source_node = handle:check_message()
         end
@@ -261,12 +300,14 @@ local function detect_step()
             if radar_seen and not rngfnd_good then
                 reason = string.format("Node %d online but RNGFND status=%d (check RNGFND1_ADDR vs sensor_id)",
                     RADAR_NODE_ID, rngfnd_status)
+                apply_radar_node_only(reason)
             elseif not radar_seen then
                 reason = string.format("Node %d NodeStatus not seen, radar offline?", RADAR_NODE_ID)
+                apply_radar_not_ok(reason)
             else
                 reason = "radar not OK"
+                apply_radar_not_ok(reason)
             end
-            apply_radar_not_ok(reason)
             phase = 0    -- 禁用 RC7 切换
         end
     end
@@ -336,4 +377,4 @@ function update()
     return update, 100
 end
 
-return update, 3000
+return update, INIT_DELAY_MS

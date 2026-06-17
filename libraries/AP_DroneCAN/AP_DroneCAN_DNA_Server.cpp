@@ -26,6 +26,7 @@
 #include <GCS_MAVLink/GCS.h>
 #include <AP_Logger/AP_Logger.h>
 #include <AP_BoardConfig/AP_BoardConfig.h>
+#include <AP_Arming/AP_Arming.h>
 #include <stdio.h>
 extern const AP_HAL::HAL& hal;
 
@@ -262,12 +263,15 @@ bool AP_DroneCAN_DNA_Server::init(uint8_t own_unique_id[], uint8_t own_unique_id
 {
     //Read the details from AP_DroneCAN
     server_state = HEALTHY;
+    dna_clear_boot_ms = 0;
+    duplicate_recovery_active = false;
 
     db.init(&storage); // initialize the database with our accessor
 
     if (_ap_dronecan.check_and_reset_option(AP_DroneCAN::Options::DNA_CLEAR_DATABASE)) {
         GCS_SEND_TEXT(MAV_SEVERITY_INFO, "UC DNA database reset");
         db.reset();
+        dna_clear_boot_ms = AP_HAL::millis();
     }
 
     db.init_server(node_id, own_unique_id, own_unique_id_len);
@@ -487,6 +491,39 @@ void AP_DroneCAN_DNA_Server::handle_allocation(const CanardRxTransfer& transfer,
     }
 
     allocation_pub.broadcast(rsp, false); // never publish allocation message with CAN FD
+}
+
+// when a duplicate node is detected (e.g. radar swapped), clear the DNA
+// database and reboot so the new device can be registered. only runs
+// while disarmed, and won't retry within 60s of a DNA clear on boot.
+void AP_DroneCAN_DNA_Server::check_duplicate_recovery()
+{
+#if AP_ARMING_ENABLED
+    if (server_state != DUPLICATE_NODES) {
+        return;
+    }
+    if (_ap_dronecan.option_is_set(AP_DroneCAN::Options::DNA_IGNORE_DUPLICATE_NODE)) {
+        return;
+    }
+    if (AP::arming().is_armed()) {
+        return;
+    }
+    const uint32_t now = AP_HAL::millis();
+    if (dna_clear_boot_ms != 0 && (now - dna_clear_boot_ms) < 60000) {
+        return;
+    }
+    if (duplicate_recovery_active) {
+        return;
+    }
+    duplicate_recovery_active = true;
+
+    GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "DroneCAN: Duplicate Node %s, clearing DNA DB", fault_node_name);
+
+    _ap_dronecan.set_option_and_save(AP_DroneCAN::Options::DNA_CLEAR_DATABASE);
+
+    hal.scheduler->delay(1000);
+    hal.scheduler->reboot(false);
+#endif
 }
 
 //report the server state, along with failure message if any
