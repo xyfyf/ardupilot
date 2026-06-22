@@ -274,7 +274,7 @@ void AP_OpenDroneID::send_static_out()
 
     // we need to notify user if we lost the transmitter
     if (now_ms - last_arm_status_ms > 5000) {
-        if (now_ms - last_lost_tx_ms > 5000) {
+        if (last_lost_tx_ms == 0 || now_ms - last_lost_tx_ms > ODID_LOST_WARN_REPEAT_MS) {
             last_lost_tx_ms = now_ms;
             GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "ODID: lost transmitter");
         }
@@ -285,7 +285,8 @@ void AP_OpenDroneID::send_static_out()
     }
 
     // we need to notify user if we lost system msg with operator location
-    if (now_ms - last_system_ms > 5000 && now_ms - last_lost_operator_msg_ms > 5000) {
+    if (now_ms - last_system_ms > 5000 &&
+        (last_lost_operator_msg_ms == 0 || now_ms - last_lost_operator_msg_ms > ODID_LOST_WARN_REPEAT_MS)) {
         last_lost_operator_msg_ms = now_ms;
         GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "ODID: lost operator location");
     }

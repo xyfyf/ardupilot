@@ -56,6 +56,7 @@
 #define ODID_MAX_AREA_RADIUS 2550
 #define ODID_AREA_COUNT_MIN  1
 #define ODID_AREA_COUNT_MAX  65000
+#define ODID_LOST_WARN_REPEAT_MS 60000  // repeat lost-tx/operator warnings at most once per minute
 
 class AP_DroneCAN;
 

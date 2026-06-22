@@ -48,7 +48,7 @@
 local RUN_INTERVAL_MS    = 1000   -- 1Hz 检查
 local STARTUP_DELAY_MS   = 8000   -- 启动延迟 8 秒, 等 UM982 上电稳定
 local CONFIRM_COUNT      = 5      -- 连续 5 次 (5 秒) 确认状态变化
-local REPEAT_WARN_MS     = 15000  -- 故障状态重复告警间隔 15 秒
+local REPEAT_WARN_MS     = 60000  -- 故障状态重复告警间隔 60 秒
 local MODULE_TIMEOUT_MS  = 3000   -- 超过 3 秒没收到 GPS2 消息视为模块离线
 local MIN_FIX_STATUS     = 3      -- 3=3D Fix, 主天线最低门槛
 
