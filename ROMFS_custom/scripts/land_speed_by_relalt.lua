@@ -1,40 +1,30 @@
 --[[
-    按「相对 Home 高度」动态限制下降相关参数（多旋翼 Copter）
+    按「相对 Home 高度」动态限制下降相关参数（多旋翼 Copter，全模式）
 
     思路：
-    - 相对起飞点（Home）高度 < 门槛：将末段降落速度、航点最大下降速度、手控最大下降速度
-      统一限制为「缓降」速度（默认 0.5 m/s），避免近地仍按较大参数下沉。
-    - 高于门槛：恢复脚本启动时记录的「基准」参数值（不在 EEPROM 中反复写入）。
+    - 相对 Home 低于 LNDS_ALT_M（默认 4 m）：将 LAND_* / WP*下降 / PILOT_SPEED_DN
+      统一限制为缓降（默认 0.5 m/s = 50 cm/s），覆盖 Loiter、AltHold、Auto、RTL、Land 等。
+    - 高于门槛（含迟滞）：恢复解锁时记录的基准（如 200 cm/s）。
+    - 低于 LNDS_REL_M（默认 0.15 m）：近地锁存，恢复基准且本架次不再重进缓降区，避免 LDET 计时被反复清零、上锁延迟。
 
-    依赖：SCR_ENABLE=1；需开机运行或在地面站加载。
+    依赖：SCR_ENABLE=1。
 
     注意：
-    1) 高度优先用「相对 Home 的 NED 位置」的垂直分量（与航线/RTL 一致），与仅用 EKF D+原点高差相比，
-       在水平远离起飞点后仍与当前位置估计一致；不可用时回退到 get_relative_position_D_home。
-       仍非测距真离地；地形起伏大时请谨慎。
-    2) 使用 param:set（内存），关机前若需在地面站保留数值，请手动保存参数或重新写入基准。
-    3) 新固件多为 m/s（LAND_SPD_MS、WP_SPD_DN）；旧固件为 cm/s（LAND_SPEED、WPNAV_SPEED_DN 等），
-       脚本会按是否存在参数名自动选用。
-    4) 近地锁存：相对 Home 低于 LNDS_REL_M（默认 0.25 m）时锁存并恢复基准参数；锁存后不再因高度读数弹回而重进缓降区，
-       避免着陆检测计时（LDET.Count）被反复清零、自动上锁延迟。
-
-    LDET 对照分析（测试飞行设 LNDS_DBG=1）：
-    - 固件写 LDET：Flags（各检测条件位）、Count（land_detector_count，满足条件时递增，失败则归零）
-    - 脚本写 LNDX：Alt/Slw/Ltc/Fly/Spl/Pdn/ZChg/TLms，与 LDET 同一时间轴对照
-    - Mission Planner → 数据闪存：同图绘制 LDET.Count 与 LNDX.Slw、LNDX.Ltc
-    - 若 Count 接近 loop_rate 后归零，且 LNDX.Slw 由 0 变 1，多为高度弹回重进缓降区（5.0 锁存应阻止）
+    1) 高度为相对 Home，非测距真离地；地形起伏大时请谨慎。
+    2) param:set 仅改内存，不写入 EEPROM。
+    3) 6.0 在缓降/锁存期间每周期重刷参数，避免部分模式下仅边沿写入不生效。
+    4) 解锁记录基准后会校验：PILOT_SPEED_DN / LAND_SPEED / WPNAV_SPEED_DN 须大于 LNDS_SLOW_MS，
+       否则 GCS 告警且缓降无效（例如基准 50 与缓降 50 相同）。
 
     版本：
-      5.0 近地锁存 LNDS_REL_M + LNDX 日志对照 LDET；修复高度弹回重进缓降区
-      4.0 近地释放 0.1 m 写死（合并 2.0 逻辑）
-      2.0 近地释放，修复 AltHold 接地后自动上锁延迟
-      1.0 按相对 Home 高度切换缓降参数
+      6.1 解锁时校验基准下降速度 > 缓降目标，配置错误 GCS 告警
+      6.0 全模式周期刷新下降限速；默认 4 m 缓降 / 0.15 m 锁存恢复基准
+      5.0 近地锁存 LNDS_REL_M + LNDX 日志对照 LDET
 --]]
 
-local SCRIPT_VERSION = "5.0"
+local SCRIPT_VERSION = "6.1"
 local MAV_SEVERITY = { INFO = 6, NOTICE = 5, WARNING = 4 }
 
--- 脚本专用参数表（避免与其它脚本冲突可调 KEY）
 local PARAM_TABLE_KEY = 96
 local PARAM_PREFIX = "LNDS_"
 
@@ -62,12 +52,12 @@ local P_ENABLE = bind_add_param("ENABLE", 1, 1)
   @Units: m
   @User: Standard
 --]]
-local P_ALT_M = bind_add_param("ALT_M", 2, 2.0)
+local P_ALT_M = bind_add_param("ALT_M", 2, 4.0)
 
 --[[
   @Param: LNDS_SLOW_MS
   @DisplayName: Slow descent limit (m/s)
-  @Description: 低于 LNDS_ALT_M 时写入的下降速度上限（米/秒）
+  @Description: 低于 LNDS_ALT_M 时写入的下降速度上限（米/秒）；0.5=50cm/s
   @Range: 0.2 2
   @Units: m/s
   @User: Standard
@@ -87,7 +77,7 @@ local P_HYST_M = bind_add_param("HYST_M", 4, 0.2)
 --[[
   @Param: LNDS_RATE_MS
   @DisplayName: Update interval (ms)
-  @Description: 主循环周期，默认 100 ms；建议 100~250
+  @Description: 主循环周期，默认 100 ms；建议 50~250
   @Range: 50 2000
   @Units: ms
   @User: Advanced
@@ -106,7 +96,7 @@ local P_ONLY_ARMED = bind_add_param("ONLY_ARMED", 6, 1)
 --[[
   @Param: LNDS_DBG
   @DisplayName: LDET debug log
-  @Description: 0=关闭；1=近地阶段写 LNDX 数据闪存日志（与 LDET 对照）；2=另发 GCS 文本（锁存/缓降切换）
+  @Description: 0=关闭；1=近地阶段写 LNDX 数据闪存日志；2=另发 GCS 文本（锁存/缓降切换）
   @Values: 0:Off,1:LNDX log,2:LNDX+GCS
   @User: Advanced
 --]]
@@ -120,25 +110,23 @@ local P_DBG = bind_add_param("DBG", 7, 0)
   @Units: m
   @User: Standard
 --]]
-local P_REL_M = bind_add_param("REL_M", 8, 0.25)
+local P_REL_M = bind_add_param("REL_M", 8, 0.15)
 
--- LNDX 日志：近地监控窗口 = alt < (LNDS_ALT_M + 此余量)
 local LOG_ALT_MARGIN_M = 0.5
 local LOG_INTERVAL_MS = 200
 
--- 内部：是否已从飞控读取过基准
 local baseline_captured = false
--- 当前是否处于「缓降区」参数集
 local in_slow_zone = false
--- 近地已锁存：不再因高度读数弹回而重进缓降区
 local near_ground_latched = false
 local latch_begin_ms = 0
--- 本次解锁以来缓降区切换次数（LNDX.ZChg）
 local zone_change_count = 0
 local last_log_ms = 0
 local was_armed = false
+-- 本架次是否已因「基准<=缓降」发过告警
+local baseline_margin_warned = false
+-- 基准是否足以产生可见缓降（解锁校验通过）
+local baseline_ok_for_slow = true
 
--- 基准缓存：新参 m/s 与旧参 cm/s 二选一存在
 local base = {
     use_new_land = false,
     land_spd_ms = 0.0,
@@ -162,6 +150,78 @@ local function reset_flight_state()
     in_slow_zone = false
     zone_change_count = 0
     last_log_ms = 0
+    baseline_captured = false
+    baseline_margin_warned = false
+    baseline_ok_for_slow = true
+end
+
+-- 返回本架次基准的三项下降上限（cm/s）；PILOT_SPEED_DN=0 时与固件一致回退 PILOT_SPEED_UP
+local function baseline_descent_cms()
+    local pilot_cms = base.pilot_dn_cms
+    if pilot_cms == 0 then
+        local up = param:get("PILOT_SPEED_UP")
+        if up ~= nil then
+            pilot_cms = math.floor(math.abs(up) + 0.5)
+        end
+    end
+
+    local land_cms = 0
+    if base.use_new_land then
+        land_cms = ms_to_cms(base.land_spd_ms)
+    else
+        land_cms = math.floor(math.abs(base.land_spd_cms) + 0.5)
+    end
+
+    local wp_cms = 0
+    if base.use_new_wp then
+        wp_cms = ms_to_cms(base.wp_dn_ms)
+    else
+        wp_cms = math.floor(math.abs(base.wp_dn_cms) + 0.5)
+    end
+
+    return pilot_cms, land_cms, wp_cms
+end
+
+--[[
+  缓降要有体感，基准（解锁时 EEPROM/内存中的值）必须大于 LNDS_SLOW_MS。
+  例：PILOT_SPEED_DN=200、LNDS_SLOW_MS=0.5(50cm/s) 才有效；两者皆为 50 则脚本写入无变化。
+  @return boolean 是否通过
+--]]
+local function validate_baseline_vs_slow(slow_ms)
+    local slow_cms = ms_to_cms(slow_ms)
+    local pilot_cms, land_cms, wp_cms = baseline_descent_cms()
+    local bad = {}
+
+    if pilot_cms > 0 and pilot_cms <= slow_cms then
+        bad[#bad + 1] = string.format("PILOT_SPEED_DN=%d", pilot_cms)
+    end
+    if land_cms > 0 and land_cms <= slow_cms then
+        if base.use_new_land then
+            bad[#bad + 1] = string.format("LAND_SPD_MS=%.2f", base.land_spd_ms)
+        else
+            bad[#bad + 1] = string.format("LAND_SPEED=%d", land_cms)
+        end
+    end
+    if wp_cms > 0 and wp_cms <= slow_cms then
+        if base.use_new_wp then
+            bad[#bad + 1] = string.format("WP_SPD_DN=%.2f", base.wp_dn_ms)
+        else
+            bad[#bad + 1] = string.format("WPNAV_SPEED_DN=%d", wp_cms)
+        end
+    end
+
+    if #bad == 0 then
+        return true
+    end
+
+    gcs:send_text(
+        MAV_SEVERITY.WARNING,
+        string.format(
+            "LNDS: base<=%dcm/s slow=%.2fm/s: %s; raise base e.g.PILOT 200",
+            slow_cms, slow_ms, table.concat(bad, ",")
+        )
+    )
+    return false
 end
 
 local function capture_baseline()
@@ -209,9 +269,33 @@ local function capture_baseline()
     end
 
     baseline_captured = true
-    gcs:send_text(MAV_SEVERITY.INFO, "LNDS: Base params saved")
+
+    local slow_ms = P_SLOW_MS:get()
+    if slow_ms < 0.1 then
+        slow_ms = 0.3
+    end
+    baseline_ok_for_slow = validate_baseline_vs_slow(slow_ms)
+
+    local pilot_cms, land_cms, wp_cms = baseline_descent_cms()
+    local slow_cms = ms_to_cms(slow_ms)
+    if baseline_ok_for_slow then
+        gcs:send_text(
+            MAV_SEVERITY.INFO,
+            string.format(
+                "LNDS: base saved PDN=%d LND=%d WP=%d slow=%d",
+                pilot_cms, land_cms, wp_cms, slow_cms
+            )
+        )
+    else
+        baseline_margin_warned = true
+        gcs:send_text(
+            MAV_SEVERITY.WARNING,
+            string.format("LNDS: slow zone disabled until base>%dcm/s", slow_cms)
+        )
+    end
 end
 
+-- 写入缓降集：覆盖 LAND / 航线下降 / 手控下降，全模式生效
 local function apply_slow(slow_ms)
     local cms = ms_to_cms(slow_ms)
     if base.use_new_land then
@@ -251,7 +335,6 @@ local function apply_baseline()
     param:set("PILOT_SPEED_DN", base.pilot_dn_cms)
 end
 
--- 近地锁存高度：限制在 0.05 m ~ (LNDS_ALT_M - 0.05 m)
 local function get_release_alt_m(thr_m)
     local rel = P_REL_M:get()
     rel = math.max(0.05, rel)
@@ -271,19 +354,19 @@ local function rel_alt_m_above_home()
     return -pos_d
 end
 
---[[
-  写 LNDX 到数据闪存，与固件 LDET 同一时间轴对照。
-  Slw/Ltc 与 LDET.Count 归零事件对齐，可判断是否为缓降参数导致检测计时被重置。
---]]
+local function dbg_level_from_param()
+    return math.max(0, math.min(2, math.floor(P_DBG:get() + 0.5)))
+end
+
 local function maybe_log_ldet_debug(altm, dbg_level)
     if dbg_level < 1 then
         return
     end
-
-    local thr = P_ALT_M:get()
     if not arming:is_armed() then
         return
     end
+
+    local thr = P_ALT_M:get()
     if not (in_slow_zone or near_ground_latched or altm < (thr + LOG_ALT_MARGIN_M)) then
         return
     end
@@ -302,7 +385,6 @@ local function maybe_log_ldet_debug(altm, dbg_level)
         tlatch_ms = now - latch_begin_ms
     end
 
-    -- Alt,Slw,Ltc,Fly,Spl,Pdn,ZChg,TLms
     logger:write(
         "LNDX",
         "Alt,Slw,Ltc,Fly,Spl,Pdn,ZChg,TLms",
@@ -328,20 +410,54 @@ local function maybe_log_ldet_debug(altm, dbg_level)
     end
 end
 
-local function set_slow_zone(want_slow, slow_ms, dbg_level)
-    if want_slow and not in_slow_zone then
-        apply_slow(slow_ms)
-        in_slow_zone = true
-        zone_change_count = zone_change_count + 1
-        if dbg_level >= 2 then
-            gcs:send_text(MAV_SEVERITY.NOTICE, string.format("LNDS: enter slow zone (#%d)", zone_change_count))
-        end
-    elseif (not want_slow) and in_slow_zone then
+--[[
+  6.0：缓降/锁存期间每周期重刷参数（不仅边沿），确保 Loiter 等模式持续读到 PILOT_SPEED_DN 等。
+--]]
+local function maintain_speed_limits(want_slow, slow_ms, dbg_level)
+    if near_ground_latched then
         apply_baseline()
-        in_slow_zone = false
-        zone_change_count = zone_change_count + 1
-        if dbg_level >= 2 then
-            gcs:send_text(MAV_SEVERITY.NOTICE, string.format("LNDS: leave slow zone (#%d)", zone_change_count))
+        if in_slow_zone then
+            in_slow_zone = false
+            zone_change_count = zone_change_count + 1
+            if dbg_level >= 2 then
+                gcs:send_text(MAV_SEVERITY.NOTICE,
+                    string.format("LNDS: latch release baseline (#%d)", zone_change_count))
+            end
+        end
+        return
+    end
+
+    if want_slow then
+        if not baseline_ok_for_slow then
+            apply_baseline()
+            if in_slow_zone then
+                in_slow_zone = false
+            end
+            if not baseline_margin_warned then
+                baseline_margin_warned = true
+                gcs:send_text(MAV_SEVERITY.WARNING,
+                    "LNDS: skip slow zone (baseline<=slow)")
+            end
+            return
+        end
+        apply_slow(slow_ms)
+        if not in_slow_zone then
+            in_slow_zone = true
+            zone_change_count = zone_change_count + 1
+            if dbg_level >= 2 then
+                gcs:send_text(MAV_SEVERITY.NOTICE,
+                    string.format("LNDS: enter slow zone (#%d)", zone_change_count))
+            end
+        end
+    else
+        apply_baseline()
+        if in_slow_zone then
+            in_slow_zone = false
+            zone_change_count = zone_change_count + 1
+            if dbg_level >= 2 then
+                gcs:send_text(MAV_SEVERITY.NOTICE,
+                    string.format("LNDS: leave slow zone (#%d)", zone_change_count))
+            end
         end
     end
 end
@@ -349,11 +465,11 @@ end
 function update()
     local next_ms = math.floor(P_RATE_MS:get() + 0.5)
     next_ms = math.max(50, math.min(2000, next_ms))
-    local dbg_level = math.floor(P_DBG:get() + 0.5)
+    local dbg_level = dbg_level_from_param()
 
     local armed = arming:is_armed()
     if was_armed and not armed then
-        if in_slow_zone and baseline_captured then
+        if baseline_captured then
             apply_baseline()
         end
         reset_flight_state()
@@ -396,7 +512,6 @@ function update()
 
     local release_m = get_release_alt_m(thr)
 
-    -- 近地锁存：一旦低于 LNDS_REL_M，本架次不再重进缓降区
     if (not near_ground_latched) and altm < release_m then
         near_ground_latched = true
         latch_begin_ms = millis()
@@ -413,16 +528,14 @@ function update()
             if altm < thr then
                 should_slow = true
             end
+        elseif altm > (thr + h) then
+            should_slow = false
         else
-            if altm > (thr + h) then
-                should_slow = false
-            else
-                should_slow = true
-            end
+            should_slow = true
         end
     end
 
-    set_slow_zone(should_slow, slow, dbg_level)
+    maintain_speed_limits(should_slow, slow, dbg_level)
     maybe_log_ldet_debug(altm, dbg_level)
 
     return update, next_ms
