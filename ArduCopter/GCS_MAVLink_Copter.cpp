@@ -1,6 +1,8 @@
 #include "Copter.h"
 
 #include "GCS_MAVLink_Copter.h"
+#include "EFT_version.h"
+#include <AP_Common/AP_FWVersion.h>
 #include <AP_RPM/AP_RPM_config.h>
 #include <AP_EFI/AP_EFI_config.h>
 
@@ -407,6 +409,14 @@ bool GCS_MAVLINK_Copter::params_ready() const
 
 void GCS_MAVLINK_Copter::send_banner()
 {
+#ifdef EFT_FIRMWARE_VERSION
+    // EFT release: only show firmware version and board ID
+    send_text(MAV_SEVERITY_INFO, "%s", AP::fwversion().fw_string);
+    char sysid[50];
+    if (hal.util->get_system_id(sysid)) {
+        send_text(MAV_SEVERITY_INFO, "%s", sysid);
+    }
+#else
     GCS_MAVLINK::send_banner();
     if (copter.motors == nullptr) {
         send_text(MAV_SEVERITY_INFO, "motors not allocated");
@@ -415,6 +425,7 @@ void GCS_MAVLINK_Copter::send_banner()
     char frame_and_type_string[30];
     copter.motors->get_frame_and_type_string(frame_and_type_string, ARRAY_SIZE(frame_and_type_string));
     send_text(MAV_SEVERITY_INFO, "%s", frame_and_type_string);
+#endif
 }
 
 void GCS_MAVLINK_Copter::handle_command_ack(const mavlink_message_t &msg)

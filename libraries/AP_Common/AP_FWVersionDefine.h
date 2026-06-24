@@ -26,7 +26,11 @@
 /*
   allow vendors to set AP_CUSTOM_FIRMWARE_STRING in hwdef.dat
  */
-#ifdef AP_CUSTOM_FIRMWARE_STRING
+#ifdef EFT_FIRMWARE_VERSION
+#define EFT_FIRMWARE_DISPLAY_STRING "FIRMWARE_VERSION " EFT_FIRMWARE_VERSION
+#define ACTIVE_FWSTR EFT_FIRMWARE_DISPLAY_STRING
+#define ORIGINAL_FWSTR THISFIRMWARE
+#elif defined(AP_CUSTOM_FIRMWARE_STRING)
 #define ACTIVE_FWSTR AP_CUSTOM_FIRMWARE_STRING
 #define ORIGINAL_FWSTR THISFIRMWARE
 #else
@@ -58,7 +62,15 @@ const AP_FWVersion AP_FWVersion::fwver{
 #else
    .os_sw_version = 0,
 #endif
+#ifdef EFT_FIRMWARE_VERSION
+    .fw_string = EFT_FIRMWARE_DISPLAY_STRING,
+    .fw_hash_str =
 #ifndef GIT_VERSION
+        "",
+#else
+        GIT_VERSION,
+#endif
+#elif !defined(GIT_VERSION)
     .fw_string = ACTIVE_FWSTR,
     .fw_hash_str = "",
 #else

@@ -5,6 +5,9 @@
 #endif
 
 #include "ap_version.h"
+#include "EFT_version.h"
+
+// EFT release tag shown to GCS; update EFT_version.h when creating v2.0.x tag
 
 #define THISFIRMWARE "ArduCopter V4.7.0-dev"
 

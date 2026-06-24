@@ -142,9 +142,9 @@ local function send_warn(state)
     if state == H_OK then
         gcs:send_text(SEV_INFO, "RTK双天线已恢复正常")
     elseif state == H_MAIN_FAIL then
-        gcs:send_text(SEV_CRITICAL, "RTK主天线故障 无定位 请检查")
+        gcs:send_text(SEV_CRITICAL, "RTK主天线故障")
     elseif state == H_YAW_FAIL then
-        gcs:send_text(SEV_WARN, "RTK副天线故障 无航向 请检查")
+        gcs:send_text(SEV_WARN, "RTK副天线故障")
     end
 end
 

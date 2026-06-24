@@ -121,12 +121,11 @@ for driver_idx = 0, 1 do
 end
 
 if #nodestatus_handles == 0 then
-    gcs:send_text(3, "Radar6.0: no DroneCAN handle, abort")
+    gcs:send_text(3, "Radar: no CAN, abort")
     return
 end
 
-gcs:send_text(6, string.format("Radar6.0: started, node=%d, CAN drivers=%d",
-    RADAR_NODE_ID, #nodestatus_handles))
+gcs:send_text(6, string.format("Radar: start n%d", RADAR_NODE_ID))
 
 ------------------------------------------------------------------
 -- 状态
@@ -143,14 +142,14 @@ local rngfnd_enabled  = false      -- 已对在线节点写入 TYPE=24
 local function set_param_persist(param, name, target)
     local cur = param:get()
     if cur == nil then
-        gcs:send_text(4, "Radar6.0: get " .. name .. " err")
+        gcs:send_text(4, "Radar: get param err")
         return false, false
     end
     if math.floor(cur) == target then
         return true, false
     end
     if not param:set_and_save(target) then
-        gcs:send_text(4, "Radar6.0: set " .. name .. " err")
+        gcs:send_text(4, "Radar: set param err")
         return false, false
     end
     return true, true
@@ -160,7 +159,7 @@ end
 local function set_arming_rngfnd_check(enable)
     local cur = arming_check_param:get()
     if cur == nil then
-        gcs:send_text(4, "Radar6.0: get ARMING_CHECK err")
+        gcs:send_text(4, "Radar: get ARM err")
         return false
     end
     cur = math.floor(cur)
@@ -180,10 +179,10 @@ local function set_arming_rngfnd_check(enable)
         return true
     end
     if not arming_check_param:set_and_save(target) then
-        gcs:send_text(4, "Radar6.0: set ARMING_CHECK err")
+        gcs:send_text(4, "Radar: set ARM err")
         return false
     end
-    gcs:send_text(6, string.format("Radar6.0: ARMING_CHECK %d -> %d", original, target))
+    gcs:send_text(6, string.format("Radar: ARM %d->%d", original, target))
     return true
 end
 
@@ -198,43 +197,38 @@ local function apply_radar_ok()
     set_arming_rngfnd_check(false)
 
     if c1 or c2 then
-        gcs:send_text(4,
-            "Radar6.0: RNGFND1_TYPE=24, PRX1_TYPE=4 saved, REBOOT to enable avoidance")
+        gcs:send_text(4, "Radar: OK, reboot for avoid")
     elseif c3 then
-        gcs:send_text(6, "Radar6.0: radar OK, AVOID_ENABLE=7 set")
+        gcs:send_text(6, "Radar: OK, AVOID=7")
     else
-        gcs:send_text(6, "Radar6.0: radar OK, all params already correct")
+        gcs:send_text(6, "Radar: OK")
     end
 end
 
-local function apply_radar_not_ok(reason_text)
+local function apply_radar_not_ok()
     local _, c1 = set_param_persist(rngfnd_param, "RNGFND1_TYPE", 0)
     local _, c2 = set_param_persist(prx_param,    "PRX1_TYPE",    0)
     set_param_persist(avoid_param, "AVOID_ENABLE", AVOID_OFF)
     set_arming_rngfnd_check(false)
 
     if c1 or c2 then
-        gcs:send_text(4, "Radar6.0: " .. reason_text ..
-                         ", RNGFND/PRX cleared, arming unlocked")
+        gcs:send_text(4, "Radar: offline, PRX cleared")
     else
-        gcs:send_text(6, "Radar6.0: " .. reason_text ..
-                         ", RNGFND/PRX already 0")
+        gcs:send_text(6, "Radar: offline, PRX=0")
     end
 end
 
 -- Node 在线但测距未 Good：保持 DroneCAN 驱动，避免 TYPE=0 导致永远无法 Good
-local function apply_radar_node_only(reason_text)
+local function apply_radar_node_only()
     local _, c1 = set_param_persist(rngfnd_param, "RNGFND1_TYPE", TARGET_RNGFND_TYPE)
     local _, c2 = set_param_persist(prx_param,    "PRX1_TYPE",    TARGET_PRX_TYPE)
     set_param_persist(avoid_param, "AVOID_ENABLE", AVOID_OFF)
     set_arming_rngfnd_check(false)
 
     if c1 or c2 then
-        gcs:send_text(4, "Radar6.0: " .. reason_text ..
-                         ", TYPE saved, REBOOT then recheck")
+        gcs:send_text(4, "Radar: no data, reboot")
     else
-        gcs:send_text(4, "Radar6.0: " .. reason_text ..
-                         ", keep TYPE=24/4, AVOID off until Good")
+        gcs:send_text(4, "Radar: no data, wait Good")
     end
 end
 
@@ -249,7 +243,7 @@ local function ensure_rngfnd_driver_enabled()
     end
     if set_param_persist(rngfnd_param, "RNGFND1_TYPE", TARGET_RNGFND_TYPE) then
         rngfnd_enabled = true
-        gcs:send_text(6, "Radar6.0: node seen, RNGFND1_TYPE=24 set, REBOOT if no data")
+        gcs:send_text(6, "Radar: node seen, reboot?")
     end
 end
 
@@ -296,17 +290,12 @@ local function detect_step()
             apply_radar_ok()
             phase = 2    -- 启用 RC7 切换
         else
-            local reason
             if radar_seen and not rngfnd_good then
-                reason = string.format("Node %d online but RNGFND status=%d (check RNGFND1_ADDR vs sensor_id)",
-                    RADAR_NODE_ID, rngfnd_status)
-                apply_radar_node_only(reason)
+                apply_radar_node_only()
             elseif not radar_seen then
-                reason = string.format("Node %d NodeStatus not seen, radar offline?", RADAR_NODE_ID)
-                apply_radar_not_ok(reason)
+                apply_radar_not_ok()
             else
-                reason = "radar not OK"
-                apply_radar_not_ok(reason)
+                apply_radar_not_ok()
             end
             phase = 0    -- 禁用 RC7 切换
         end
@@ -354,12 +343,12 @@ local function rc_toggle_step()
         if apply_avoid(want_on) then
             last_avoid_on = want_on
             if want_on then
-                gcs:send_text(6, string.format("Avoid ON: %s", reason))
+                gcs:send_text(6, "Avoid ON")
             else
-                gcs:send_text(6, string.format("Avoid OFF: %s", reason))
+                gcs:send_text(6, "Avoid OFF")
             end
         else
-            gcs:send_text(3, "AVOID_ENABLE set failed")
+            gcs:send_text(3, "Avoid set fail")
         end
     end
 end

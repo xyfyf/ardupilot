@@ -545,7 +545,7 @@ void AP_Vehicle::setup()
     // initialisation
     AP_Param::invalidate_count();
 
-    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "ArduPilot Ready");
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "FC Ready");
 
 #if AP_DDS_ENABLED
     if (!init_dds_client()) {
@@ -751,7 +751,7 @@ void AP_Vehicle::scheduler_delay_callback()
         if (AP_BoardConfig::in_config_error()) {
             GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "Config Error: fix problem then reboot");
         } else {
-            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Initialising ArduPilot");
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Initialising FC");
         }
     }
 
