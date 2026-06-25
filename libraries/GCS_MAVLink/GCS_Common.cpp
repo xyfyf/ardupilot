@@ -1859,6 +1859,39 @@ void GCS_MAVLINK::packetReceived(const mavlink_status_t &status,
     if (msg.msgid != MAVLINK_MSG_ID_RADIO && msg.msgid != MAVLINK_MSG_ID_RADIO_STATUS) {
         mavlink_active |= (1U<<(chan-MAVLINK_COMM_0));
     }
+
+    // ArduPilot custom: MAV_FRAMING_OVERRIDE_CMD (eft.xml msgid 516) lets a GCS
+    // change the outgoing MAVLink2 frame format on all channels in real time.
+    // cmd bit0 -> force CRC to the crc field, cmd bit1 -> use the magic field byte
+    // instead of 0xFD. Fields are read from the raw payload in MAVLink wire order
+    // (sorted by size descending): crc (uint16, bytes 0-1), cmd (byte 2), magic (byte 3).
+    if (msg.msgid == 516) {
+        const uint8_t *payload = (const uint8_t *)_MAV_PAYLOAD(&msg);
+        const uint8_t plen = msg.len;
+        uint16_t crc_value = 0;
+        if (plen >= 1) {
+            crc_value |= payload[0];
+        }
+        if (plen >= 2) {
+            crc_value |= (uint16_t)payload[1] << 8;
+        }
+        const uint8_t cmd = (plen >= 3) ? payload[2] : 0;
+        const uint8_t magic = (plen >= 4) ? payload[3] : 0;
+        // Send a debug confirmation BEFORE applying the override so the GCS can
+        // still parse this STATUSTEXT with the current framing.
+        send_text(MAV_SEVERITY_INFO,
+                  "FrameOverride: cmd=%u magic=0x%02X crc=0x%04X",
+                  (unsigned)cmd, (unsigned)magic, (unsigned)crc_value);
+        mav_tx_magic_override = (cmd & 0x02) ? magic : 0;
+        mav_tx_crc_override_enable = (cmd & 0x01) ? 1 : 0;
+        mav_tx_crc_override_value = crc_value;
+        // Report the resulting state that all outgoing frames will now use.
+        send_text(MAV_SEVERITY_INFO,
+                  "FrameOverride active: STX=0x%02X CRC=%s(0x%04X)",
+                  (unsigned)(mav_tx_magic_override ? mav_tx_magic_override : 0xFD),
+                  mav_tx_crc_override_enable ? "forced" : "normal",
+                  (unsigned)mav_tx_crc_override_value);
+    }
     const auto mavlink_protocol = uartstate->get_protocol();
     if (!(status.flags & MAVLINK_STATUS_FLAG_IN_MAVLINK1) &&
         (status.flags & MAVLINK_STATUS_FLAG_OUT_MAVLINK1) &&

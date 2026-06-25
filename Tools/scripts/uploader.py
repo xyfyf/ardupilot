@@ -887,7 +887,7 @@ class uploader(object):
                     filepath = os.path.join(hwdef_dir, adir, "hwdef.dat")
                     if not os.path.exists(filepath):
                         continue
-                    fh = open(filepath)
+                    fh = open(filepath, encoding='utf-8', errors='replace')
                     if fh is None:
                         continue
                     text = fh.readlines()

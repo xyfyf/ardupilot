@@ -1438,7 +1438,7 @@ INCLUDE common.ld
         f.write('#define HAL_USB_VENDOR_ID 0x%04x\n' % int(USB_VID))
         f.write('#define HAL_USB_PRODUCT_ID 0x%04x\n' % int(USB_PID))
         f.write('#define HAL_USB_STRING_MANUFACTURER %s\n' %
-                self.get_config("USB_STRING_MANUFACTURER", default="\"ArduPilot\""))
+                self.get_config("USB_STRING_MANUFACTURER", default="\"EFT_FC_T\""))
         default_product = "%BOARD%"
         if self.is_bootloader_fw():
             default_product += "-BL"

@@ -17,12 +17,16 @@
        否则 GCS 告警且缓降无效（例如基准 50 与缓降 50 相同）。
 
     版本：
+      6.3 修复地面解锁(相对高≈0<REL_M)被立刻近地锁存导致整架次跳过缓降：
+          新增「本架次须先爬升超过 LNDS_ALT_M 才允许近地锁存」门控
+      6.2 校验改为「只要有一项基准>缓降目标就启用」，单项相等（如 LAND_SPEED=50=缓降50）不再误关整套；
+          修复 DBG=2 时 LNDX latch 文本因 uint32_t 传入 %.2f 触发 string.format 报错
       6.1 解锁时校验基准下降速度 > 缓降目标，配置错误 GCS 告警
       6.0 全模式周期刷新下降限速；默认 4 m 缓降 / 0.15 m 锁存恢复基准
       5.0 近地锁存 LNDS_REL_M + LNDX 日志对照 LDET
 --]]
 
-local SCRIPT_VERSION = "6.1"
+local SCRIPT_VERSION = "6.3"
 local MAV_SEVERITY = { INFO = 6, NOTICE = 5, WARNING = 4 }
 
 local PARAM_TABLE_KEY = 96
@@ -118,6 +122,8 @@ local LOG_INTERVAL_MS = 200
 local baseline_captured = false
 local in_slow_zone = false
 local near_ground_latched = false
+-- 本架次是否曾爬升超过 LNDS_ALT_M 阈值；未起飞前禁止近地锁存，避免地面解锁被误判
+local has_climbed_above_thr = false
 local latch_begin_ms = 0
 local zone_change_count = 0
 local last_log_ms = 0
@@ -146,6 +152,7 @@ end
 
 local function reset_flight_state()
     near_ground_latched = false
+    has_climbed_above_thr = false
     latch_begin_ms = 0
     in_slow_zone = false
     zone_change_count = 0
@@ -210,15 +217,27 @@ local function validate_baseline_vs_slow(slow_ms)
         end
     end
 
-    if #bad == 0 then
+    -- 只要有一项基准 > 缓降目标，缓降就有可见效果（如 PILOT_SPEED_DN=200），即启用。
+    -- 仅当三项全部 <= 缓降目标、写入毫无变化时才禁用，避免因单项（如 LAND_SPEED=50）误关整套。
+    local any_effective = (pilot_cms > slow_cms) or (land_cms > slow_cms) or (wp_cms > slow_cms)
+
+    if #bad > 0 then
+        gcs:send_text(
+            MAV_SEVERITY.NOTICE,
+            string.format(
+                "LNDS: stay(<=%dcm/s): %s", slow_cms, table.concat(bad, ",")
+            )
+        )
+    end
+
+    if any_effective then
         return true
     end
 
     gcs:send_text(
         MAV_SEVERITY.WARNING,
         string.format(
-            "LNDS: base<=%dcm/s slow=%.2fm/s: %s; raise base e.g.PILOT 200",
-            slow_cms, slow_ms, table.concat(bad, ",")
+            "LNDS: all base<=%dcm/s slow off; raise PILOT_SPEED_DN", slow_cms
         )
     )
     return false
@@ -402,10 +421,12 @@ local function maybe_log_ldet_debug(altm, dbg_level)
     )
 
     if dbg_level >= 2 and near_ground_latched and tlatch_ms > 0 and (tlatch_ms % 1000) < LOG_INTERVAL_MS then
+        -- tlatch_ms 为 uint32_t，必须先转 float 再喂给 %.2f，否则 string.format 报 number expected
+        local tlatch_s = tlatch_ms:tofloat() * 0.001
         gcs:send_text(
             MAV_SEVERITY.INFO,
             string.format("LNDX latch %.2fs alt=%.2f Slw=%d Fly=%d Spl=%d",
-                tlatch_ms * 0.001, altm, in_slow_zone and 1 or 0, likely_flying and 1 or 0, spool)
+                tlatch_s, altm, in_slow_zone and 1 or 0, likely_flying and 1 or 0, spool)
         )
     end
 end
@@ -512,7 +533,12 @@ function update()
 
     local release_m = get_release_alt_m(thr)
 
-    if (not near_ground_latched) and altm < release_m then
+    -- 本架次必须先爬升超过阈值，近地锁存才有意义；否则地面解锁(alt≈0)会被立刻误锁，全程跳过缓降
+    if (not has_climbed_above_thr) and altm > thr then
+        has_climbed_above_thr = true
+    end
+
+    if has_climbed_above_thr and (not near_ground_latched) and altm < release_m then
         near_ground_latched = true
         latch_begin_ms = millis()
         if dbg_level >= 2 then

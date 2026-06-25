@@ -50,6 +50,15 @@ extern bool gcs_alternative_active[MAVLINK_COMM_NUM_BUFFERS];
 /// MAVLink system definition
 extern mavlink_system_t mavlink_system;
 
+/// ArduPilot custom: runtime override of the outgoing MAVLink2 frame format.
+/// Set via the MAV_FRAMING_OVERRIDE_CMD (msgid 516) message. See mavlink_helpers.h.
+/// mav_tx_magic_override: 0 = default 0xFD start byte, otherwise the byte to use (e.g. 0xEF).
+/// mav_tx_crc_override_enable: 0 = normal computed CRC, non-zero = force the CRC field.
+/// mav_tx_crc_override_value: 16-bit CRC value used when the override is enabled.
+extern uint8_t mav_tx_magic_override;
+extern uint8_t mav_tx_crc_override_enable;
+extern uint16_t mav_tx_crc_override_value;
+
 /// Sanity check MAVLink channel
 ///
 /// @param chan		Channel to send to
