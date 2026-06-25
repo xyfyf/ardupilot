@@ -180,6 +180,14 @@ public:
     bool compass_cal_requires_reboot() const { return _cal_requires_reboot; }
     bool is_calibrating() const;
 
+    // scripting helpers: per-instance calibration status / progress.
+    // status maps to CompassCalibrator::Status (=MAG_CAL_STATUS):
+    //   0 NOT_STARTED, 1 WAITING_TO_START, 2 RUNNING_STEP_ONE,
+    //   3 RUNNING_STEP_TWO, 4 SUCCESS, 5 FAILED, 6 BAD_ORIENTATION, 7 BAD_RADIUS
+    // completion_pct is 0..100. Both return 0 if instance has no active calibrator.
+    uint8_t get_cal_status(uint8_t i) const;
+    float get_cal_completion_pct(uint8_t i) const;
+
 #if HAL_MAVLINK_BINDINGS_ENABLED
     /*
       handle an incoming MAG_CAL command

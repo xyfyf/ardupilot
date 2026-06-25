@@ -1391,6 +1391,18 @@ compass = {}
 ---@return boolean
 function compass:healthy(instance) end
 
+-- get per-instance compass calibration status (CompassCalibrator::Status / MAG_CAL_STATUS):
+--   0 NOT_STARTED, 1 WAITING_TO_START, 2 RUNNING_STEP_ONE, 3 RUNNING_STEP_TWO,
+--   4 SUCCESS, 5 FAILED, 6 BAD_ORIENTATION, 7 BAD_RADIUS
+---@param instance integer
+---@return integer
+function compass:get_cal_status(instance) end
+
+-- get per-instance compass calibration completion percentage (0..100)
+---@param instance integer
+---@return number
+function compass:get_cal_completion_pct(instance) end
+
 -- desc
 camera = {}
 

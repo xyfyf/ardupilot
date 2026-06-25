@@ -1,5 +1,5 @@
 --[[
-  WS2812 串联LED 状态灯 v7.0
+  WS2812 串联LED 状态灯 v7.2
 
   灯语优先级 (高→低):
   A  指南针校准进行中:
@@ -23,6 +23,18 @@
   - 新增解锁前 GPS1 无数据检测 → 红灯常亮
   - 新增解锁前 RTK航向 vs 磁罗盘航向偏差 > 45° 检测 → 红灯常亮 + GCS提示
   - 保留 v6.0 全部原有逻辑
+  v7.1 变更:
+  - 上述两个解锁前条件 (GPS1 无数据 / RTK 航向偏差>45°) 接入 prearm 授权,
+    通过 arming:set_aux_auth_failed 真正禁止解锁 (不再只是红灯提示)。
+    GPS1 无数据时即使 RTK 正常也无法解锁; 解锁后该授权不再生效。
+  v7.2 变更 (修复校准灯语从未生效):
+  - 此前用的 compass:cal_status / compass:get_field 在本固件 Lua 绑定中不存在,
+    调用全被 pcall 吞掉, 导致校准蓝/绿/红绿灯语从来不会显示。
+  - 固件新增 compass:get_cal_status / compass:get_cal_completion_pct 绑定后,
+    本脚本改用真实校准状态; 并修正状态枚举 (与 MAG_CAL_STATUS 一致):
+      2=采样(STEP1) 3=拟合(STEP2) 4=成功 5=失败 6=朝向错 7=半径错。
+  - 水平/头朝下用固件完成进度区分 (与 CompassCalibrator 两阶段精确对应):
+      <50% 水平→蓝灯常亮; >=50% 头朝下→绿灯常亮 (不再用 pitch 角度猜测)。
 --]]
 
 ---@diagnostic disable: need-check-nil
@@ -35,8 +47,6 @@ local UPDATE_MS = 50           -- 刷新率 (50ms = 20Hz)
 local ARM_HOLD_MS = 3000       -- 解锁成功后常亮保持时间 (毫秒)
 local HDG_MISMATCH_DEG = 45.0  -- RTK/磁罗盘航向偏差告警阈值 (度)
 local WARN_INTERVAL_MS = 5000  -- GCS告警重复间隔 (毫秒)
-local NOSEDOWN_PITCH_DEG = -60 -- 头朝下判定阈值 (度)
-
 -- ========================= ArduCopter 模式号 =========================
 local MODE_STABILIZE   = 0
 local MODE_ACRO        = 1
@@ -59,13 +69,22 @@ local MODE_ZIGZAG      = 24
 local MODE_AUTO_RTL    = 27
 
 -- ========================= 指南针校准状态枚举 =========================
-local CAL_NOT_STARTED  = 0
-local CAL_RUNNING_1    = 1
-local CAL_RUNNING_2    = 2
-local CAL_SUCCESS      = 3
-local CAL_FAILED       = 4
-local CAL_BAD_ORIENT   = 5
-local CAL_BAD_RADIUS   = 6
+-- 必须与 CompassCalibrator::Status (= MAVLink MAG_CAL_STATUS) 完全一致:
+local CAL_NOT_STARTED   = 0
+local CAL_WAITING       = 1
+local CAL_RUNNING_STEP1 = 2   -- 采样阶段 (本固件: 内含"水平"+"头朝下"两个子阶段)
+local CAL_RUNNING_STEP2 = 3   -- 内部椭球拟合阶段 (耗时短, 无需用户动作)
+local CAL_SUCCESS       = 4
+local CAL_FAILED        = 5
+local CAL_BAD_ORIENT    = 6
+local CAL_BAD_RADIUS    = 7
+
+-- 本固件 (CompassCalibrator.cpp) 把"水平旋转"和"头朝下旋转"都放在 STEP1 里,
+-- 用内部 _phase 区分, 而 _phase 不外露。完成进度 completion_pct:
+--   0  ~ 50%  → 水平阶段 (phase 0)
+--   50 ~ 95%  → 头朝下阶段 (phase 1)
+-- 因此用进度百分比来区分蓝灯(水平)/绿灯(头朝下), 与固件阶段精确对应。
+local CAL_PHASE_SPLIT_PCT = 50.0
 
 -- ========================= 灯语模式定义 (Pattern) =========================
 -- 格式: { {R, G, B, 持续时间ms}, ... }
@@ -132,6 +151,10 @@ local cal_prev_running    = false  -- 上一周期是否有校准进行
 -- GCS 告警节流计时器
 local last_gps_warn_ms  = 0
 local last_hdg_warn_ms  = 0
+
+-- 解锁授权 (prearm 真正拦截): GPS1 无数据 / RTK 航向偏差 > 45° 时禁止解锁
+local arm_auth_id = nil          -- 懒加载: 在 update 中反复尝试获取, 直到成功
+local last_auth_warn_ms = 0
 
 
 -- ========================= 工具函数 =========================
@@ -215,19 +238,26 @@ local function any_active_compass_uncalibrated()
 end
 
 -- ========================= 指南针校准状态机 =========================
--- 更新 cal_result / cal_prev_running, 返回 any_running
+-- 更新 cal_result / cal_prev_running, 返回 (any_running, running_pct)
+--   any_running : 是否有罗盘正处于采样阶段 (STEP1, 需要用户旋转)
+--   running_pct : 正在采样罗盘的 completion_pct (用于区分水平/头朝下)
 local function update_cal_state()
     local any_running  = false
+    local running_pct  = 0
     local any_success  = false
     local any_fail     = false
 
     for i = 0, 2 do
-        -- 用 pcall 保护: 部分固件版本可能未导出 cal_status
-        local ok, st = pcall(function() return compass:cal_status(i) end)
-        if not ok then st = nil end
+        local st = compass:get_cal_status(i)
         if st ~= nil then
-            if st == CAL_RUNNING_1 or st == CAL_RUNNING_2 then
+            -- 采样阶段 (STEP1): 需要用户旋转, 用进度区分水平/头朝下
+            -- STEP2 (内部拟合) 也算"进行中", 但很快, 归入采样末段处理
+            if st == CAL_RUNNING_STEP1 or st == CAL_RUNNING_STEP2 then
                 any_running = true
+                local pct = compass:get_cal_completion_pct(i)
+                if pct ~= nil and pct > running_pct then
+                    running_pct = pct
+                end
             elseif st == CAL_SUCCESS then
                 any_success = true
             elseif st == CAL_FAILED or st == CAL_BAD_ORIENT or st == CAL_BAD_RADIUS then
@@ -254,7 +284,7 @@ local function update_cal_state()
         end
     end
 
-    return any_running
+    return any_running, running_pct
 end
 
 -- ========================= RTK/磁罗盘航向偏差检测 =========================
@@ -265,24 +295,12 @@ local function get_rtk_compass_diff()
     if rtk_yaw == nil then return nil end
     rtk_yaw = rtk_yaw % 360
 
-    -- 方案A: 通过原始磁场向量计算指南针航向
-    -- compass:get_field(instance) 返回 Vector3f (ArduPilot 4.3+)
-    for i = 0, 2 do
-        if compass:healthy(i) then
-            local ok, field = pcall(function() return compass:get_field(i) end)
-            if ok and field ~= nil then
-                local comp_hdg = math.deg(math.atan(field:y(), field:x())) % 360
-                local diff = math.abs(rtk_yaw - comp_hdg)
-                if diff > 180 then diff = 360 - diff end
-                return diff
-            end
-        end
-    end
-
-    -- 方案B: 当 EKF 使用磁罗盘航向时 (EK3_SRC1_YAW=1), AHRS 航向 ≈ 磁罗盘航向
+    -- 当 EKF 使用磁罗盘航向时 (EK3_SRC1_YAW=1), AHRS 航向 ≈ 磁罗盘航向,
+    -- 与 RTK 航向比较即可反映两者偏差。
+    -- (注: 本固件 Lua compass 绑定无 get_field, 故不直接取原始磁场航向)
     local ek3_yaw_src = param:get("EK3_SRC1_YAW")
     if ek3_yaw_src ~= nil and math.floor(ek3_yaw_src + 0.5) == 1 then
-        local ahrs_yaw_rad = ahrs:get_yaw()
+        local ahrs_yaw_rad = ahrs:get_yaw_rad()
         if ahrs_yaw_rad ~= nil then
             local ahrs_hdg = math.deg(ahrs_yaw_rad) % 360
             local diff = math.abs(rtk_yaw - ahrs_hdg)
@@ -299,13 +317,13 @@ end
 local function pick_pattern()
 
     -- ── A/B/C: 指南针校准状态 (每次调用都更新状态机) ──────────────────────────
-    local cal_running = update_cal_state()
+    local cal_running, cal_pct = update_cal_state()
 
     if cal_running then
-        -- 通过 AHRS pitch 区分水平 vs 头朝下
-        local pitch_rad = ahrs:get_pitch()
-        local pitch_deg = pitch_rad and math.deg(pitch_rad) or 0
-        if pitch_deg < NOSEDOWN_PITCH_DEG then
+        -- 用固件上报的完成进度区分水平/头朝下 (与 CompassCalibrator 阶段精确对应):
+        --   < 50%  → 水平旋转阶段 → 蓝灯常亮
+        --   >= 50% → 头朝下旋转阶段 → 绿灯常亮
+        if cal_pct >= CAL_PHASE_SPLIT_PCT then
             return P_CAL_NOSEDOWN  -- 头朝下: 绿灯常亮
         else
             return P_CAL_LEVEL     -- 水平/侧面: 蓝灯常亮
@@ -469,8 +487,56 @@ local function run_pattern_engine(now)
 end
 
 
+-- ========================= 解锁授权 (prearm 真正拦截) =========================
+-- 真正禁止解锁的两个条件 (与红灯灯语一致):
+--   1. GPS1 (ublox) 无数据 → 即使 RTK 正常也禁止解锁
+--   2. RTK 航向与磁罗盘偏差 > 45° → 禁止解锁, 提示校准磁罗盘
+local function update_arming_auth()
+    -- 懒加载授权 ID: 脚本加载瞬间 arming 可能未就绪, 这里反复重试直到拿到。
+    -- (旧版在脚本加载时只取一次, 若那一刻失败则永久 nil, 导致拦截彻底失效)
+    if arm_auth_id == nil then
+        arm_auth_id = arming:get_aux_auth_id()
+        if arm_auth_id == nil then
+            -- 仍拿不到 (授权槽被占满): 周期性告警, 不再静默
+            local now = millis()
+            if (now - last_auth_warn_ms) >= 10000 then
+                gcs:send_text(3, "LED: no arm auth slot, cannot block arming")
+                last_auth_warn_ms = now
+            end
+            return
+        end
+    end
+
+    -- 已解锁后无需再判 (aux auth 仅作用于 prearm)
+    if arming:is_armed() then
+        arming:set_aux_auth_passed(arm_auth_id)
+        return
+    end
+
+    -- 条件 1: GPS1 无数据
+    if safe_gps_status(0) < 1 then
+        arming:set_aux_auth_failed(arm_auth_id, "GPS1 no data, fix GPS1")
+        return
+    end
+
+    -- 条件 2: RTK 航向与磁罗盘偏差 > 45°
+    local hdg_diff = get_rtk_compass_diff()
+    if hdg_diff ~= nil and hdg_diff > HDG_MISMATCH_DEG then
+        arming:set_aux_auth_failed(arm_auth_id,
+            string.format("RTK/compass %.0fdeg, recal compass", hdg_diff))
+        return
+    end
+
+    arming:set_aux_auth_passed(arm_auth_id)
+end
+
+
 -- ========================= 主调度函数 =========================
 function update()
+    -- 解锁授权判断必须最先执行, 且与 LED 硬件初始化完全解耦:
+    -- 即使 SERVOx_FUNCTION 未配置 / 灯带初始化失败, GPS 缺失也要能真正禁止解锁。
+    update_arming_auth()
+
     if not init_ok then
         local ch0 = SRV_Channels:find_channel(LED_SERVO_FUNCTION)
         if ch0 == nil then

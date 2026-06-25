@@ -1,5 +1,5 @@
 --[[
-  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.1
+  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.2
   适用场景: EFT_CAAC 机控
               GPS1 = ublox GPS                       (instance 0)
               GPS2 = UM982 双天线 RTK on SERIAL7     (instance 1)
@@ -37,6 +37,13 @@
       热插回 RTK 时 status(1) 恒为 0, 永远回不到 BOTH_OK. 现新增运行期
       再探测: 未解锁且处于 GPS1_ONLY 时每 15 秒把 GPS2_TYPE 临时设回 25
       开 8 秒探测窗口, 检测到 UM982 则切回 BOTH_OK, 否则关回 0 抑制告警.
+
+  v6.2 变更:
+  - 对称修复 GPS1 (ublox) 拔出后再插回无法识别的问题:
+      GPS2_ONLY 状态下 GPS1_TYPE 被写成 0, AP_GPS 不再创建 GPS1 驱动,
+      热插回 ublox 时 status(0) 恒为 0, 永远回不到 BOTH_OK。新增 GPS1 运行期
+      再探测: 未解锁且处于 GPS2_ONLY 时每 15 秒把 GPS1_TYPE 临时设回 1(Auto)
+      开 5 秒探测窗口, 检测到 ublox 则切回 BOTH_OK, 否则关回 0。
 
   安全约束:
   - 未解锁状态才修改 EK3_SRC1_YAW / GPS_PRIMARY, 避免 EKF yaw 参考突变
@@ -102,6 +109,16 @@ local reprobe_start_ms   = 0
 local last_reprobe_ms    = 0
 local REPROBE_INTERVAL_MS = 15000   -- 每 15 秒发起一次再探测
 local REPROBE_WINDOW_MS   = 8000    -- 探测窗口 8 秒 (UM982 上电稳定需要时间)
+
+-- ── GPS1 (ublox) 运行期再探测 ─────────────────────────────────────────────
+-- 对称问题: GPS2_ONLY 状态下 GPS1_TYPE 被写成 0, AP_GPS 不再创建 GPS1 驱动,
+--           热插回 ublox 也无法被识别 (status(0) 恒为 0, 永远回不到 BOTH_OK).
+-- 方案: 未解锁且处于 GPS2_ONLY 时, 周期性把 GPS1_TYPE 临时设回 1(Auto) 探测,
+--       检测到 ublox → 切回 BOTH_OK; 窗口超时仍无数据 → 设回 0.
+local reprobe1_active    = false
+local reprobe1_start_ms  = 0
+local last_reprobe1_ms   = 0
+local REPROBE1_WINDOW_MS  = 5000    -- ublox 探测窗口 5 秒 (ublox 上电较快)
 
 
 -- 应用一组参数, 仅当值不同时才写 flash
@@ -286,6 +303,36 @@ function update()
     else
         -- 非 GPS1_ONLY 状态 (GPS2_TYPE 已是 25), 无需再探测
         reprobe_active = false
+    end
+
+    -- GPS1 (ublox) 运行期再探测: 仅在 GPS2_ONLY (GPS1_TYPE 已被写成 0) 时进行
+    if current_state == STATE_GPS2_ONLY then
+        local g1_type = param:get("GPS1_TYPE")
+        local now = millis()
+        if not reprobe1_active then
+            -- 仅当 GPS1_TYPE 当前确为 0 时才需要再探测
+            if g1_type ~= nil and g1_type == TYPE_NONE
+               and (now - last_reprobe1_ms) >= REPROBE_INTERVAL_MS then
+                param:set_and_save("GPS1_TYPE", TYPE_AUTO)
+                reprobe1_active   = true
+                reprobe1_start_ms = now
+                gcs:send_text(SEV_INFO, "GPS1 reprobe...")
+            end
+        else
+            -- 探测窗口进行中: 检查 ublox 是否已被识别
+            if safe_gps_status(GPS1_INSTANCE) >= 1 then
+                -- 探测成功: 结束探测, 交给下方 pending 机制切回 BOTH_OK
+                reprobe1_active  = false
+                last_reprobe1_ms = now
+            elseif (now - reprobe1_start_ms) >= REPROBE1_WINDOW_MS then
+                -- 探测窗口超时仍无数据: 关回 GPS1_TYPE=0, 抑制 GPS1 告警
+                param:set_and_save("GPS1_TYPE", TYPE_NONE)
+                reprobe1_active  = false
+                last_reprobe1_ms = now
+            end
+        end
+    else
+        reprobe1_active = false
     end
 
     -- 双 GPS 均未出现有效数据时不切换

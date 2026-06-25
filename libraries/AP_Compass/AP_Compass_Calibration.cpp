@@ -356,6 +356,32 @@ bool Compass::is_calibrating() const
     return false;
 }
 
+// scripting helper: per-instance calibration status (CompassCalibrator::Status as uint8)
+uint8_t Compass::get_cal_status(uint8_t i) const
+{
+    if (i >= COMPASS_MAX_INSTANCES) {
+        return (uint8_t)CompassCalibrator::Status::NOT_STARTED;
+    }
+    CompassCalibrator* cal = _calibrator[Priority(i)];
+    if (cal == nullptr) {
+        return (uint8_t)CompassCalibrator::Status::NOT_STARTED;
+    }
+    return (uint8_t)cal->get_state().status;
+}
+
+// scripting helper: per-instance calibration completion percentage (0..100)
+float Compass::get_cal_completion_pct(uint8_t i) const
+{
+    if (i >= COMPASS_MAX_INSTANCES) {
+        return 0.0f;
+    }
+    CompassCalibrator* cal = _calibrator[Priority(i)];
+    if (cal == nullptr) {
+        return 0.0f;
+    }
+    return cal->get_state().completion_pct;
+}
+
 uint8_t Compass::_get_cal_mask()
 {
     uint8_t cal_mask = 0;
