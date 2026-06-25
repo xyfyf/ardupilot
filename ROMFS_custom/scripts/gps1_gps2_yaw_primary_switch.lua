@@ -1,5 +1,5 @@
 --[[
-  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.0
+  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.1
   适用场景: EFT_CAAC 机控
               GPS1 = ublox GPS                       (instance 0)
               GPS2 = UM982 双天线 RTK on SERIAL7     (instance 1)
@@ -30,6 +30,13 @@
   - 解锁后 (armed) RTK 故障自动切换:
       若当前为 STATE_BOTH_OK, RTK 持续 3 秒故障 → apply_state(GPS1_ONLY)
       切换后直到落地/重启才恢复 RTK 模式, 防止空中频繁切换
+
+  v6.1 变更:
+  - 修复 RTK 拔出后再插回无法被识别 (GPS2_TYPE 不会改回 25) 的问题:
+      GPS1_ONLY 状态下 GPS2_TYPE 被写成 0, AP_GPS 不再创建 GPS2 驱动,
+      热插回 RTK 时 status(1) 恒为 0, 永远回不到 BOTH_OK. 现新增运行期
+      再探测: 未解锁且处于 GPS1_ONLY 时每 15 秒把 GPS2_TYPE 临时设回 25
+      开 8 秒探测窗口, 检测到 UM982 则切回 BOTH_OK, 否则关回 0 抑制告警.
 
   安全约束:
   - 未解锁状态才修改 EK3_SRC1_YAW / GPS_PRIMARY, 避免 EKF yaw 参考突变
@@ -83,6 +90,18 @@ local WARN_REPEAT_MS  = 10000  -- 已解锁有告警间隔再隔 10 秒
 -- 解锁后 RTK 故障防抖计数
 local armed_rtk_fail_count     = 0
 local ARMED_RTK_FAIL_THRESHOLD = 3   -- 连续 3 秒检测到故障才切换
+
+-- ── GPS2 (UM982) 运行期再探测 ─────────────────────────────────────────────
+-- 问题: GPS1_ONLY 状态下 GPS2_TYPE 被写成 0, AP_GPS 不再创建 GPS2 驱动,
+--       此时热插回 RTK 也无法被识别 (status(1) 恒为 0, 永远回不到 BOTH_OK).
+-- 方案: 未解锁且处于 GPS1_ONLY 时, 周期性把 GPS2_TYPE 临时设回 25 开一个
+--       探测窗口. 窗口内检测到 UM982 → 正常切回 BOTH_OK; 窗口超时仍无数据
+--       → 设回 0, 继续抑制 "GPS 2: not healthy" 告警.
+local reprobe_active     = false
+local reprobe_start_ms   = 0
+local last_reprobe_ms    = 0
+local REPROBE_INTERVAL_MS = 15000   -- 每 15 秒发起一次再探测
+local REPROBE_WINDOW_MS   = 8000    -- 探测窗口 8 秒 (UM982 上电稳定需要时间)
 
 
 -- 应用一组参数, 仅当值不同时才写 flash
@@ -235,6 +254,39 @@ function update()
 
     -- 重置解锁后故障计数 (每次落地归零)
     armed_rtk_fail_count = 0
+
+    -- GPS2 (UM982) 运行期再探测: 仅在 GPS1_ONLY (GPS2_TYPE 已被写成 0) 时进行
+    if current_state == STATE_GPS1_ONLY then
+        local g2_type = param:get("GPS2_TYPE")
+        local now = millis()
+        if not reprobe_active then
+            -- 仅当 GPS2_TYPE 当前确为 0 时才需要再探测
+            if g2_type ~= nil and g2_type == TYPE_NONE
+               and (now - last_reprobe_ms) >= REPROBE_INTERVAL_MS then
+                param:set_and_save("GPS2_TYPE", TYPE_UM982)
+                reprobe_active   = true
+                reprobe_start_ms = now
+                gcs:send_text(SEV_INFO, "GPS2 reprobe...")
+            end
+        else
+            -- 探测窗口进行中: 检查 UM982 是否已被识别
+            local g2_status = safe_gps_status(GPS2_INSTANCE)
+            local rtk_yaw, _, _ = gps:gps_yaw_deg(GPS2_INSTANCE)
+            if g2_status >= MIN_GPS_STATUS and rtk_yaw ~= nil then
+                -- 探测成功: 结束探测, 交给下方 pending 机制切回 BOTH_OK
+                reprobe_active = false
+                last_reprobe_ms = now
+            elseif (now - reprobe_start_ms) >= REPROBE_WINDOW_MS then
+                -- 探测窗口超时仍无数据: 关回 GPS2_TYPE=0, 抑制告警
+                param:set_and_save("GPS2_TYPE", TYPE_NONE)
+                reprobe_active  = false
+                last_reprobe_ms = now
+            end
+        end
+    else
+        -- 非 GPS1_ONLY 状态 (GPS2_TYPE 已是 25), 无需再探测
+        reprobe_active = false
+    end
 
     -- 双 GPS 均未出现有效数据时不切换
     if s == STATE_UNKNOWN then
