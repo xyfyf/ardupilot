@@ -344,17 +344,13 @@ local function pick_pattern()
         return P_BATT_LVL1
     end
 
-    -- ── D. 解锁前: GPS 无数据 → 红灯常亮 ─────────────────────────────────────
-    -- 仅当 GPS1 和 GPS2/RTK 都没有可用定位时才报警 (GPS2_ONLY 场景下 GPS1=0 属正常)
+    -- ── D. 解锁前: GPS1 无数据 → 红灯常亮 ────────────────────────────────────
+    -- GPS1 (ublox) 必须在线, 即使 RTK 正常也要求 GPS1 有数据才允许解锁
     if not arming:is_armed() then
-        local g1_fix = safe_gps_status(0)
-        local g2_fix = safe_gps_status(1)
-        local rtk_yaw_pre, _, _ = gps:gps_yaw_deg(1)
-        local g2_ok = (g2_fix >= 3) and (rtk_yaw_pre ~= nil)
-        if g1_fix < 1 and not g2_ok then
+        if safe_gps_status(0) < 1 then
             local now = millis()
             if (now - last_gps_warn_ms) >= WARN_INTERVAL_MS then
-                gcs:send_text(3, "GPS无数据,无法解锁")
+                gcs:send_text(3, "GPS1无数据,无法解锁")
                 last_gps_warn_ms = now
             end
             return P_NO_GPS
