@@ -13,15 +13,29 @@ tag_url  = f"{repo_url}/releases/tag/{tag}"
 
 if body:
     lines = body.splitlines()
-    title_line = lines[0] if lines else tag
-    rest = "\n".join(lines[1:]).strip()
-    rest = re.sub(r'【(.+?)】', r'**【\1】**', rest)
-    md_text  = f"## 🚁 {title_line}\n\n{rest}\n\n---\n[📦 查看Tag]({tag_url})  |  [📁 仓库]({repo_url})"
-    md_title = f"🚁 固件更新 {tag}"
+    # 第一行作为标题（通常格式：vX.X.X: 说明）
+    title_line = lines[0].strip() if lines else tag
+    rest_lines = [l for l in lines[1:] if l.strip()]
+    rest = "\n".join(rest_lines).strip()
+    # 【xxx】加粗
+    rest = re.sub(r'【(.+?)】', r'\n\n**【\1】**', rest)
+    md_title = f"🚁 固件发布 {tag}"
+    md_text  = (
+        f"## 🚁 {title_line}\n\n"
+        f"{rest}\n\n"
+        f"---\n"
+        f"[📦 查看发布详情]({tag_url})  ·  [📁 代码仓库]({repo_url})"
+    )
 else:
-    md_title = f"🚁 固件更新 {tag}"
-    md_text  = f"## 🚁 {tag}\n\n（未填写 tag 说明）\n\n[📦 查看Tag]({tag_url})"
+    md_title = f"🚁 固件发布 {tag}"
+    md_text  = (
+        f"## 🚁 固件发布 {tag}\n\n"
+        f"（本次发布未填写说明）\n\n"
+        f"---\n"
+        f"[📦 查看发布详情]({tag_url})  ·  [📁 代码仓库]({repo_url})"
+    )
 
+# 计算钉钉加签
 ts = str(int(time.time() * 1000))
 if secret:
     str_to_sign = f"{ts}\n{secret}"
@@ -39,16 +53,18 @@ payload = json.dumps({
     "at": {"isAtAll": False}
 }, ensure_ascii=False).encode("utf-8")
 
-print(f"发送到: {url[:80]}...")
-print(f"标题: {md_title}")
+print(f"版本：{tag}")
+print(f"标题：{md_title}")
 
-req = urllib.request.Request(url, data=payload,
-                             headers={"Content-Type": "application/json; charset=utf-8"})
+req = urllib.request.Request(
+    url, data=payload,
+    headers={"Content-Type": "application/json; charset=utf-8"}
+)
 with urllib.request.urlopen(req, timeout=10) as resp:
     result = resp.read().decode()
     print("钉钉返回：", result)
     resp_json = json.loads(result)
     if resp_json.get("errcode", 0) != 0:
-        print("ERROR: 发送失败", resp_json)
+        print("发送失败：", resp_json)
         sys.exit(1)
-    print("✅ 钉钉消息发送成功")
+    print("✅ 钉钉消息已发送")
