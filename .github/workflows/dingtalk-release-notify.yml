@@ -17,7 +17,8 @@ jobs:
       - name: 提取 tag 说明
         id: tag_info
         run: |
-          TAG_BODY=$(git tag -l --format='%(contents)' "${{ github.ref_name }}")
+          git fetch origin "+refs/tags/${{ github.ref_name }}:refs/tags/${{ github.ref_name }}" --force
+          TAG_BODY=$(git cat-file -p "refs/tags/${{ github.ref_name }}" | awk 'BEGIN{found=0} /^$/{if(!found){found=1;next}} found{print}')
           echo "TAG_BODY<<__EOF__" >> "$GITHUB_OUTPUT"
           echo "$TAG_BODY" >> "$GITHUB_OUTPUT"
           echo "__EOF__" >> "$GITHUB_OUTPUT"
