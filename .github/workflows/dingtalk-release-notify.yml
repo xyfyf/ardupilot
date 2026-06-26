@@ -27,6 +27,5 @@ jobs:
           DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
           DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
           TAG_NAME: ${{ github.ref_name }}
-          REPO: ${{ github.repository }}
           TAG_BODY: ${{ steps.tag_info.outputs.TAG_BODY }}
         run: python3 .github/scripts/dingtalk_notify.py

@@ -3,13 +3,9 @@ import os, hmac, hashlib, base64, time, json, re, sys
 import urllib.request, urllib.parse
 
 tag     = os.environ["TAG_NAME"]
-repo    = os.environ["REPO"]
 webhook = os.environ["DINGTALK_WEBHOOK"]
 secret  = os.environ.get("DINGTALK_SECRET", "")
 body    = os.environ.get("TAG_BODY", "").strip()
-
-repo_url = f"https://github.com/{repo}"
-tag_url  = f"{repo_url}/releases/tag/{tag}"
 
 if body:
     lines = body.splitlines()
@@ -22,17 +18,13 @@ if body:
     md_title = f"🚁 固件发布 {tag}"
     md_text  = (
         f"## 🚁 {title_line}\n\n"
-        f"{rest}\n\n"
-        f"---\n"
-        f"[📦 查看发布详情]({tag_url})  ·  [📁 代码仓库]({repo_url})"
+        f"{rest}"
     )
 else:
     md_title = f"🚁 固件发布 {tag}"
     md_text  = (
         f"## 🚁 固件发布 {tag}\n\n"
-        f"（本次发布未填写说明）\n\n"
-        f"---\n"
-        f"[📦 查看发布详情]({tag_url})  ·  [📁 代码仓库]({repo_url})"
+        f"（本次发布未填写说明）"
     )
 
 # 计算钉钉加签
