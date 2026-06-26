@@ -1,0 +1,69 @@
+name: 钉钉发布通知
+
+on:
+  push:
+    tags:
+      - 'v2.0.*'
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码（含完整 tag 信息）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 提取 tag 说明并发送钉钉通知
+        env:
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+        run: |
+          TAG_NAME="${GITHUB_REF_NAME}"
+
+          # 获取 annotated tag 的完整说明文字
+          TAG_BODY=$(git tag -l --format='%(contents)' "${TAG_NAME}" | sed '/^-----BEGIN PGP/,/^-----END PGP/d')
+
+          # 若说明为空（lightweight tag），兜底提示
+          if [ -z "${TAG_BODY// }" ]; then
+            TAG_BODY="（本次 tag 未填写说明）"
+          fi
+
+          # 第一行作为标题，其余行作为正文
+          TITLE=$(echo "${TAG_BODY}" | head -n 1)
+          BODY=$(echo "${TAG_BODY}" | tail -n +2)
+
+          REPO_URL="https://github.com/${{ github.repository }}"
+          TAG_URL="${REPO_URL}/releases/tag/${TAG_NAME}"
+
+          # 将 tag 说明转为钉钉 Markdown 格式（换行用 \n\n，**加粗**保留）
+          MARKDOWN_BODY=$(echo "${BODY}" | sed 's/【/\n\n**【/g; s/】/】**/g' | sed '/^$/d')
+
+          # 构建钉钉 Markdown 消息
+          MSG_TITLE="🚁 固件更新 ${TAG_NAME}"
+          MSG_TEXT="## 🚁 ${TITLE}\n\n${MARKDOWN_BODY}\n\n---\n[📦 查看 Tag 详情](${TAG_URL}) | [📁 仓库地址](${REPO_URL})"
+
+          # 如果设置了签名密钥，生成签名
+          if [ -n "${DINGTALK_SECRET}" ]; then
+            TIMESTAMP=$(date +%s%3N)
+            STRING_TO_SIGN="${TIMESTAMP}\n${DINGTALK_SECRET}"
+            SIGN=$(echo -e "${STRING_TO_SIGN}" | openssl dgst -sha256 -hmac "${DINGTALK_SECRET}" -binary | base64)
+            SIGN=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${SIGN}', safe=''))")
+            WEBHOOK_URL="${DINGTALK_WEBHOOK}&timestamp=${TIMESTAMP}&sign=${SIGN}"
+          else
+            WEBHOOK_URL="${DINGTALK_WEBHOOK}"
+          fi
+
+          # 发送钉钉消息
+          curl -s -X POST "${WEBHOOK_URL}" \
+            -H 'Content-Type: application/json' \
+            -d "{
+              \"msgtype\": \"markdown\",
+              \"markdown\": {
+                \"title\": \"${MSG_TITLE}\",
+                \"text\": \"${MSG_TEXT}\"
+              },
+              \"at\": {
+                \"isAtAll\": false
+              }
+            }"
