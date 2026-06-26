@@ -14,56 +14,67 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 提取 tag 说明并发送钉钉通知
+      - name: 发送钉钉通知
         env:
           DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
           DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+          TAG_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
-          TAG_NAME="${GITHUB_REF_NAME}"
+          TAG_BODY=$(git tag -l --format='%(contents)' "${TAG_NAME}")
+          export TAG_BODY
+          python3 - <<'PYEOF'
+import os, hmac, hashlib, base64, time, json, urllib.request, urllib.parse
 
-          # 获取 annotated tag 的完整说明文字
-          TAG_BODY=$(git tag -l --format='%(contents)' "${TAG_NAME}" | sed '/^-----BEGIN PGP/,/^-----END PGP/d')
+tag     = os.environ["TAG_NAME"]
+repo    = os.environ["REPO"]
+webhook = os.environ["DINGTALK_WEBHOOK"]
+secret  = os.environ.get("DINGTALK_SECRET", "")
+body    = os.environ.get("TAG_BODY", "").strip()
 
-          # 若说明为空（lightweight tag），兜底提示
-          if [ -z "${TAG_BODY// }" ]; then
-            TAG_BODY="（本次 tag 未填写说明）"
-          fi
+# 构建消息文本
+repo_url = f"https://github.com/{repo}"
+tag_url  = f"{repo_url}/releases/tag/{tag}"
 
-          # 第一行作为标题，其余行作为正文
-          TITLE=$(echo "${TAG_BODY}" | head -n 1)
-          BODY=$(echo "${TAG_BODY}" | tail -n +2)
+if body:
+    lines = body.splitlines()
+    title_line = lines[0] if lines else tag
+    rest = "\n".join(lines[1:]).strip()
+    # 把【xxx】加粗
+    import re
+    rest = re.sub(r'【(.+?)】', r'**【\1】**', rest)
+    md_text = f"## 🚁 {title_line}\n\n{rest}\n\n---\n[📦 查看 Tag]({tag_url})  |  [📁 仓库]({repo_url})"
+    md_title = f"🚁 固件更新 {tag}"
+else:
+    md_title = f"🚁 固件更新 {tag}"
+    md_text  = f"## 🚁 {tag}\n\n（未填写 tag 说明）\n\n[📦 查看 Tag]({tag_url})"
 
-          REPO_URL="https://github.com/${{ github.repository }}"
-          TAG_URL="${REPO_URL}/releases/tag/${TAG_NAME}"
+# 签名
+ts = str(int(time.time() * 1000))
+if secret:
+    str_to_sign = f"{ts}\n{secret}"
+    sig = base64.b64encode(
+        hmac.new(secret.encode(), str_to_sign.encode(), hashlib.sha256).digest()
+    ).decode()
+    sign = urllib.parse.quote_plus(sig)
+    url = f"{webhook}&timestamp={ts}&sign={sign}"
+else:
+    url = webhook
 
-          # 将 tag 说明转为钉钉 Markdown 格式（换行用 \n\n，**加粗**保留）
-          MARKDOWN_BODY=$(echo "${BODY}" | sed 's/【/\n\n**【/g; s/】/】**/g' | sed '/^$/d')
+payload = json.dumps({
+    "msgtype": "markdown",
+    "markdown": {"title": md_title, "text": md_text},
+    "at": {"isAtAll": False}
+}, ensure_ascii=False).encode("utf-8")
 
-          # 构建钉钉 Markdown 消息
-          MSG_TITLE="🚁 固件更新 ${TAG_NAME}"
-          MSG_TEXT="## 🚁 ${TITLE}\n\n${MARKDOWN_BODY}\n\n---\n[📦 查看 Tag 详情](${TAG_URL}) | [📁 仓库地址](${REPO_URL})"
-
-          # 如果设置了签名密钥，生成签名
-          if [ -n "${DINGTALK_SECRET}" ]; then
-            TIMESTAMP=$(date +%s%3N)
-            STRING_TO_SIGN="${TIMESTAMP}\n${DINGTALK_SECRET}"
-            SIGN=$(echo -e "${STRING_TO_SIGN}" | openssl dgst -sha256 -hmac "${DINGTALK_SECRET}" -binary | base64)
-            SIGN=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${SIGN}', safe=''))")
-            WEBHOOK_URL="${DINGTALK_WEBHOOK}&timestamp=${TIMESTAMP}&sign=${SIGN}"
-          else
-            WEBHOOK_URL="${DINGTALK_WEBHOOK}"
-          fi
-
-          # 发送钉钉消息
-          curl -s -X POST "${WEBHOOK_URL}" \
-            -H 'Content-Type: application/json' \
-            -d "{
-              \"msgtype\": \"markdown\",
-              \"markdown\": {
-                \"title\": \"${MSG_TITLE}\",
-                \"text\": \"${MSG_TEXT}\"
-              },
-              \"at\": {
-                \"isAtAll\": false
-              }
-            }"
+req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+with urllib.request.urlopen(req) as resp:
+    result = resp.read().decode()
+    print("钉钉返回：", result)
+    import sys
+    resp_json = json.loads(result)
+    if resp_json.get("errcode", 0) != 0:
+        print("ERROR: 发送失败", resp_json)
+        sys.exit(1)
+    print("✅ 钉钉消息发送成功")
+PYEOF
