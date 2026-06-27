@@ -508,7 +508,14 @@ void AP_AHRS::update(bool skip_ins_update)
             break;
 #endif
         }
+#if AP_AHRS_DCM_ENABLED
+        // 启动阶段 DCM 为 EKF 就绪前的过渡姿态源，不向地面站播报
+        if (state.active_EKF != EKFType::DCM) {
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "AHRS: %s active", shortname);
+        }
+#else
         GCS_SEND_TEXT(MAV_SEVERITY_INFO, "AHRS: %s active", shortname);
+#endif
     }
 #endif // HAL_GCS_ENABLED
 

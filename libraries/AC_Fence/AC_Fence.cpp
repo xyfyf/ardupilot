@@ -29,6 +29,7 @@ extern const AP_HAL::HAL& hal;
 #define AC_FENCE_ALT_MAX_DEFAULT                    100.0f  // default max altitude is 100m
 #define AC_FENCE_ALT_MIN_DEFAULT                    -10.0f  // default maximum depth in meters
 #define AC_FENCE_CIRCLE_RADIUS_DEFAULT              300.0f  // default circular fence radius is 300m
+#define AC_FENCE_CIRCLE_RADIUS_MIN                  5.0f    // minimum circular fence radius in meters
 #define AC_FENCE_ALT_MAX_BACKUP_DISTANCE            20.0f   // after fence is broken we recreate the fence 20m further up
 #define AC_FENCE_ALT_MIN_BACKUP_DISTANCE            20.0f   // after fence is broken we recreate the fence 20m further down
 #define AC_FENCE_MARGIN_DEFAULT                     2.0f    // default distance in meters that autopilot's should maintain from the fence to avoid a breach
@@ -86,7 +87,7 @@ const AP_Param::GroupInfo AC_Fence::var_info[] = {
     // @DisplayName: Circular Fence Radius
     // @Description: Circle fence radius which when breached will cause an RTL
     // @Units: m
-    // @Range: 30 10000
+    // @Range: 5 10000
     // @User: Standard
     AP_GROUPINFO("RADIUS",      4,  AC_Fence,   _circle_radius, AC_FENCE_CIRCLE_RADIUS_DEFAULT),
 
@@ -414,8 +415,8 @@ bool AC_Fence::pre_arm_check_polygon(char *failure_msg, const uint8_t failure_ms
 // additional checks for the circle fence:
 bool AC_Fence::pre_arm_check_circle(char *failure_msg, const uint8_t failure_msg_len) const
 {
-    if (_circle_radius < 0) {
-        hal.util->snprintf(failure_msg, failure_msg_len, "Invalid Circle FENCE_RADIUS value");
+    if (_circle_radius < AC_FENCE_CIRCLE_RADIUS_MIN) {
+        hal.util->snprintf(failure_msg, failure_msg_len, "Circle FENCE_RADIUS below minimum (5m)");
         return false;
     }
     if (_circle_radius < _margin) {

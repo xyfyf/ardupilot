@@ -64,7 +64,4 @@ if current_speed and current_speed > SLOW_SPEED then
     NORMAL_SPEED = current_speed
 end
 
--- 向地面站发送脚本加载成功的提示
-gcs:send_text(6, "Auto Takeoff loaded")
-
 return update, 1000 -- 延迟 1 秒后开始第一次执行

@@ -567,5 +567,4 @@ function update()
     return update, next_ms
 end
 
-gcs:send_text(MAV_SEVERITY.NOTICE, string.format("LNDS v%s loaded", SCRIPT_VERSION))
 return update()

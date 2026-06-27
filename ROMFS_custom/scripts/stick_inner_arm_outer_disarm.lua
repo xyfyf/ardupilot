@@ -316,6 +316,5 @@ function update()
     return update, 50
 end
 
-gcs:send_text(6, SCRIPT_NAME .. ": Loaded")
 return update()
 

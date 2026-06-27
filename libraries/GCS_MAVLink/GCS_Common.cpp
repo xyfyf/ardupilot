@@ -4769,13 +4769,8 @@ void GCS_MAVLINK::send_banner()
     }
 #endif
 
-    // send RC output mode info if available
-    char banner_msg[50];
-    if (hal.rcout->get_output_mode_banner(banner_msg, sizeof(banner_msg))) {
-        send_text(MAV_SEVERITY_INFO, "%s", banner_msg);
-    }
-
 #if AP_INERTIALSENSOR_ENABLED
+    char banner_msg[50];
     // output any fast sampling status messages
     for (uint8_t i = 0; i < INS_MAX_BACKENDS; i++) {
         if (AP::ins().get_output_banner(i, banner_msg, sizeof(banner_msg))) {

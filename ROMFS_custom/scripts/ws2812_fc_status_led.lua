@@ -548,7 +548,6 @@ function update()
             return update, 5000
         end
         init_ok = true
-        gcs:send_text(6, "LED: WS2812 INIT OK")
     end
 
     run_pattern_engine(millis())

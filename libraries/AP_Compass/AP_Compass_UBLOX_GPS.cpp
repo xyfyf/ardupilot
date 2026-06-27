@@ -75,9 +75,6 @@ AP_Compass_Backend *AP_Compass_UBLOX_GPS::probe(uint8_t instance)
     // 保存单例指针，供 handle_mag() 静态回调使用
     _singleton = ret;
 
-    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "UBLOX_MAG: probe OK, instance=%d devid=%lu",
-                  (int)instance_out, (unsigned long)devid);
-
     return ret;
 }
 

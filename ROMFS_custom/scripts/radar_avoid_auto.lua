@@ -125,8 +125,6 @@ if #nodestatus_handles == 0 then
     return
 end
 
-gcs:send_text(6, string.format("Radar: start n%d", RADAR_NODE_ID))
-
 ------------------------------------------------------------------
 -- 状态
 ------------------------------------------------------------------
@@ -213,8 +211,6 @@ local function apply_radar_not_ok()
 
     if c1 or c2 then
         gcs:send_text(4, "Radar: offline, PRX cleared")
-    else
-        gcs:send_text(6, "Radar: offline, PRX=0")
     end
 end
 

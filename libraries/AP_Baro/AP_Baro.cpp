@@ -311,8 +311,6 @@ void AP_Baro::calibrate(bool save)
     }
     #endif
     
-    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Calibrating barometer");
-
     // reset the altitude offset when we calibrate. The altitude
     // offset is supposed to be for within a flight
     _alt_offset.set_and_save(0);
@@ -370,7 +368,6 @@ void AP_Baro::calibrate(bool save)
     uint8_t num_calibrated = 0;
     for (uint8_t i=0; i<_num_sensors; i++) {
         if (sensors[i].calibrated) {
-            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Barometer %u calibration complete", i+1);
             num_calibrated++;
         }
     }

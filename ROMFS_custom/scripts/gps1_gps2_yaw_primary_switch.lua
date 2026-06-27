@@ -1,5 +1,5 @@
 --[[
-  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.2
+  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.3
   适用场景: EFT_CAAC 机控
               GPS1 = ublox GPS                       (instance 0)
               GPS2 = UM982 双天线 RTK on SERIAL7     (instance 1)
@@ -44,6 +44,10 @@
       热插回 ublox 时 status(0) 恒为 0, 永远回不到 BOTH_OK。新增 GPS1 运行期
       再探测: 未解锁且处于 GPS2_ONLY 时每 15 秒把 GPS1_TYPE 临时设回 1(Auto)
       开 5 秒探测窗口, 检测到 ublox 则切回 BOTH_OK, 否则关回 0。
+
+  v6.3 变更:
+  - 修复 GPS/RTK 均未接时 gps:gps_yaw_deg(1) 实例越界导致 Lua 报错及 PreArm 阻塞:
+      GPS2_TYPE=0 或未探测到 GPS2 时 num_sensors<2, 须先检查实例再读 yaw.
 
   安全约束:
   - 未解锁状态才修改 EK3_SRC1_YAW / GPS_PRIMARY, 避免 EKF yaw 参考突变
@@ -159,6 +163,15 @@ local function safe_gps_status(instance)
     return gps:status(instance) or 0
 end
 
+-- 安全读取 GPS 双天线航向 (instance 超出 num_sensors 时返回 nil, 避免 Lua 报错)
+local function safe_gps_yaw_deg(instance)
+    local n = gps:num_sensors() or 0
+    if instance >= n then
+        return nil, nil, nil
+    end
+    return gps:gps_yaw_deg(instance)
+end
+
 -- 读取当前应处于的状态
 -- v6.0: 增加双天线航向有效性检查
 --   RTK 有 3D Fix 但 yaw=nil (任一天线丢失) → 降级为 GPS1_ONLY
@@ -169,7 +182,7 @@ local function read_state()
     local g2_ok      = (g2_status >= MIN_GPS_STATUS)  -- GPS2 状态足够
 
     -- 检查 RTK 双天线航向是否有效 (任一天线丢失则 nil)
-    local rtk_yaw, _, _ = gps:gps_yaw_deg(GPS2_INSTANCE)
+    local rtk_yaw, _, _ = safe_gps_yaw_deg(GPS2_INSTANCE)
     local g2_yaw_ok = (rtk_yaw ~= nil)
 
     if g1_present and g2_ok and g2_yaw_ok then
@@ -288,7 +301,7 @@ function update()
         else
             -- 探测窗口进行中: 检查 UM982 是否已被识别
             local g2_status = safe_gps_status(GPS2_INSTANCE)
-            local rtk_yaw, _, _ = gps:gps_yaw_deg(GPS2_INSTANCE)
+            local rtk_yaw, _, _ = safe_gps_yaw_deg(GPS2_INSTANCE)
             if g2_status >= MIN_GPS_STATUS and rtk_yaw ~= nil then
                 -- 探测成功: 结束探测, 交给下方 pending 机制切回 BOTH_OK
                 reprobe_active = false
