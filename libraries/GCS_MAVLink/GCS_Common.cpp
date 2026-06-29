@@ -1877,11 +1877,17 @@ void GCS_MAVLINK::packetReceived(const mavlink_status_t &status,
         }
         const uint8_t cmd = (plen >= 3) ? payload[2] : 0;
         const uint8_t magic = (plen >= 4) ? payload[3] : 0;
+        // 灯语调试步骤1（蓝灯）：接收侧已收到并解析出 516 命令。
+        // 需要先设置参数 NTF_LED_OVERRIDE=1，否则颜色会被正常状态机刷掉。
+        AP_Notify::handle_rgb(0, 0, 255);
         // Send a debug confirmation BEFORE applying the override so the GCS can
         // still parse this STATUSTEXT with the current framing.
+        // hits = 上一轮以来发送侧真正改帧的次数：>0 说明补丁已编译且在执行；
+        // 一直为 0 则说明 mavlink_helpers.h 的改动没被编译进固件。
         send_text(MAV_SEVERITY_INFO,
-                  "FrameOverride: cmd=%u magic=0x%02X crc=0x%04X",
-                  (unsigned)cmd, (unsigned)magic, (unsigned)crc_value);
+                  "FrameOverride: cmd=%u magic=0x%02X crc=0x%04X hits=%lu",
+                  (unsigned)cmd, (unsigned)magic, (unsigned)crc_value,
+                  (unsigned long)mav_tx_override_hits);
         mav_tx_magic_override = (cmd & 0x02) ? magic : 0;
         mav_tx_crc_override_enable = (cmd & 0x01) ? 1 : 0;
         mav_tx_crc_override_value = crc_value;
@@ -2751,6 +2757,18 @@ void GCS::update_send()
 {
     // cope with changes to mavlink system ID parameter
     mavlink_system.sysid = sysid;
+
+    // 灯语调试步骤2（绿灯）：发送侧的 override 代码确实在执行（帧已被改）。
+    // 收到 516 后先亮蓝灯；只要有出站帧真正应用了 override，hits 就 +1，灯转绿。
+    // 若发了 516、有遥测在跑，灯却一直停在蓝（hits 始终为 0），说明
+    // mavlink_helpers.h 的发送侧改动没有被编译进固件（需强制重新生成）。
+    {
+        static uint32_t last_hits;
+        if (mav_tx_override_hits != last_hits) {
+            last_hits = mav_tx_override_hits;
+            AP_Notify::handle_rgb(0, 255, 0);
+        }
+    }
 
     update_send_has_been_called = true;
 

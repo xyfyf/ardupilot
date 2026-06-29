@@ -58,6 +58,9 @@ extern mavlink_system_t mavlink_system;
 extern uint8_t mav_tx_magic_override;
 extern uint8_t mav_tx_crc_override_enable;
 extern uint16_t mav_tx_crc_override_value;
+/// Debug counter: number of outgoing frames that actually had the override applied.
+/// If this stays 0 after enabling the override, the patched helper is not compiled in.
+extern volatile uint32_t mav_tx_override_hits;
 
 /// Sanity check MAVLink channel
 ///
