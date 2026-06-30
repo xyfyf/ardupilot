@@ -5,7 +5,9 @@
 --
 -- 行为说明：
 --   1. 只在已解锁(armed) 且 当前模式为 AltHold 时监控围栏；
---   2. 检测到 fence:get_breaches() ~= 0 时，调用 vehicle:set_mode(LOITER)；
+--   2. 进入 FENCE_MARGIN 缓冲带（fence:get_margin_breaches()）或已越界
+--      （fence:get_breaches()）时，调用 vehicle:set_mode(LOITER)；
+--      即在距围栏边界 FENCE_MARGIN 米内就切模式，避免惯性冲出围栏；
 --   3. 切换成功后保持 Loiter，不再反复切（飞手可自行再切回任何模式）；
 --   4. 一旦飞手手动切到非 AltHold/Loiter 的模式，脚本认为飞手已接管，复位状态；
 --   5. 切到 Loiter 失败（例如没有 GPS / 卫星不足）会通过 GCS 弹出提示。
@@ -43,15 +45,20 @@ function update()
     local mode = vehicle:get_mode()
 
     if mode == MODE_ALTHOLD then
+        -- margin：距边界 FENCE_MARGIN 内；breach：已越界。两者任一即切 Loiter
+        local margin = fence:get_margin_breaches()
         local breaches = fence:get_breaches()
-        if breaches ~= 0 and not switched then
+        local trigger = margin ~= 0 and margin or breaches
+        if trigger ~= 0 and not switched then
+            local reason = margin ~= 0 and "margin" or "breach"
             if vehicle:set_mode(MODE_LOITER) then
                 switched = true
                 gcs:send_text(2, string.format(
-                    "Fence breach (%s): AltHold -> Loiter",
-                    describe_breach(breaches)))
+                    "Fence %s (%s): AltHold -> Loiter",
+                    reason, describe_breach(trigger)))
             else
-                gcs:send_text(2, "Fence breach: switch to Loiter FAILED (no GPS?)")
+                gcs:send_text(2, string.format(
+                    "Fence %s: switch to Loiter FAILED (no GPS?)", reason))
             end
         end
 

@@ -1,5 +1,5 @@
 --[[
-  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.3
+  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.4
   适用场景: EFT_CAAC 机控
               GPS1 = ublox GPS                       (instance 0)
               GPS2 = UM982 双天线 RTK on SERIAL7     (instance 1)
@@ -49,6 +49,15 @@
   - 修复 GPS/RTK 均未接时 gps:gps_yaw_deg(1) 实例越界导致 Lua 报错及 PreArm 阻塞:
       GPS2_TYPE=0 或未探测到 GPS2 时 num_sensors<2, 须先检查实例再读 yaw.
 
+  v6.4 变更 (根治 "RTK 插着却一直未定位", 不再依赖长延时):
+  - 核心: 新增 rtk_module_online() (用 gps:last_message_time_ms 判断模块串口是否还在通信)。
+    只要 UM982 还在出数据, 就绝不把 GPS2_TYPE 写 0 销毁驱动, 让它全程不断电慢慢收敛:
+      · 切到 GPS1_ONLY 时, 模块在线 → 保持 GPS2_TYPE=25 (只切磁罗盘 yaw + GPS1 主), 等收敛后自动回 BOTH_OK;
+      · 仅当模块真正离线 (拔掉/串口无数据) → 才写 GPS2_TYPE=0, 并交给 reprobe 热插探测。
+  - reprobe 成功判据改为 "模块是否在通信" 而非 "拿到定位+航向":
+    检测到模块开始出数据即结束探测并保持 25, 让其在线收敛, 彻底消除 0↔25 反复横跳的死循环。
+  - 因不再需要靠长延时等收敛, STARTUP_DELAY_MS 改回 5 秒, 脚本早点开始工作。
+
   安全约束:
   - 未解锁状态才修改 EK3_SRC1_YAW / GPS_PRIMARY, 避免 EKF yaw 参考突变
     (v6.0 例外: 解锁后 RTK 故障强制切换, 此时 RTK 已丢失, 切换为磁罗盘更安全)
@@ -60,7 +69,8 @@
 ---@diagnostic disable: need-check-nil, cast-local-type, assign-type-mismatch, param-type-mismatch
 
 local RUN_INTERVAL_MS  = 1000   -- 运行频率 (1 秒)
-local STARTUP_DELAY_MS = 5000   -- 启动延迟 5 秒再开始判断 (让 GPS / UM982 上电稳定)
+local STARTUP_DELAY_MS = 5000   -- 启动延迟 5 秒, 仅等 num_sensors 填充; 不再靠长延时等 RTK 收敛
+                                -- (RTK 慢慢收敛交给 rtk_module_online() 逻辑: 模块在通信就保持 GPS2_TYPE=25 不断电等)
 local CONFIRM_COUNT    = 5      -- 需要 5 次 (5 秒) 连续确认后切换, 防抖
 
 local GPS1_INSTANCE    = 0      -- ublox GPS1 (Lua 实例号 0)
@@ -111,8 +121,9 @@ local ARMED_RTK_FAIL_THRESHOLD = 3   -- 连续 3 秒检测到故障才切换
 local reprobe_active     = false
 local reprobe_start_ms   = 0
 local last_reprobe_ms    = 0
-local REPROBE_INTERVAL_MS = 15000   -- 每 15 秒发起一次再探测
-local REPROBE_WINDOW_MS   = 8000    -- 探测窗口 8 秒 (UM982 上电稳定需要时间)
+local REPROBE_INTERVAL_MS = 15000   -- 每次关闭后，等 15 秒发起一次再探测
+local REPROBE_WINDOW_MS   = 15000   -- 探测窗口 15 秒, 只需检测到 "模块开始出串口数据" 即可
+                                    -- (检测到后保持 25 让其在线慢慢收敛, 不再要求窗口内拿到定位/航向)
 
 -- ── GPS1 (ublox) 运行期再探测 ─────────────────────────────────────────────
 -- 对称问题: GPS2_ONLY 状态下 GPS1_TYPE 被写成 0, AP_GPS 不再创建 GPS1 驱动,
@@ -122,7 +133,7 @@ local REPROBE_WINDOW_MS   = 8000    -- 探测窗口 8 秒 (UM982 上电稳定需
 local reprobe1_active    = false
 local reprobe1_start_ms  = 0
 local last_reprobe1_ms   = 0
-local REPROBE1_WINDOW_MS  = 5000    -- ublox 探测窗口 5 秒 (ublox 上电较快)
+local REPROBE1_WINDOW_MS  = 30000   -- ublox 探测窗口 15 秒 (ublox 上电较快，但也给宽裕点)
 
 
 -- 应用一组参数, 仅当值不同时才写 flash
@@ -172,6 +183,24 @@ local function safe_gps_yaw_deg(instance)
     return gps:gps_yaw_deg(instance)
 end
 
+-- 判断 UM982 (GPS2) 模块本身是否还在串口通信
+-- v6.4: 关键 - 区分 "RTK 模块在线但尚未定位/航向" 与 "RTK 真的拔掉离线"。
+--   只要模块串口还在出数据 (num_sensors>=2 且最近收到过消息), 就认为它在线,
+--   此时即使还没定位/航向, 也绝不能把 GPS2_TYPE 写 0 销毁驱动 (会让 UM982
+--   冷启动重来, 永远搜不到星). 只有真正离线才允许写 0 + reprobe 热插探测.
+local MODULE_TIMEOUT_MS = 3000   -- 超过 3 秒没收到 GPS2 消息视为模块离线
+local function rtk_module_online()
+    if (gps:num_sensors() or 0) <= GPS2_INSTANCE then
+        return false
+    end
+    local last = gps:last_message_time_ms(GPS2_INSTANCE)
+    if last == nil then
+        return false
+    end
+    local now = millis()
+    return (now - last) < MODULE_TIMEOUT_MS
+end
+
 -- 读取当前应处于的状态
 -- v6.0: 增加双天线航向有效性检查
 --   RTK 有 3D Fix 但 yaw=nil (任一天线丢失) → 降级为 GPS1_ONLY
@@ -210,8 +239,16 @@ local function apply_state(state)
         end
     elseif state == STATE_GPS1_ONLY then
         -- RTK 故障 (含任一天线丢失): 切回 GPS1 定点 + 外置磁罗盘定向
+        -- v6.4 关键: GPS2_TYPE 只在 "RTK 模块真离线" 时才写 0;
+        --   若模块还在串口通信 (只是没定位/航向), 保持 25 让 UM982 继续不断电
+        --   搜星收敛, 否则反复写 0/25 会把它冷启动重置, 永远定不了位.
         local a = set_param_if_diff("GPS1_TYPE",    TYPE_AUTO)
-        local e = set_param_if_diff("GPS2_TYPE",    TYPE_NONE)
+        local e
+        if rtk_module_online() then
+            e = set_param_if_diff("GPS2_TYPE", TYPE_UM982)  -- 模块在线: 保持 25, 不销毁驱动
+        else
+            e = set_param_if_diff("GPS2_TYPE", TYPE_NONE)   -- 模块离线: 写 0 抑制告警, 交给 reprobe 热插探测
+        end
         local b = set_param_if_diff("EK3_SRC1_YAW", YAW_COMPASS)
         local c = set_param_if_diff("GPS_PRIMARY",  PRIMARY_GPS1)
         local d = set_param_if_diff("COMPASS_USE",  COMPASS_ON)
@@ -299,15 +336,17 @@ function update()
                 gcs:send_text(SEV_INFO, "GPS2 reprobe...")
             end
         else
-            -- 探测窗口进行中: 检查 UM982 是否已被识别
-            local g2_status = safe_gps_status(GPS2_INSTANCE)
-            local rtk_yaw, _, _ = safe_gps_yaw_deg(GPS2_INSTANCE)
-            if g2_status >= MIN_GPS_STATUS and rtk_yaw ~= nil then
-                -- 探测成功: 结束探测, 交给下方 pending 机制切回 BOTH_OK
+            -- 探测窗口进行中:
+            -- v6.4: 成功判据改为 "模块是否在通信" (rtk_module_online), 而不是
+            --   "拿到 3D Fix + 航向". 因为热插回 UM982 冷启动收敛需要 30~90 秒,
+            --   远超探测窗口; 只要检测到模块开始出数据, 就保持 GPS2_TYPE=25 不再
+            --   关断, 让它在线慢慢收敛, 收敛后由状态机自动切回 BOTH_OK.
+            if rtk_module_online() then
+                -- 模块已在通信: 结束探测并保持 25, 后续靠状态机自然升级
                 reprobe_active = false
                 last_reprobe_ms = now
             elseif (now - reprobe_start_ms) >= REPROBE_WINDOW_MS then
-                -- 探测窗口超时仍无数据: 关回 GPS2_TYPE=0, 抑制告警
+                -- 探测窗口超时仍完全无串口数据: 模块确实不在, 关回 0 抑制告警
                 param:set_and_save("GPS2_TYPE", TYPE_NONE)
                 reprobe_active  = false
                 last_reprobe_ms = now
