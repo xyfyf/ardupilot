@@ -1,5 +1,5 @@
 --[[
-  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.4
+  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.5
   适用场景: EFT_CAAC 机控
               GPS1 = ublox GPS                       (instance 0)
               GPS2 = UM982 双天线 RTK on SERIAL7     (instance 1)
@@ -10,19 +10,22 @@
          GPS2_TYPE      = 25  (UM982 / Unicore moving baseline, 启用 RTK)
          EK3_SRC1_YAW   = 2   (使用 GPS 双天线 yaw)
          GPS_PRIMARY    = 1   (优先 GPS2)
+         GPS_AUTO_SWITCH= 0   (NONE, 主 GPS 固定 GPS2, 不按 fix 等级被 ublox 抢走)
          COMPASS_USE    = 1   (启用外置罗盘, ublox 内磁)
     2. 仅识别 GPS1 (GPS2 离线 / 状态 < 3D Fix / 双天线航向丢失), 即 RTK 故障:
          GPS1_TYPE      = 1
          GPS2_TYPE      = 0   (关闭 GPS2)
          EK3_SRC1_YAW   = 1   (使用外置磁罗盘 yaw)
          GPS_PRIMARY    = 0   (优先 GPS1)
+         GPS_AUTO_SWITCH= 0   (NONE, 主 GPS 固定 GPS1)
          COMPASS_USE    = 1   (启用外置罗盘)
     3. 仅识别 GPS2 RTK (ublox GPS1 掉线, gps:status(0)==0):
          GPS1_TYPE      = 0   (关闭 GPS1)
          GPS2_TYPE      = 25  (UM982 / Unicore moving baseline, 启用 RTK)
          EK3_SRC1_YAW   = 2   (使用 GPS 双天线 yaw)
          GPS_PRIMARY    = 1   (使用 GPS2)
-         COMPASS_USE    = 0   (ublox 内磁关闭)
+         GPS_AUTO_SWITCH= 0   (NONE, 主 GPS 固定 GPS2)
+         COMPASS_USE    = 1   (启用外置罗盘)
 
   v6.0 变更:
   - read_state() 新增 RTK 双天线航向检测 (gps:gps_yaw_deg):
@@ -58,6 +61,15 @@
     检测到模块开始出数据即结束探测并保持 25, 让其在线收敛, 彻底消除 0↔25 反复横跳的死循环。
   - 因不再需要靠长延时等收敛, STARTUP_DELAY_MS 改回 5 秒, 脚本早点开始工作。
 
+  v6.5 变更 (根治 "RTK 航向稳定但 EK3 航向匀速漂"):
+  - 现象: UM982(GPS2) 双天线航向稳定, 但 EK3 输出航向以 ~10°/秒 匀速转, EKF3 core unhealthy。
+  - 根因: GPS_AUTO_SWITCH 默认 = 1(USE_BEST) 按 fix 等级选主 GPS。ublox(GPS1) 常处于
+    DGPS(4), UM982 单模块 type25 只到 3D Fix(3), 于是飞控把主 GPS 选成 ublox,
+    GPS_PRIMARY=1 被无视。EKF 只读主 GPS 的航向, ublox 无双天线航向 -> 航向只剩陀螺积分而漂。
+  - 修复: 脚本自己当总开关, 三种状态都把 GPS_AUTO_SWITCH 写 0(NONE), 主 GPS 完全听 GPS_PRIMARY:
+      · BOTH_OK / GPS2_ONLY -> 主 GPS 固定 UM982(GPS2), 航向进 EKF;
+      · GPS1_ONLY (RTK 不可用) -> 主 GPS 固定 ublox(GPS1)。
+
   安全约束:
   - 未解锁状态才修改 EK3_SRC1_YAW / GPS_PRIMARY, 避免 EKF yaw 参考突变
     (v6.0 例外: 解锁后 RTK 故障强制切换, 此时 RTK 已丢失, 切换为磁罗盘更安全)
@@ -84,6 +96,14 @@ local YAW_GPS     = 2
 -- GPS_PRIMARY 选项: 0=GPS1, 1=GPS2
 local PRIMARY_GPS1 = 0
 local PRIMARY_GPS2 = 1
+
+-- GPS_AUTO_SWITCH 选项 (见 AP_GPS.h GPSAutoSwitch)
+--   0=NONE 始终用 GPS_PRIMARY 指定的那路 (不按 fix 等级自动切)
+--   1=USE_BEST (默认) 按 fix 等级选最好的一路 -> 会让 ublox 的 DGPS(4) 压过 UM982 的 3D(3)
+-- 本脚本自己当总开关, 用 GPS_PRIMARY 决定主 GPS, 故强制 NONE, 否则 GPS_PRIMARY=1 会被 USE_BEST 覆盖,
+-- 导致 EKF 实际主 GPS 是没有双天线航向的 ublox -> EK3 航向只剩陀螺积分而漂.
+local AUTOSW_USE_PRIMARY = 0
+local AUTOSW_USE_BEST    = 1
 
 -- GPS_TYPE 选项
 local TYPE_NONE  = 0    -- 关闭该 GPS 实例
@@ -229,12 +249,14 @@ end
 local function apply_state(state)
     if state == STATE_BOTH_OK then
         -- 双 GPS 均在线: GPS2 提供位置 + 双天线 yaw, 外置罗盘保持启用
-        local a = set_param_if_diff("GPS1_TYPE",    TYPE_AUTO)
-        local e = set_param_if_diff("GPS2_TYPE",    TYPE_UM982)
-        local b = set_param_if_diff("EK3_SRC1_YAW", YAW_GPS)
-        local c = set_param_if_diff("GPS_PRIMARY",  PRIMARY_GPS2)
-        local d = set_param_if_diff("COMPASS_USE",  COMPASS_ON)
-        if a or b or c or d or e then
+        local a = set_param_if_diff("GPS1_TYPE",      TYPE_AUTO)
+        local e = set_param_if_diff("GPS2_TYPE",      TYPE_UM982)
+        local b = set_param_if_diff("EK3_SRC1_YAW",   YAW_GPS)
+        local c = set_param_if_diff("GPS_PRIMARY",    PRIMARY_GPS2)
+        local d = set_param_if_diff("COMPASS_USE",    COMPASS_ON)
+        -- 强制用 GPS_PRIMARY=GPS2, 不让 USE_BEST 因 ublox fix 等级更高而抢主 (否则 EKF 拿不到 RTK 航向)
+        local f = set_param_if_diff("GPS_AUTO_SWITCH", AUTOSW_USE_PRIMARY)
+        if a or b or c or d or e or f then
             gcs:send_text(SEV_INFO, "GPS: dual RTK")
         end
     elseif state == STATE_GPS1_ONLY then
@@ -249,21 +271,24 @@ local function apply_state(state)
         else
             e = set_param_if_diff("GPS2_TYPE", TYPE_NONE)   -- 模块离线: 写 0 抑制告警, 交给 reprobe 热插探测
         end
-        local b = set_param_if_diff("EK3_SRC1_YAW", YAW_COMPASS)
-        local c = set_param_if_diff("GPS_PRIMARY",  PRIMARY_GPS1)
-        local d = set_param_if_diff("COMPASS_USE",  COMPASS_ON)
-        if a or b or c or d or e then
+        local b = set_param_if_diff("EK3_SRC1_YAW",   YAW_COMPASS)
+        local c = set_param_if_diff("GPS_PRIMARY",    PRIMARY_GPS1)
+        local d = set_param_if_diff("COMPASS_USE",    COMPASS_ON)
+        -- RTK 已不可用, 主 GPS 固定 ublox (GPS1), 同样禁用自动切防止误切
+        local f = set_param_if_diff("GPS_AUTO_SWITCH", AUTOSW_USE_PRIMARY)
+        if a or b or c or d or e or f then
             gcs:send_text(SEV_WARN, "GPS: GPS1 only")
         end
     elseif state == STATE_GPS2_ONLY then
         -- 注意写入顺序: 先设 GPS_PRIMARY=1 (GPS2), 再关 GPS1_TYPE=0,
         -- 避免 "GPS 1: primary but TYPE 0" 中间态告警
-        local e = set_param_if_diff("GPS2_TYPE",    TYPE_UM982)
-        local a = set_param_if_diff("EK3_SRC1_YAW", YAW_GPS)
-        local b = set_param_if_diff("GPS_PRIMARY",  PRIMARY_GPS2)
-        local c = set_param_if_diff("GPS1_TYPE",    TYPE_NONE)
-        local d = set_param_if_diff("COMPASS_USE",  COMPASS_OFF)
-        if a or b or c or d or e then
+        local e = set_param_if_diff("GPS2_TYPE",      TYPE_UM982)
+        local a = set_param_if_diff("EK3_SRC1_YAW",   YAW_GPS)
+        local b = set_param_if_diff("GPS_PRIMARY",    PRIMARY_GPS2)
+        local g = set_param_if_diff("GPS_AUTO_SWITCH", AUTOSW_USE_PRIMARY)
+        local c = set_param_if_diff("GPS1_TYPE",      TYPE_NONE)
+        local d = set_param_if_diff("COMPASS_USE",    COMPASS_ON)
+        if a or b or c or d or e or g then
             gcs:send_text(SEV_WARN, "GPS: RTK only")
         end
     end

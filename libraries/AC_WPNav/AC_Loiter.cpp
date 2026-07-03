@@ -334,6 +334,7 @@ void AC_Loiter::calc_desired_velocity(bool avoidance_on)
         desired_vel_ne_ms = desired_vel_ne_ms * gnd_speed_limit_ms / desired_vel_ms;
     }
 
+    bool avoid_limiting = false;
 #if AP_AVOIDANCE_ENABLED && !APM_BUILD_TYPE(APM_BUILD_ArduPlane)
     if (avoidance_on) {
         // Apply fence/obstacle avoidance adjustments (velocity only)
@@ -343,6 +344,12 @@ void AC_Loiter::calc_desired_velocity(bool avoidance_on)
             Vector3f avoidance_vel_neu_cms{desired_vel_ne_ms.x * 100.0, desired_vel_ne_ms.y * 100.0, 0.0f};
             _avoid->adjust_velocity(avoidance_vel_neu_cms, _pos_control.get_pos_NE_p().kP(), _accel_max_ne_cmss, _pos_control.get_pos_U_p().kP(), _pos_control.get_max_accel_U_mss() * 100.0, dt_s);
             desired_vel_ne_ms = avoidance_vel_neu_cms.xy() * 0.01;
+            avoid_limiting = _avoid->limits_active();
+            // Clear feed-forward momentum when stopped by avoidance so we don't coast into the margin
+            if (avoid_limiting && desired_vel_ne_ms.length_squared() < sq(0.1f)) {
+                _predicted_accel_ne_mss.zero();
+                _brake_accel_mss = 0.0f;
+            }
         }
     }
 #endif // !APM_BUILD_ArduPlane
@@ -350,8 +357,15 @@ void AC_Loiter::calc_desired_velocity(bool avoidance_on)
     // Retrieve current desired position
     Vector2p desired_pos_neu_m = _pos_control.get_pos_desired_NEU_m().xy();
 
-    // Integrate velocity to update desired position
-    desired_pos_neu_m += (desired_vel_ne_ms * dt_s).topostype();
+    if (avoid_limiting) {
+        // Hold at current position while avoidance is active. Without this the loiter target
+        // stays ahead of the vehicle, causing overshoot into the margin and a visible backward
+        // correction even when AVOID_BACKUP_SPD is zero.
+        desired_pos_neu_m = _pos_control.get_pos_estimate_NEU_m().xy();
+    } else {
+        // Integrate velocity to update desired position
+        desired_pos_neu_m += (desired_vel_ne_ms * dt_s).topostype();
+    }
 
     // Send updated position, velocity, and acceleration to the position controller
     _pos_control.set_pos_vel_accel_NE_m(desired_pos_neu_m, desired_vel_ne_ms, _desired_accel_ne_mss);
