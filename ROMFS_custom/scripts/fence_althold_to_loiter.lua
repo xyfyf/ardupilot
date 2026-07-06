@@ -1,20 +1,19 @@
 -- fence_althold_to_loiter.lua
 --
--- 用途：飞机在 AltHold（定高）模式下飞行，一旦触发电子围栏（围栏 breach），
---       自动把飞行模式切换到 Loiter（GPS 悬停定位），防止飞出围栏。
+-- 用途：飞机在 AltHold（定高）模式下飞行，靠近或飞出电子围栏时
+--       自动切换到 Loiter（GPS 悬停定位），防止飞出围栏。
 --
 -- 行为说明：
 --   1. 只在已解锁(armed) 且 当前模式为 AltHold 时监控围栏；
---   2. 进入 FENCE_MARGIN 缓冲带（fence:get_margin_breaches()）或已越界
---      （fence:get_breaches()）时，调用 vehicle:set_mode(LOITER)；
---      即在距围栏边界 FENCE_MARGIN 米内就切模式，避免惯性冲出围栏；
+--   2. 检测"进入缓冲带"采用直接计算距离的方式（圆形围栏：直接算飞机离
+--      Home 的水平距离；多边形/其他：fallback 到 fence:get_breaches()）；
+--      避免依赖 fence:get_margin_breaches()——该接口对圆形围栏在实际飞行
+--      中存在不能可靠触发的问题，导致总是飞出去才切 Loiter；
 --   3. 切换成功后保持 Loiter，不再反复切（飞手可自行再切回任何模式）；
 --   4. 一旦飞手手动切到非 AltHold/Loiter 的模式，脚本认为飞手已接管，复位状态；
 --   5. 切到 Loiter 失败（例如没有 GPS / 卫星不足）会通过 GCS 弹出提示。
 --
 -- 适用：ArduCopter（多旋翼），需要启用脚本（SCR_ENABLE=1），并打开围栏（FENCE_ENABLE=1）。
---
--- 把本文件放到 SD 卡 /APM/scripts/ 目录下，重启或重新加载脚本即可生效。
 
 -- ====== 可配置参数 ======
 local LOOP_MS = 200    -- 检查周期 ms
@@ -26,14 +25,28 @@ local MODE_LOITER  = 5
 -- ====== 内部状态 ======
 local switched = false    -- 是否本次已经由脚本切到 Loiter 了
 
-local function describe_breach(breaches)
-    local names = {}
-    if (breaches & 1) ~= 0 then table.insert(names, "MaxAlt") end
-    if (breaches & 2) ~= 0 then table.insert(names, "Circle") end
-    if (breaches & 4) ~= 0 then table.insert(names, "Polygon") end
-    if (breaches & 8) ~= 0 then table.insert(names, "MinAlt") end
-    if #names == 0 then return "None" end
-    return table.concat(names, "+")
+-- 判断飞机是否已进入圆形围栏缓冲带（距边界 < FENCE_MARGIN）或已越界
+-- 返回 true 表示需要切 Loiter，同时返回原因字符串
+local function circle_fence_triggered()
+    -- 直接算水平距离，不依赖 get_margin_breaches()
+    local pos = ahrs:get_relative_position_NED_home()
+    if pos == nil then
+        return false, ""
+    end
+    local dist = math.sqrt(pos:x() * pos:x() + pos:y() * pos:y())
+
+    local fence_radius = param:get("FENCE_RADIUS")
+    local fence_margin = param:get("FENCE_MARGIN")
+    if fence_radius == nil or fence_margin == nil then
+        return false, ""
+    end
+
+    if dist >= fence_radius then
+        return true, string.format("breach(%.1fm out)", dist - fence_radius)
+    elseif dist >= fence_radius - fence_margin then
+        return true, string.format("margin(%.1fm left)", fence_radius - dist)
+    end
+    return false, ""
 end
 
 function update()
@@ -45,20 +58,20 @@ function update()
     local mode = vehicle:get_mode()
 
     if mode == MODE_ALTHOLD then
-        -- margin：距边界 FENCE_MARGIN 内；breach：已越界。两者任一即切 Loiter
-        local margin = fence:get_margin_breaches()
-        local breaches = fence:get_breaches()
-        local trigger = margin ~= 0 and margin or breaches
-        if trigger ~= 0 and not switched then
-            local reason = margin ~= 0 and "margin" or "breach"
+        local triggered, reason = circle_fence_triggered()
+
+        -- 多边形/其他围栏兜底：真越界时也切
+        if not triggered and fence:get_breaches() ~= 0 then
+            triggered = true
+            reason = "breach(other)"
+        end
+
+        if triggered and not switched then
             if vehicle:set_mode(MODE_LOITER) then
                 switched = true
-                gcs:send_text(2, string.format(
-                    "Fence %s (%s): AltHold -> Loiter",
-                    reason, describe_breach(trigger)))
+                gcs:send_text(2, string.format("Fence %s: AltHold -> Loiter", reason))
             else
-                gcs:send_text(2, string.format(
-                    "Fence %s: switch to Loiter FAILED (no GPS?)", reason))
+                gcs:send_text(2, string.format("Fence %s: switch to Loiter FAILED (no GPS?)", reason))
             end
         end
 
