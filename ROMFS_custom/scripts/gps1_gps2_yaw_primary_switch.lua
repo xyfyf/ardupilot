@@ -1,5 +1,5 @@
 --[[
-  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.6
+  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.7
   适用场景: EFT_CAAC 机控
               GPS1 = ublox GPS                       (instance 0)
               GPS2 = UM982 双天线 RTK on SERIAL7     (instance 1)
@@ -11,21 +11,21 @@
          EK3_SRC1_YAW   = 2   (使用 GPS 双天线 yaw)
          GPS_PRIMARY    = 1   (优先 GPS2)
          GPS_AUTO_SWITCH= 0   (NONE, 主 GPS 固定 GPS2, 不按 fix 等级被 ublox 抢走)
-         COMPASS_USE    = 1   (启用外置罗盘, ublox 内磁)
+         COMPASS_USE/2/3= 0   (禁用罗盘, 强制 EKF 等待并使用 RTK 航向)
     2. 仅识别 GPS1 (GPS2 离线 / 状态 < 3D Fix / 双天线航向丢失), 即 RTK 故障:
          GPS1_TYPE      = 1
          GPS2_TYPE      = 0   (关闭 GPS2)
          EK3_SRC1_YAW   = 1   (使用外置磁罗盘 yaw)
          GPS_PRIMARY    = 0   (优先 GPS1)
          GPS_AUTO_SWITCH= 0   (NONE, 主 GPS 固定 GPS1)
-         COMPASS_USE    = 1   (启用外置罗盘)
+         COMPASS_USE/2/3= 1   (启用外置罗盘)
     3. 仅识别 GPS2 RTK (ublox GPS1 掉线, gps:status(0)==0):
          GPS1_TYPE      = 0   (关闭 GPS1)
          GPS2_TYPE      = 25  (UM982 / Unicore moving baseline, 启用 RTK)
          EK3_SRC1_YAW   = 2   (使用 GPS 双天线 yaw)
          GPS_PRIMARY    = 1   (使用 GPS2)
          GPS_AUTO_SWITCH= 0   (NONE, 主 GPS 固定 GPS2)
-         COMPASS_USE    = 1   (启用外置罗盘)
+         COMPASS_USE/2/3= 1   (启用外置罗盘, RTK 已就绪所以不会干扰)
 
   v6.0 变更:
   - read_state() 新增 RTK 双天线航向检测 (gps:gps_yaw_deg):
@@ -70,6 +70,16 @@
       · BOTH_OK / GPS2_ONLY -> 主 GPS 固定 UM982(GPS2), 航向进 EKF;
       · GPS1_ONLY (RTK 不可用) -> 主 GPS 固定 ublox(GPS1)。
 
+  v6.7 变更:
+  - 修复 RTK 冷启动时 EKF3 提前融合磁罗盘航向导致 "Need Position Estimate" 报警:
+      现象: RTK 刚上电时航向未就绪, EKF3 会退而融合磁罗盘航向, 导致后续即使 RTK 航向
+            就绪也不再切换, 出现航向偏差报警.
+      修复: 仅在 STATE_RTK_WARMUP (等待 RTK 航向解算) 期间禁用 COMPASS_USE/2/3,
+            迫使 EKF3 在此窗口内无法用磁罗盘初始化航向, 只能等 RTK GPS yaw 就绪.
+            RTK 航向就绪后 (STATE_BOTH_OK / STATE_GPS2_ONLY) 立即重新启用罗盘:
+            此时 EKF3 航向已由 GPS yaw 锁定, 罗盘只作辅助, 不会反客为主;
+            且飞行中 RTK 突然故障时 (切 STATE_GPS1_ONLY) 罗盘可立即接管航向, 保证安全.
+
   v6.6 变更:
   - 新增参数 GPSYS_ENABLE (地面站搜索 GPSYS_):
       0 = 禁用脚本, 不修改任何 GPS/EKF 参数, 完全由飞手手动配置;
@@ -100,13 +110,19 @@
 --                    RTK 模块在线但航向还没解算出来时, 脚本坚持用 GPS 航向
 --                    (EK3_SRC1_YAW=2) 一直等, 不切磁罗盘; 等够这么多秒仍拿不到
 --                    航向 (视为副天线故障) 才退回磁罗盘. 未接 RTK 则立即用磁罗盘.
+--   GPSYS_COMP_DLY : RTK 航向就绪后延迟多久再启用 COMPASS_USE (秒, 默认 30).
+--                    等待期间 COMPASS_USE 保持 0, 让 EKF3 充分稳定在 RTK 航向后
+--                    再融合罗盘, 避免刚切入时罗盘瞬时偏差干扰 EKF3.
+--                    设为 0 表示 RTK 航向就绪后立即启用罗盘.
 local PARAM_TABLE_KEY    = 200
 local PARAM_TABLE_PREFIX = "GPSYS_"
-assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 2), "GPSYS: add_table fail")
+assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 3), "GPSYS: add_table fail")
 assert(param:add_param(PARAM_TABLE_KEY, 1, "ENABLE",   1),  "GPSYS: add ENABLE fail")
 assert(param:add_param(PARAM_TABLE_KEY, 2, "RTK_WAIT", 90), "GPSYS: add RTK_WAIT fail")
-local gpsys_enable   = Parameter("GPSYS_ENABLE")
-local gpsys_rtk_wait = Parameter("GPSYS_RTK_WAIT")
+assert(param:add_param(PARAM_TABLE_KEY, 3, "COMP_DLY", 30), "GPSYS: add COMP_DLY fail")
+local gpsys_enable    = Parameter("GPSYS_ENABLE")
+local gpsys_rtk_wait  = Parameter("GPSYS_RTK_WAIT")
+local gpsys_comp_dly  = Parameter("GPSYS_COMP_DLY")
 
 local function script_enabled()
     return gpsys_enable:get() >= 1
@@ -314,29 +330,26 @@ end
 
 local function apply_state(state)
     if state == STATE_RTK_WARMUP then
-        -- 起飞前等 RTK 双天线航向: 参数按 RTK 模式预置好, 航向源固定 GPS(EK3_SRC1_YAW=2).
-        -- EKF 会一直等 RTK 航向对齐, 期间不使用磁罗盘, 从而避免 "罗盘航向 <-> GPS航向"
-        -- 来回切换造成的 EKF 重对齐 / 位置估计反复丢失. 参数与 BOTH_OK 一致,
-        -- 因此 RTK 航向到位后转 BOTH_OK 不会再改任何参数 (无缝衔接).
+        -- 起飞前等 RTK 双天线航向: 航向源固定 GPS(EK3_SRC1_YAW=2),
+        -- COMPASS_USE 由 manage_compass() 管理 (此阶段保持关闭).
         local a = set_param_if_diff("GPS1_TYPE",       TYPE_AUTO)
         local e = set_param_if_diff("GPS2_TYPE",       TYPE_UM982)
         local b = set_param_if_diff("EK3_SRC1_YAW",    YAW_GPS)
         local c = set_param_if_diff("GPS_PRIMARY",     PRIMARY_GPS2)
-        local d = set_param_if_diff("COMPASS_USE",     COMPASS_ON)
         local f = set_param_if_diff("GPS_AUTO_SWITCH", AUTOSW_USE_PRIMARY)
-        if a or b or c or d or e or f then
+        if a or b or c or e or f then
             gcs:send_text(SEV_INFO, "GPS: waiting RTK yaw")
         end
     elseif state == STATE_BOTH_OK then
-        -- 双 GPS 均在线: GPS2 提供位置 + 双天线 yaw, 外置罗盘保持启用
-        local a = set_param_if_diff("GPS1_TYPE",      TYPE_AUTO)
-        local e = set_param_if_diff("GPS2_TYPE",      TYPE_UM982)
-        local b = set_param_if_diff("EK3_SRC1_YAW",   YAW_GPS)
-        local c = set_param_if_diff("GPS_PRIMARY",    PRIMARY_GPS2)
-        local d = set_param_if_diff("COMPASS_USE",    COMPASS_ON)
-        -- 强制用 GPS_PRIMARY=GPS2, 不让 USE_BEST 因 ublox fix 等级更高而抢主 (否则 EKF 拿不到 RTK 航向)
+        -- 双 GPS 均在线: GPS2 提供位置 + 双天线 yaw.
+        -- COMPASS_USE 由 manage_compass() 管理 (延迟 GPSYS_COMP_DLY 秒后启用).
+        local a = set_param_if_diff("GPS1_TYPE",       TYPE_AUTO)
+        local e = set_param_if_diff("GPS2_TYPE",       TYPE_UM982)
+        local b = set_param_if_diff("EK3_SRC1_YAW",    YAW_GPS)
+        local c = set_param_if_diff("GPS_PRIMARY",     PRIMARY_GPS2)
+        -- 强制用 GPS_PRIMARY=GPS2, 不让 USE_BEST 因 ublox fix 等级更高而抢主
         local f = set_param_if_diff("GPS_AUTO_SWITCH", AUTOSW_USE_PRIMARY)
-        if a or b or c or d or e or f then
+        if a or b or c or e or f then
             gcs:send_text(SEV_INFO, "GPS: dual RTK")
         end
     elseif state == STATE_GPS1_ONLY then
@@ -351,26 +364,62 @@ local function apply_state(state)
         else
             e = set_param_if_diff("GPS2_TYPE", TYPE_NONE)   -- 模块离线: 写 0 抑制告警, 交给 reprobe 热插探测
         end
-        local b = set_param_if_diff("EK3_SRC1_YAW",   YAW_COMPASS)
-        local c = set_param_if_diff("GPS_PRIMARY",    PRIMARY_GPS1)
-        local d = set_param_if_diff("COMPASS_USE",    COMPASS_ON)
-        -- RTK 已不可用, 主 GPS 固定 ublox (GPS1), 同样禁用自动切防止误切
+        local b = set_param_if_diff("EK3_SRC1_YAW",    YAW_COMPASS)
+        local c = set_param_if_diff("GPS_PRIMARY",     PRIMARY_GPS1)
         local f = set_param_if_diff("GPS_AUTO_SWITCH", AUTOSW_USE_PRIMARY)
-        if a or b or c or d or e or f then
+        if a or b or c or e or f then
             gcs:send_text(SEV_WARN, "GPS: GPS1 only")
         end
     elseif state == STATE_GPS2_ONLY then
         -- 注意写入顺序: 先设 GPS_PRIMARY=1 (GPS2), 再关 GPS1_TYPE=0,
         -- 避免 "GPS 1: primary but TYPE 0" 中间态告警
-        local e = set_param_if_diff("GPS2_TYPE",      TYPE_UM982)
-        local a = set_param_if_diff("EK3_SRC1_YAW",   YAW_GPS)
-        local b = set_param_if_diff("GPS_PRIMARY",    PRIMARY_GPS2)
+        local e = set_param_if_diff("GPS2_TYPE",       TYPE_UM982)
+        local a = set_param_if_diff("EK3_SRC1_YAW",    YAW_GPS)
+        local b = set_param_if_diff("GPS_PRIMARY",     PRIMARY_GPS2)
         local g = set_param_if_diff("GPS_AUTO_SWITCH", AUTOSW_USE_PRIMARY)
-        local c = set_param_if_diff("GPS1_TYPE",      TYPE_NONE)
-        local d = set_param_if_diff("COMPASS_USE",    COMPASS_ON)
-        if a or b or c or d or e or g then
+        local c = set_param_if_diff("GPS1_TYPE",       TYPE_NONE)
+        if a or b or c or e or g then
             gcs:send_text(SEV_WARN, "GPS: RTK only")
         end
+    end
+end
+
+-- 罗盘延迟开启计时: 记录 "可以把 COMPASS_USE 改为 1" 的最早时刻 (0=未计时)
+local compass_open_at_ms = 0
+
+-- 每帧统一管理 COMPASS_USE / COMPASS_USE2 / COMPASS_USE3.
+-- COMPASS_USE2/3 始终禁用.
+-- COMPASS_USE 逻辑:
+--   RTK_WARMUP : 关 (禁止 EKF3 用罗盘提前初始化航向)
+--   BOTH_OK / GPS2_ONLY : RTK 航向就绪, 延迟 GPSYS_COMP_DLY 秒后再开
+--                          (给 EKF3 一段时间在纯 RTK 航向下稳定, 再融合罗盘)
+--   GPS1_ONLY / 其他 : RTK 故障, 立即开罗盘 (磁罗盘是唯一航向源)
+local function manage_compass()
+    set_param_if_diff("COMPASS_USE2", COMPASS_OFF)
+    set_param_if_diff("COMPASS_USE3", COMPASS_OFF)
+
+    local rtk_ok = (current_state == STATE_BOTH_OK or current_state == STATE_GPS2_ONLY)
+
+    if current_state == STATE_RTK_WARMUP then
+        -- 等待 RTK 航向期间: 关罗盘, 重置延迟计时
+        set_param_if_diff("COMPASS_USE", COMPASS_OFF)
+        compass_open_at_ms = 0
+    elseif rtk_ok then
+        -- RTK 航向已就绪: 第一次进入时启动延迟计时
+        if compass_open_at_ms == 0 then
+            local dly = (gpsys_comp_dly:get() or 30)
+            if dly < 0 then dly = 0 end
+            compass_open_at_ms = millis():tofloat() + dly * 1000
+        end
+        if millis():tofloat() >= compass_open_at_ms then
+            set_param_if_diff("COMPASS_USE", COMPASS_ON)
+        else
+            set_param_if_diff("COMPASS_USE", COMPASS_OFF)
+        end
+    else
+        -- RTK 故障 / 未知: 立即开罗盘, 重置计时 (下次 RTK 就绪重新计)
+        compass_open_at_ms = 0
+        set_param_if_diff("COMPASS_USE", COMPASS_ON)
     end
 end
 
@@ -424,6 +473,7 @@ function update()
         -- 解锁期间不通过 pending 机制修改其他参数, 落地后重新确认
         pending_state = STATE_UNKNOWN
         pending_count = 0
+        manage_compass()
         return update, RUN_INTERVAL_MS
     end
 
@@ -526,6 +576,7 @@ function update()
         pending_count = 0
     end
 
+    manage_compass()
     return update, RUN_INTERVAL_MS
 end
 
