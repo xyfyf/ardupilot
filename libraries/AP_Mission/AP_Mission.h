@@ -50,7 +50,7 @@
 #define LAST_WP_PASSED (AP_MISSION_MAX_WP_HISTORY-2)
 
 #if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS
-#define AP_MISSION_SDCARD_FILENAME "APM/mission.stg"
+#define AP_MISSION_SDCARD_FILENAME "EFT/mission.stg"
 #else
 #define AP_MISSION_SDCARD_FILENAME "mission.stg"
 #endif

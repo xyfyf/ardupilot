@@ -7,7 +7,7 @@
 #endif
 
 #ifndef HAL_BOARD_LOG_DIRECTORY
-#define HAL_BOARD_LOG_DIRECTORY "/APM/LOGS"
+#define HAL_BOARD_LOG_DIRECTORY "/EFT/LOGS"
 #endif
 
 // a similar define is present in AP_HAL_Boards.h:
@@ -31,6 +31,6 @@
 
 #if AP_TERRAIN_AVAILABLE
 #ifndef HAL_BOARD_TERRAIN_DIRECTORY
-#define HAL_BOARD_TERRAIN_DIRECTORY "/APM/TERRAIN"
+#define HAL_BOARD_TERRAIN_DIRECTORY "/EFT/TERRAIN"
 #endif
 #endif  // AP_TERRAIN_AVAILABLE

@@ -33,12 +33,12 @@ extern const AP_HAL::HAL& hal;
 #ifndef HAL_STORAGE_FILE
 // using AP_BUILD_TARGET_NAME allows the one microSD to be used
 // for multiple vehicle types
-#define HAL_STORAGE_FILE "/APM/" AP_BUILD_TARGET_NAME ".stg"
+#define HAL_STORAGE_FILE "/EFT/" AP_BUILD_TARGET_NAME ".stg"
 #endif
 
 #ifndef HAL_STORAGE_BACKUP_FOLDER
 // location of backup file
-#define HAL_STORAGE_BACKUP_FOLDER "/APM/STRG_BAK"
+#define HAL_STORAGE_BACKUP_FOLDER "/EFT/STRG_BAK"
 #endif
 
 #ifndef HAL_STORAGE_BACKUP_COUNT

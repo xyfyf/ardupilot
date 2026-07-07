@@ -1407,7 +1407,7 @@ bool AP_Logger::check_crash_dump_save(void)
         // returns -1 for open on empty files
         return true;
     }
-    int fd2 = AP::FS().open("APM/crash_dump.bin", O_WRONLY|O_CREAT|O_TRUNC);
+    int fd2 = AP::FS().open("EFT/crash_dump.bin", O_WRONLY|O_CREAT|O_TRUNC);
     if (fd2 == -1) {
         // sdcard not available yet, try again later
         AP::FS().close(fd);

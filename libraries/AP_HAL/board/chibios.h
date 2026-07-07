@@ -121,9 +121,9 @@
 #define HAL_I2C_INTERNAL_MASK 1
 #endif
 
-// put all storage of files under /APM directory
+// put all storage of files under /EFT directory
 #ifndef HAL_BOARD_STORAGE_DIRECTORY
-#define HAL_BOARD_STORAGE_DIRECTORY "/APM"
+#define HAL_BOARD_STORAGE_DIRECTORY "/EFT"
 #endif
 
 #if defined(STM32_WSPI_USE_QUADSPI1) && STM32_WSPI_USE_QUADSPI1

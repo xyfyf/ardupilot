@@ -231,8 +231,8 @@ bool AP_Logger_File::dirent_to_log_num(const dirent *de, uint16_t &log_num) cons
     if (length < 5) {
         return false;
     }
-    if (strncmp(&de->d_name[length-4], ".BIN", 4) != 0) {
-        // doesn't end in .BIN
+    if (strncmp(&de->d_name[length-4], ".EFT", 4) != 0) {
+        // doesn't end in .EFT
         return false;
     }
 
@@ -270,7 +270,7 @@ uint16_t AP_Logger_File::find_oldest_log()
         return 0;
     }
 
-    // we only remove files which look like xxx.BIN
+    // we only remove files which look like xxx.EFT
     EXPECT_DELAY_MS(3000);
     for (struct dirent *de=AP::FS().readdir(d); de; de=AP::FS().readdir(d)) {
         EXPECT_DELAY_MS(3000);
@@ -377,7 +377,7 @@ void AP_Logger_File::Prep_MinSpace()
 char *AP_Logger_File::_log_file_name(const uint16_t log_num) const
 {
     char *buf = nullptr;
-    if (asprintf(&buf, "%s/%08u.BIN", _log_directory, (unsigned)log_num) == -1) {
+    if (asprintf(&buf, "%s/%08u.EFT", _log_directory, (unsigned)log_num) == -1) {
         return nullptr;
     }
     return buf;

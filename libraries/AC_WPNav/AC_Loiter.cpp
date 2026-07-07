@@ -338,15 +338,20 @@ void AC_Loiter::calc_desired_velocity(bool avoidance_on)
 #if AP_AVOIDANCE_ENABLED && !APM_BUILD_TYPE(APM_BUILD_ArduPlane)
     if (avoidance_on) {
         // Apply fence/obstacle avoidance adjustments (velocity only)
-        // TODO: We need to also limit the _desired_accel_ne_mss
         AC_Avoid *_avoid = AP::ac_avoid();
         if (_avoid != nullptr) {
             Vector3f avoidance_vel_neu_cms{desired_vel_ne_ms.x * 100.0, desired_vel_ne_ms.y * 100.0, 0.0f};
             _avoid->adjust_velocity(avoidance_vel_neu_cms, _pos_control.get_pos_NE_p().kP(), _accel_max_ne_cmss, _pos_control.get_pos_U_p().kP(), _pos_control.get_max_accel_U_mss() * 100.0, dt_s);
             desired_vel_ne_ms = avoidance_vel_neu_cms.xy() * 0.01;
             avoid_limiting = _avoid->limits_active();
-            // Clear feed-forward momentum when stopped by avoidance so we don't coast into the margin
-            if (avoid_limiting && desired_vel_ne_ms.length_squared() < sq(0.1f)) {
+            if (avoid_limiting) {
+                // Avoidance is actively limiting velocity. Also cancel the feed-forward
+                // acceleration and braking momentum. Otherwise the vehicle keeps leaning
+                // forward on the feed-forward term, overshoots into the margin, and the position
+                // controller pulls it back once the pilot re-centres pitch. That pull-back is the
+                // 20-50cm backward "kick". Zeroing the feed-forward makes the copter ride only the
+                // avoidance-limited velocity and stop cleanly.
+                _desired_accel_ne_mss.zero();
                 _predicted_accel_ne_mss.zero();
                 _brake_accel_mss = 0.0f;
             }
@@ -358,9 +363,9 @@ void AC_Loiter::calc_desired_velocity(bool avoidance_on)
     Vector2p desired_pos_neu_m = _pos_control.get_pos_desired_NEU_m().xy();
 
     if (avoid_limiting) {
-        // Hold at current position while avoidance is active. Without this the loiter target
-        // stays ahead of the vehicle, causing overshoot into the margin and a visible backward
-        // correction even when AVOID_BACKUP_SPD is zero.
+        // Freeze the loiter target at the current position while avoidance holds the vehicle off
+        // the obstacle. This keeps the target from sitting ahead of (overshoot) or behind
+        // (backward kick) the vehicle, so it simply stops and holds.
         desired_pos_neu_m = _pos_control.get_pos_estimate_NEU_m().xy();
     } else {
         // Integrate velocity to update desired position
