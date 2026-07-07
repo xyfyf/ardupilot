@@ -31,6 +31,7 @@
 
 #include <AP_Math/AP_Math.h>
 #include <GCS_MAVLink/GCS.h>
+#include <AP_Param/AP_Param.h>
 #include <stdio.h>
 
 
@@ -370,14 +371,123 @@ void AP_Logger_File::Prep_MinSpace()
 }
 
 /*
+  decode the flight controller serial number (params SN_FC1..SN_FC7) into a
+  filename-safe ASCII string. Each SN_FCn packs 3 ASCII bytes as
+  (b0<<16)|(b1<<8)|b2, matching the FactorySN parameter layout. Bytes that are
+  not alphanumeric are replaced with '_' so the result is always safe inside a
+  filename. Writes "NOSN" when no serial number is configured.
+ */
+static void log_filename_fc_sn(char *dest, size_t dest_size)
+{
+    if (dest == nullptr || dest_size == 0) {
+        return;
+    }
+    size_t pos = 0;
+    bool terminated = false;
+    for (uint8_t i = 1; i <= 7 && !terminated && pos + 1 < dest_size; i++) {
+        char pname[8];
+        snprintf(pname, sizeof(pname), "SN_FC%u", (unsigned)i);
+        enum ap_var_type ptype;
+        AP_Param *vp = AP_Param::find(pname, &ptype);
+        if (vp == nullptr || ptype != AP_PARAM_INT32) {
+            break;
+        }
+        const uint32_t v = (uint32_t)((AP_Int32 *)vp)->get();
+        const uint8_t bytes[3] = {
+            (uint8_t)((v >> 16) & 0xFF),
+            (uint8_t)((v >>  8) & 0xFF),
+            (uint8_t)( v        & 0xFF),
+        };
+        for (uint8_t b = 0; b < 3 && pos + 1 < dest_size; b++) {
+            const uint8_t c = bytes[b];
+            if (c == 0) {
+                terminated = true;
+                break;
+            }
+            const bool ok = (c >= '0' && c <= '9') ||
+                            (c >= 'A' && c <= 'Z') ||
+                            (c >= 'a' && c <= 'z');
+            dest[pos++] = ok ? (char)c : '_';
+        }
+    }
+    if (pos == 0) {
+        for (const char *f = "NOSN"; *f && pos + 1 < dest_size; f++) {
+            dest[pos++] = *f;
+        }
+    }
+    dest[pos] = '\0';
+}
+
+/*
+  format the current UTC time (from RTC/GPS) as YYYYMMDDHHMMSS. Writes "NOTIME"
+  when no valid UTC time is available (e.g. no GPS fix yet).
+ */
+static void log_filename_timestamp(char *dest, size_t dest_size)
+{
+    if (dest_size < 15) {
+        if (dest_size > 0) {
+            dest[0] = '\0';
+        }
+        return;
+    }
+#if AP_RTC_ENABLED
+    uint16_t year;
+    uint8_t month, day, hour, min, sec;
+    uint16_t ms;
+    // month is returned 0~11, so add 1 to get a human 1~12 value
+    if (AP::rtc().get_date_and_time_utc(year, month, day, hour, min, sec, ms)) {
+        const unsigned y = MIN((unsigned)year, 9999U);
+        const unsigned m = MIN((unsigned)month + 1U, 12U);
+        const unsigned d = MIN((unsigned)day, 31U);
+        const unsigned h = MIN((unsigned)hour, 23U);
+        const unsigned mi = MIN((unsigned)min, 59U);
+        const unsigned s = MIN((unsigned)sec, 60U);
+        // fixed 15-byte buffer: YYYYMMDDHHMMSS + null
+        snprintf(dest, 15, "%04u%02u%02u%02u%02u%02u", y, m, d, h, mi, s);
+        return;
+    }
+#endif
+    snprintf(dest, 15, "NOTIME");
+}
+
+/*
   construct a log file name given a log number.
-  The number in the log filename will be zero-padded.
+
+  New logs are named  NNNNNNNN_<fc_sn>_<YYYYMMDDHHMMSS>.EFT  where the leading
+  zero-padded number is the log index (kept so log download and auto-cleanup
+  keep working), the middle field is the flight controller serial number and
+  the trailing field is the arm-time UTC timestamp.
+
+  For an existing log we scan the directory and return its real on-disk name
+  (whatever suffix it has), so all existing-log operations work regardless of
+  the suffix, and old plain NNNNNNNN.EFT logs remain readable.
   Note: Caller must free.
  */
 char *AP_Logger_File::_log_file_name(const uint16_t log_num) const
 {
+    auto *d = AP::FS().opendir(_log_directory);
+    if (d != nullptr) {
+        for (struct dirent *de = AP::FS().readdir(d); de; de = AP::FS().readdir(d)) {
+            uint16_t thisnum;
+            if (dirent_to_log_num(de, thisnum) && thisnum == log_num) {
+                char *found = nullptr;
+                if (asprintf(&found, "%s/%s", _log_directory, de->d_name) == -1) {
+                    found = nullptr;
+                }
+                AP::FS().closedir(d);
+                return found;
+            }
+        }
+        AP::FS().closedir(d);
+    }
+
+    char sn[22];   // FactorySN capacity is 21 chars + null
+    char ts[15];   // YYYYMMDDHHMMSS + null
+    log_filename_fc_sn(sn, sizeof(sn));
+    log_filename_timestamp(ts, sizeof(ts));
+
     char *buf = nullptr;
-    if (asprintf(&buf, "%s/%08u.EFT", _log_directory, (unsigned)log_num) == -1) {
+    if (asprintf(&buf, "%s/%08u_%s_%s.EFT", _log_directory, (unsigned)log_num, sn, ts) == -1) {
         return nullptr;
     }
     return buf;
