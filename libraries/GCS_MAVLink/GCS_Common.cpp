@@ -220,6 +220,13 @@ bool GCS_MAVLINK::init(uint8_t instance)
 
     mavlink_comm_port[chan] = _port;
 
+#if defined(HAL_MAVLINK_EF_MAGIC_SERIAL_MASK)
+    // Per-port default MAVLink2 STX override (e.g. 0xEF on USB and LINK/UART8).
+    if ((HAL_MAVLINK_EF_MAGIC_SERIAL_MASK & (1U << uartstate->idx)) != 0) {
+        mavlink_set_channel_magic_override(chan, 0xEF);
+    }
+#endif
+
     const auto mavlink_protocol = uartstate->get_protocol();
 
     if (mavlink_protocol == AP_SerialManager::SerialProtocol_MAVLink2 ||
@@ -1989,7 +1996,18 @@ GCS_MAVLINK::update_receive(uint32_t max_time_us)
         bool parsed_packet = false;
 
         // Try to get a new message
-        const uint8_t framing = mavlink_frame_char_buffer(channel_buffer(), channel_status(), c, &msg, &status);
+        // ArduPilot custom: remap 0xEF start byte to standard 0xFD on channels
+        // configured for EF magic (Type-C / UART8), so incoming EF-framed packets
+        // are parsed correctly. Only applied when the parser is idle (looking for
+        // a start byte), and only on channels whose TX magic is already 0xEF.
+        uint8_t rx_c = c;
+        if (rx_c == 0xEF &&
+            (channel_status()->parse_state == MAVLINK_PARSE_STATE_UNINIT ||
+             channel_status()->parse_state == MAVLINK_PARSE_STATE_IDLE) &&
+            mav_tx_magic_override_chan[chan] == 0xEF) {
+            rx_c = MAVLINK_STX;
+        }
+        const uint8_t framing = mavlink_frame_char_buffer(channel_buffer(), channel_status(), rx_c, &msg, &status);
         if (framing == MAVLINK_FRAMING_OK) {
             hal.util->persistent_data.last_mavlink_msgid = msg.msgid;
             packetReceived(status, msg);
