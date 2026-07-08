@@ -1,5 +1,5 @@
 --[[
-  WS2812 串联LED 状态灯 v7.2
+  WS2812 串联LED 状态灯 v7.3
 
   灯语优先级 (高→低):
   A  指南针校准进行中:
@@ -35,6 +35,11 @@
       2=采样(STEP1) 3=拟合(STEP2) 4=成功 5=失败 6=朝向错 7=半径错。
   - 水平/头朝下用固件完成进度区分 (与 CompassCalibrator 两阶段精确对应):
       <50% 水平→蓝灯常亮; >=50% 头朝下→绿灯常亮 (不再用 pitch 角度猜测)。
+  v7.3 变更 (修复 RTK 预热期间误报指南针异常):
+  - gps1_gps2_yaw_primary_switch.lua 在 RTK_WARMUP / COMP_DLY 期间会故意 COMPASS_USE=0,
+    旧逻辑 active_compass_count()==0 一律判为指南针异常 → 红黄交替闪 (误报)。
+  - 现识别 "EK3_SRC1_YAW=2 且 COMPASS_USE=0" 为 RTK/GPS 航向下有意关罗盘,
+    不再触发指南针异常灯语, 改按飞行模式/GPS 状态显示正常灯语。
 --]]
 
 ---@diagnostic disable: need-check-nil
@@ -229,6 +234,18 @@ local function active_compass_count()
     return n
 end
 
+-- COMPASS_USE=0 是否为 RTK/GPS 航向模式下的有意关闭 (非故障)
+-- gps1_gps2_yaw_primary_switch.lua 在 RTK_WARMUP 及 GPSYS_COMP_DLY 期间会关 COMPASS_USE,
+-- 此时不应触发 "指南针异常" 红橙交替灯语.
+local function compass_intentionally_disabled()
+    local use = param:get("COMPASS_USE")
+    if use ~= nil and use >= 0.5 then
+        return false
+    end
+    local ek3_yaw_src = param:get("EK3_SRC1_YAW")
+    return ek3_yaw_src ~= nil and math.floor(ek3_yaw_src + 0.5) == 2
+end
+
 -- 检查是否有启用的罗盘未做过校准
 local function any_active_compass_uncalibrated()
     if compass_slot_active("COMPASS_USE",  "COMPASS_DEV_ID")  and compass_slot_uncalibrated("COMPASS_OFS")  then return true end
@@ -391,8 +408,11 @@ local function pick_pattern()
 
     -- ── 5. 指南针异常 (v5.1): 未安装/未校准 ───────────────────────────────────
     --    仅检查"安装/校准问题": 无可用罗盘 或 已启用罗盘未做校准
-    if active_compass_count() == 0 or any_active_compass_uncalibrated() then
-        return P_COMPASS_ERR
+    --    排除 RTK 模式下 gps 脚本有意关闭 COMPASS_USE 的情况 (v7.3)
+    if not compass_intentionally_disabled() then
+        if active_compass_count() == 0 or any_active_compass_uncalibrated() then
+            return P_COMPASS_ERR
+        end
     end
 
     -- ── 6/7/8. 根据飞行模式和 GPS 状态选择 ────────────────────────────────────

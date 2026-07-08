@@ -1,71 +1,46 @@
 --[[
-  CAN 雷达自动检测 + RC7 飞行中避障切换 一体脚本 v6.0
+  CAN 雷达自动检测 + RC7 飞行中避障切换 一体脚本 v6.1
   =====================================================================
   合并自：
     - 1auto_detect_radar5.1.lua  （DroneCAN 雷达识别 + 参数自适应 + ARMING_CHECK 管理）
     - 0radar_avoid_rc7_toggle3.0.lua（RC7 飞行中切换 AVOID_ENABLE）
 
-  为什么 v6.0 把 PRX1_TYPE 从 14 改为 4
+  v6.1 修复「第一次上电不行、第二次才正常」
   -----------------------------------------
-  实测发现雷达固件只发布 DroneCAN RangeFinder 报文
-  （uavcan.equipment.range_sensor.Measurement），并未发布 Proximity 报文
-  （ardupilot.equipment.proximity_sensor.Proximity）。
-  因此 PRX1_TYPE=14（DroneCAN proximity）永远 NotConnected。
-  改用 PRX1_TYPE=4（RangeFinder bridge），从 RNGFND1 取距离桥接到 PRX1，
-  得到单方向避障（取决于 RNGFND1_ORIENT）。
+  根因（v6.0）：
+    判定 radar_ok 必须同时满足 NodeStatus + RNGFND Good。
+    实测总线 ~7s 即有 Measurement，但 Lua 订阅 NodeStatus 可能漏收。
+    超时走 apply_radar_not_ok() 把 RNGFND1_TYPE/PRX1_TYPE 写成 0 并持久化；
+    下次上电脚本再把 TYPE 改回 24，驱动才真正就绪 → 表现为第二次上电才正常。
+
+  v6.1 策略：
+    1. 以 rangefinder Good 为主判定（与 CAN 分析仪看到的 Measurement 一致）
+    2. NodeStatus 仅作辅助，用于尽早 ensure TYPE=24
+    3. 永不因误判把 TYPE/PRX 写成 0；真离线只关 AVOID_ENABLE
+    4. BOOT_DELAY 从「检测开始时刻」计时，不再用飞控上电绝对时间
 
   整体逻辑
   ========
-  Phase 1 - 开机检测（解锁前 ≤ BOOT_DELAY_MS）
-    监听 DroneCAN NodeStatus（CAN1+CAN2）+ 轮询 rangefinder:status_orient
-    双重验证雷达可用：
-      A. 收到 RADAR_NODE_ID 的 NodeStatus
-      B. rangefinder:status_orient(RANGEFINDER_ORIENT) == Good
-         持续 CONFIRM_DELAY_MS 毫秒
-    达成 → radar_ok = true，提前结束等待；否则 BOOT_DELAY_MS 超时按 false 处理。
+  Phase 1 - 开机检测（解锁前，最长 BOOT_DELAY_MS）
+    轮询 rangefinder:status_orient == Good，持续 CONFIRM_DELAY_MS → radar_ok
+    辅助监听 NodeStatus（CAN1+CAN2），见到节点则尽早写入 TYPE=24
 
-    radar_ok = true:
-      RNGFND1_TYPE       = 24  (DroneCAN)
-      PRX1_TYPE          = 4   (RangeFinder bridge)
-      AVOID_ENABLE       = 7   (Fence + Proximity + Beacon)
-      ARMING_CHECK bit15 = 0   (恒清零，避免雷达瞬时异常卡解锁)
-      → 任一项有变化时提示 "REBOOT to enable avoidance"
+    radar_ok:
+      RNGFND1_TYPE=24, PRX1_TYPE=4, AVOID_ENABLE=7, ARMING_CHECK bit15=0
 
-    仅 NodeStatus 未见（雷达真离线）:
-      RNGFND1_TYPE       = 0
-      PRX1_TYPE          = 0
-      AVOID_ENABLE       = 1   (仅 Fence，跳过近距避障)
+    超时仍未 Good，但曾见节点或曾 Good:
+      保持 TYPE=24/PRX=4, AVOID_ENABLE=1
 
-    Node 在线但 RNGFND 未 Good（常见：上次被写成 TYPE=0 / 上电慢 / ADDR 不匹配）:
-      保持或写入 RNGFND1_TYPE=24、PRX1_TYPE=4，绝不写 0
-      AVOID_ENABLE       = 1   (暂不开避障，等重启后数据正常)
-      → 提示检查 RNGFND1_ADDR 或 REBOOT
+    全程无任何雷达迹象（无节点、无 Good）:
+      保持 TYPE=24/PRX=4, AVOID_ENABLE=1（不写 0，避免破坏下次上电）
 
-    两种失败路径均 ARMING_CHECK bit15 = 0，不阻塞解锁。
-
-  备注：bit15 在两种状态下都清零，因为用户希望 PRX/RNGFND 的
-  解锁前检查永不阻塞解锁，避障可用与否完全由 AVOID_ENABLE 与
-  实际数据驱动。
-
-  Phase 2 - 飞行中 RC7 切换（仅 radar_ok 时启用）
-    每 100 ms 检测一次 RC 通道：
-      RC7 PWM > 1500 且非 AltHold(mode=2) 且 RC 有效  → AVOID_ENABLE = 7
-      其他情况                                          → AVOID_ENABLE = 1
-    radar_ok = false 时 Phase 2 不启用，AVOID_ENABLE 保持 1。
-
-  配置项
-  --------
-  RADAR_NODE_ID      : DroneCAN 监视器里雷达的 Node ID
-  RANGEFINDER_ORIENT : 雷达朝向（0=前, 25=下, 详见 ROTATION_* 枚举）
-  BOOT_DELAY_MS      : 无雷达时的最长等待（毫秒）
-  CONFIRM_DELAY_MS   : 看到雷达后再观察稳定的时长（毫秒）
-  RC_CH              : 切换避障的 RC 通道（默认 7）
-  PWM_THRESHOLD      : 切换阈值（默认 1500）
+  Phase 2 - 飞行中 RC7 切换（radar_ok 后启用）
+    RC7 > 1500 且非 AltHold → AVOID_ENABLE=7，否则 =1
 
   依赖
   ----
   CAN_Px_DRIVER=1, CAN_Dx_PROTOCOL=1, SCR_ENABLE=1
-  RNGFND1_ADDR 必须与雷达 DroneCAN Rangefinder 的 sensor_id 匹配
+  RNGFND1_ADDR 必须与雷达 sensor_id 匹配（默认 0）
 --]]
 
 ------------------------------------------------------------------
@@ -73,9 +48,9 @@
 ------------------------------------------------------------------
 local RADAR_NODE_ID      = 120     -- 【必改】雷达的 DroneCAN Node ID
 local RANGEFINDER_ORIENT = 0       -- 雷达朝向：0=前, 25=下, 4=后, 2=右, 6=左
-local BOOT_DELAY_MS      = 20000   -- 无雷达时最长等待（DNA 重启后雷达上电较慢）
-local CONFIRM_DELAY_MS   = 3000    -- Good 持续多久才认定稳定
-local INIT_DELAY_MS      = 1000    -- 脚本启动后首次检测延迟（原 3000 会吃掉过多窗口）
+local BOOT_DELAY_MS      = 15000   -- 自检测开始起最长等待（7s 有数据 + 3s 确认足够）
+local CONFIRM_DELAY_MS   = 2000    -- Good 持续多久才认定稳定
+local INIT_DELAY_MS      = 1000    -- 脚本启动后首次检测延迟
 
 local RC_CH              = 7       -- RC 切换通道
 local PWM_THRESHOLD      = 1500    -- > 阈值视为打开避障
@@ -94,7 +69,7 @@ local ARMING_CHECK_EXPANDED = 0xFFFFE  -- bits 1..19，不含 bit0
 
 local RNGFND_STATUS_GOOD = 4       -- enum RangeFinder::Status::Good
 
--- DroneCAN NodeStatus
+-- DroneCAN NodeStatus（辅助，非主判定）
 local NODESTATUS_ID        = 341
 local NODESTATUS_SIGNATURE = uint64_t(0x0F0868D0, 0xC1A7C6F1)
 
@@ -128,11 +103,13 @@ end
 ------------------------------------------------------------------
 -- 状态
 ------------------------------------------------------------------
-local phase           = 1          -- 1=detect, 2=rc7 toggle, 0=disabled
-local radar_seen      = false      -- 收到了 RADAR_NODE_ID 的 NodeStatus
-local first_good_ms   = nil        -- rangefinder Good 起始时间
-local last_avoid_on   = nil        -- Phase 2 上次 AVOID 状态
-local rngfnd_enabled  = false      -- 已对在线节点写入 TYPE=24
+local phase             = 1          -- 1=detect, 2=rc7 toggle, 0=disabled
+local radar_seen        = false      -- 收到了 RADAR_NODE_ID 的 NodeStatus
+local had_rngfnd_good   = false      -- 检测窗口内曾出现 Good
+local first_good_ms     = nil        -- 当前连续 Good 段起始时间
+local detect_start_ms   = nil        -- Phase 1 起始时刻
+local last_avoid_on     = nil        -- Phase 2 上次 AVOID 状态
+local rngfnd_enabled    = false      -- 已确认/写入 TYPE=24
 
 ------------------------------------------------------------------
 -- 工具：写参数（不变就跳过），返回 ok, changed
@@ -151,6 +128,38 @@ local function set_param_persist(param, name, target)
         return false, false
     end
     return true, true
+end
+
+local function ensure_rngfnd_driver_enabled()
+    if rngfnd_enabled then
+        return
+    end
+    local cur = rngfnd_param:get()
+    if cur ~= nil and math.floor(cur) == TARGET_RNGFND_TYPE then
+        rngfnd_enabled = true
+        return
+    end
+    local ok, changed = set_param_persist(rngfnd_param, "RNGFND1_TYPE", TARGET_RNGFND_TYPE)
+    if ok then
+        rngfnd_enabled = true
+        if changed then
+            gcs:send_text(6, "Radar: TYPE restored")
+        end
+    end
+end
+
+-- 修复 v6.0 误写的 TYPE=0，避免必须二次上电
+do
+    local cur = rngfnd_param:get()
+    if cur ~= nil and math.floor(cur) == TARGET_RNGFND_TYPE then
+        rngfnd_enabled = true
+    elseif cur ~= nil and math.floor(cur) == 0 then
+        if set_param_persist(rngfnd_param, "RNGFND1_TYPE", TARGET_RNGFND_TYPE) then
+            set_param_persist(prx_param, "PRX1_TYPE", TARGET_PRX_TYPE)
+            rngfnd_enabled = true
+            gcs:send_text(6, "Radar: fixed TYPE=0")
+        end
+    end
 end
 
 -- ARMING_CHECK bit15 管理：enable=true 设 1，false 清 0
@@ -191,7 +200,6 @@ local function apply_radar_ok()
     local _, c1 = set_param_persist(rngfnd_param, "RNGFND1_TYPE", TARGET_RNGFND_TYPE)
     local _, c2 = set_param_persist(prx_param,    "PRX1_TYPE",    TARGET_PRX_TYPE)
     local _, c3 = set_param_persist(avoid_param,  "AVOID_ENABLE", AVOID_ON)
-    -- bit15 始终清零：哪怕雷达 OK 也不让 PRX/RNGFND 的解锁前检查阻塞解锁
     set_arming_rngfnd_check(false)
 
     if c1 or c2 then
@@ -203,59 +211,65 @@ local function apply_radar_ok()
     end
 end
 
-local function apply_radar_not_ok()
-    local _, c1 = set_param_persist(rngfnd_param, "RNGFND1_TYPE", 0)
-    local _, c2 = set_param_persist(prx_param,    "PRX1_TYPE",    0)
-    set_param_persist(avoid_param, "AVOID_ENABLE", AVOID_OFF)
-    set_arming_rngfnd_check(false)
-
-    if c1 or c2 then
-        gcs:send_text(4, "Radar: offline, PRX cleared")
-    end
-end
-
--- Node 在线但测距未 Good：保持 DroneCAN 驱动，避免 TYPE=0 导致永远无法 Good
-local function apply_radar_node_only()
+-- 曾见雷达迹象但未稳定 Good：保持驱动，只关避障
+local function apply_radar_degraded()
     local _, c1 = set_param_persist(rngfnd_param, "RNGFND1_TYPE", TARGET_RNGFND_TYPE)
     local _, c2 = set_param_persist(prx_param,    "PRX1_TYPE",    TARGET_PRX_TYPE)
     set_param_persist(avoid_param, "AVOID_ENABLE", AVOID_OFF)
     set_arming_rngfnd_check(false)
 
     if c1 or c2 then
-        gcs:send_text(4, "Radar: no data, reboot")
+        gcs:send_text(4, "Radar: unstable, reboot")
     else
-        gcs:send_text(4, "Radar: no data, wait Good")
+        gcs:send_text(4, "Radar: unstable, AVOID=1")
     end
 end
 
-local function ensure_rngfnd_driver_enabled()
-    if rngfnd_enabled then
+-- 全程无节点且无 Good：只关避障，绝不写 TYPE=0
+local function apply_radar_absent()
+    set_param_persist(rngfnd_param, "RNGFND1_TYPE", TARGET_RNGFND_TYPE)
+    set_param_persist(prx_param,    "PRX1_TYPE",    TARGET_PRX_TYPE)
+    set_param_persist(avoid_param,  "AVOID_ENABLE", AVOID_OFF)
+    set_arming_rngfnd_check(false)
+    gcs:send_text(4, "Radar: absent, AVOID=1")
+end
+
+local function finish_detect(radar_ok)
+    if radar_ok then
+        apply_radar_ok()
+        phase = 2
         return
     end
-    local cur = rngfnd_param:get()
-    if cur ~= nil and math.floor(cur) == TARGET_RNGFND_TYPE then
-        rngfnd_enabled = true
-        return
+
+    if radar_seen or had_rngfnd_good then
+        apply_radar_degraded()
+    else
+        apply_radar_absent()
     end
-    if set_param_persist(rngfnd_param, "RNGFND1_TYPE", TARGET_RNGFND_TYPE) then
-        rngfnd_enabled = true
-        gcs:send_text(6, "Radar: node seen, reboot?")
-    end
+    phase = 0
 end
 
 local function detect_step()
+    if detect_start_ms == nil then
+        detect_start_ms = millis():tofloat()
+    end
+
+    local now = millis():tofloat()
+
+    local rngfnd_status = rangefinder and rangefinder:status_orient(RANGEFINDER_ORIENT) or 0
+    local rngfnd_good   = rngfnd_status == RNGFND_STATUS_GOOD
+
     if arming:is_armed() then
-        -- 解锁前没完成检测就直接解锁了：保守按当前参数继续
-        if rngfnd_param:get() == TARGET_RNGFND_TYPE and
-           prx_param:get()    == TARGET_PRX_TYPE then
+        if rngfnd_good or had_rngfnd_good then
+            finish_detect(true)
+        elseif rngfnd_param:get() == TARGET_RNGFND_TYPE and
+               prx_param:get()    == TARGET_PRX_TYPE then
             phase = 2
         else
             phase = 0
         end
         return
     end
-
-    local now = millis()
 
     for _, handle in ipairs(nodestatus_handles) do
         local msg, source_node = handle:check_message()
@@ -268,33 +282,25 @@ local function detect_step()
         end
     end
 
-    local rngfnd_status = rangefinder and rangefinder:status_orient(RANGEFINDER_ORIENT) or 0
-    local rngfnd_good   = rngfnd_status == RNGFND_STATUS_GOOD
     if rngfnd_good then
-        if not first_good_ms then first_good_ms = now end
+        had_rngfnd_good = true
+        ensure_rngfnd_driver_enabled()
+        if not first_good_ms then
+            first_good_ms = now
+        end
     else
         first_good_ms = nil
     end
 
-    local confirm = radar_seen and rngfnd_good and first_good_ms
-                    and (now - first_good_ms > CONFIRM_DELAY_MS)
-    local timeout = now > BOOT_DELAY_MS
+    local elapsed = now - detect_start_ms
+    local confirm = rngfnd_good and first_good_ms
+                    and (now - first_good_ms >= CONFIRM_DELAY_MS)
+    local timeout = elapsed >= BOOT_DELAY_MS
 
-    if confirm or timeout then
-        local radar_ok = radar_seen and rngfnd_good
-        if radar_ok then
-            apply_radar_ok()
-            phase = 2    -- 启用 RC7 切换
-        else
-            if radar_seen and not rngfnd_good then
-                apply_radar_node_only()
-            elseif not radar_seen then
-                apply_radar_not_ok()
-            else
-                apply_radar_not_ok()
-            end
-            phase = 0    -- 禁用 RC7 切换
-        end
+    if confirm then
+        finish_detect(true)
+    elseif timeout then
+        finish_detect(rngfnd_good)
     end
 end
 
@@ -311,19 +317,15 @@ end
 
 local function rc_toggle_step()
     local want_on
-    local reason
 
     if not rc:has_valid_input() then
         want_on = false
-        reason = "no RC"
     else
         local pwm = rc:get_pwm(RC_CH)
         if pwm == nil then
             want_on = true
-            reason = "RC7 n/a"
         else
             want_on = pwm > PWM_THRESHOLD
-            reason = string.format("ch7=%u", pwm)
         end
     end
 
@@ -331,7 +333,6 @@ local function rc_toggle_step()
         local mode = vehicle:get_mode()
         if mode == MODE_ALTHOLD then
             want_on = false
-            reason = "AltHold no avoid"
         end
     end
 
@@ -358,7 +359,6 @@ function update()
     elseif phase == 2 then
         rc_toggle_step()
     end
-    -- phase == 0：雷达不 OK，AVOID_ENABLE 已固定为 1，不再做任何事
     return update, 100
 end
 

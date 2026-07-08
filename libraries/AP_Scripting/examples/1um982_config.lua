@@ -53,6 +53,7 @@ local CONFIG_BODY = {
     "GPGSA COM1 0.2",
     "GPGST COM1 0.2",
     "UNIHEADINGA COM1 0.2",
+    "CONFIG SBAS ENABLE AUTO",
     "config com1 " .. tostring(TARGET_BAUD),
     "saveconfig",
 }
