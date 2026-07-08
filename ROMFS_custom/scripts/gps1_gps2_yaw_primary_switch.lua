@@ -1,5 +1,5 @@
 --[[
-  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.7
+  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.8
   适用场景: EFT_CAAC 机控
               GPS1 = ublox GPS                       (instance 0)
               GPS2 = UM982 双天线 RTK on SERIAL7     (instance 1)
@@ -19,13 +19,14 @@
          GPS_PRIMARY    = 0   (优先 GPS1)
          GPS_AUTO_SWITCH= 0   (NONE, 主 GPS 固定 GPS1)
          COMPASS_USE/2/3= 1   (启用外置罗盘)
-    3. 仅识别 GPS2 RTK (ublox GPS1 掉线, gps:status(0)==0):
-         GPS1_TYPE      = 0   (关闭 GPS1)
-         GPS2_TYPE      = 25  (UM982 / Unicore moving baseline, 启用 RTK)
+    3. 仅识别 GPS2 RTK (ublox GPS1 掉线, gps:status(0)==0), RTK 完好:
+         GPS1_TYPE      = 0   (关闭 GPS1, 并周期性 reprobe 等待热插回)
+         GPS2_TYPE      = 25  (UM982 保持在线)
          EK3_SRC1_YAW   = 2   (使用 GPS 双天线 yaw)
          GPS_PRIMARY    = 1   (使用 GPS2)
          GPS_AUTO_SWITCH= 0   (NONE, 主 GPS 固定 GPS2)
-         COMPASS_USE/2/3= 1   (启用外置罗盘, RTK 已就绪所以不会干扰)
+         COMPASS_USE/2/3= 1   (启用外置罗盘)
+         解锁拦截: GPS1 故障但 RTK 正常时禁止解锁, 须恢复 GPS1 后才能飞
 
   v6.0 变更:
   - read_state() 新增 RTK 双天线航向检测 (gps:gps_yaw_deg):
@@ -69,6 +70,10 @@
   - 修复: 脚本自己当总开关, 三种状态都把 GPS_AUTO_SWITCH 写 0(NONE), 主 GPS 完全听 GPS_PRIMARY:
       · BOTH_OK / GPS2_ONLY -> 主 GPS 固定 UM982(GPS2), 航向进 EKF;
       · GPS1_ONLY (RTK 不可用) -> 主 GPS 固定 ublox(GPS1)。
+
+  v6.8 变更:
+  - 需求三: GPS1 故障但 RTK 完好时禁止解锁 (aux auth prearm 拦截).
+    仍保持 GPS2_ONLY 参数态 + GPS1 reprobe, 更换 GPS1 后自动识别恢复.
 
   v6.7 变更:
   - 修复 RTK 冷启动时 EKF3 提前融合磁罗盘航向导致 "Need Position Estimate" 报警:
@@ -187,6 +192,10 @@ local pending_state   = STATE_UNKNOWN
 local pending_count   = 0
 local last_warn_ms    = 0
 local WARN_REPEAT_MS  = 10000  -- 已解锁有告警间隔再隔 10 秒
+
+-- 解锁授权: GPS1 故障但 RTK 完好时禁止解锁 (需求三)
+local arm_auth_id        = nil
+local last_auth_warn_ms  = 0
 
 -- 解锁后 RTK 故障防抖计数
 local armed_rtk_fail_count     = 0
@@ -379,7 +388,7 @@ local function apply_state(state)
         local g = set_param_if_diff("GPS_AUTO_SWITCH", AUTOSW_USE_PRIMARY)
         local c = set_param_if_diff("GPS1_TYPE",       TYPE_NONE)
         if a or b or c or e or g then
-            gcs:send_text(SEV_WARN, "GPS: RTK only")
+            gcs:send_text(SEV_WARN, "GPS: RTK only, arm blocked")
         end
     end
 end
@@ -423,6 +432,43 @@ local function manage_compass()
     end
 end
 
+-- GPS1 掉线且 RTK 定位+航向均正常 (需求三拦截条件)
+local function gps1_fault_rtk_ok()
+    local g1_status = safe_gps_status(GPS1_INSTANCE)
+    local g2_status = safe_gps_status(GPS2_INSTANCE)
+    local rtk_yaw, _, _ = safe_gps_yaw_deg(GPS2_INSTANCE)
+    return (g1_status < 1)
+        and (g2_status >= MIN_GPS_STATUS)
+        and (rtk_yaw ~= nil)
+end
+
+-- prearm 真正拦截: GPS1 故障但 RTK 完好时不允许解锁
+local function update_arming_auth()
+    if arm_auth_id == nil then
+        arm_auth_id = arming:get_aux_auth_id()
+        if arm_auth_id == nil then
+            local now = millis()
+            if (now - last_auth_warn_ms) >= 10000 then
+                gcs:send_text(SEV_WARN, "GPSYS: no arm auth slot")
+                last_auth_warn_ms = now
+            end
+            return
+        end
+    end
+
+    if arming:is_armed() then
+        arming:set_aux_auth_passed(arm_auth_id)
+        return
+    end
+
+    if gps1_fault_rtk_ok() then
+        arming:set_aux_auth_failed(arm_auth_id, "GPS1 fault, RTK OK, fix GPS1")
+        return
+    end
+
+    arming:set_aux_auth_passed(arm_auth_id)
+end
+
 local function read_state_name(s)
     if s == STATE_BOTH_OK     then return "BOTH_OK"        end
     if s == STATE_GPS1_ONLY   then return "GPS1_ONLY"      end
@@ -435,6 +481,8 @@ function update()
     if not script_enabled() then
         return update, RUN_INTERVAL_MS
     end
+
+    update_arming_auth()
 
     local s = read_state()
 

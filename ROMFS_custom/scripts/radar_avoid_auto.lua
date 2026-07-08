@@ -26,7 +26,7 @@
     辅助监听 NodeStatus（CAN1+CAN2），见到节点则尽早写入 TYPE=24
 
     radar_ok:
-      RNGFND1_TYPE=24, PRX1_TYPE=4, AVOID_ENABLE=7, ARMING_CHECK bit15=0
+      RNGFND1_TYPE=24, PRX1_TYPE=4, AVOID_ENABLE=1, ARMING_CHECK bit15=0
 
     超时仍未 Good，但曾见节点或曾 Good:
       保持 TYPE=24/PRX=4, AVOID_ENABLE=1
@@ -35,7 +35,8 @@
       保持 TYPE=24/PRX=4, AVOID_ENABLE=1（不写 0，避免破坏下次上电）
 
   Phase 2 - 飞行中 RC7 切换（radar_ok 后启用）
-    RC7 > 1500 → AVOID_ENABLE=7；RC7 ≤ 1500 → AVOID_ENABLE=1
+    仅 Loiter 模式且 RC7 > 1500 → AVOID_ENABLE=7
+    定高及其他模式、或 RC7 ≤ 1500 → AVOID_ENABLE=1
 
   依赖
   ----
@@ -72,6 +73,8 @@ local RNGFND_STATUS_GOOD = 4       -- enum RangeFinder::Status::Good
 -- DroneCAN NodeStatus（辅助，非主判定）
 local NODESTATUS_ID        = 341
 local NODESTATUS_SIGNATURE = uint64_t(0x0F0868D0, 0xC1A7C6F1)
+
+local MODE_LOITER  = 5
 
 ------------------------------------------------------------------
 -- 参数对象
@@ -197,13 +200,11 @@ end
 local function apply_radar_ok()
     local _, c1 = set_param_persist(rngfnd_param, "RNGFND1_TYPE", TARGET_RNGFND_TYPE)
     local _, c2 = set_param_persist(prx_param,    "PRX1_TYPE",    TARGET_PRX_TYPE)
-    local _, c3 = set_param_persist(avoid_param,  "AVOID_ENABLE", AVOID_ON)
+    set_param_persist(avoid_param,  "AVOID_ENABLE", AVOID_OFF)
     set_arming_rngfnd_check(false)
 
     if c1 or c2 then
         gcs:send_text(4, "Radar: OK, reboot for avoid")
-    elseif c3 then
-        gcs:send_text(6, "Radar: OK, AVOID=7")
     else
         gcs:send_text(6, "Radar: OK")
     end
@@ -315,8 +316,9 @@ end
 
 local function rc_toggle_step()
     local want_on = false
+    local mode = vehicle:get_mode()
 
-    if rc:has_valid_input() then
+    if mode == MODE_LOITER and rc:has_valid_input() then
         local pwm = rc:get_pwm(RC_CH)
         if pwm ~= nil and pwm > PWM_THRESHOLD then
             want_on = true
