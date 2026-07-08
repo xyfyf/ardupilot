@@ -35,7 +35,7 @@
       保持 TYPE=24/PRX=4, AVOID_ENABLE=1（不写 0，避免破坏下次上电）
 
   Phase 2 - 飞行中 RC7 切换（radar_ok 后启用）
-    RC7 > 1500 且非 AltHold → AVOID_ENABLE=7，否则 =1
+    RC7 > 1500 → AVOID_ENABLE=7；RC7 ≤ 1500 → AVOID_ENABLE=1
 
   依赖
   ----
@@ -53,7 +53,7 @@ local CONFIRM_DELAY_MS   = 2000    -- Good 持续多久才认定稳定
 local INIT_DELAY_MS      = 1000    -- 脚本启动后首次检测延迟
 
 local RC_CH              = 7       -- RC 切换通道
-local PWM_THRESHOLD      = 1500    -- > 阈值视为打开避障
+local PWM_THRESHOLD      = 1500    -- RC7 > 此值 → AVOID=7，否则 AVOID=1
 
 ------------------------------------------------------------------
 -- 常量
@@ -72,8 +72,6 @@ local RNGFND_STATUS_GOOD = 4       -- enum RangeFinder::Status::Good
 -- DroneCAN NodeStatus（辅助，非主判定）
 local NODESTATUS_ID        = 341
 local NODESTATUS_SIGNATURE = uint64_t(0x0F0868D0, 0xC1A7C6F1)
-
-local MODE_ALTHOLD = 2
 
 ------------------------------------------------------------------
 -- 参数对象
@@ -316,23 +314,12 @@ local function apply_avoid(want_on)
 end
 
 local function rc_toggle_step()
-    local want_on
+    local want_on = false
 
-    if not rc:has_valid_input() then
-        want_on = false
-    else
+    if rc:has_valid_input() then
         local pwm = rc:get_pwm(RC_CH)
-        if pwm == nil then
+        if pwm ~= nil and pwm > PWM_THRESHOLD then
             want_on = true
-        else
-            want_on = pwm > PWM_THRESHOLD
-        end
-    end
-
-    if want_on then
-        local mode = vehicle:get_mode()
-        if mode == MODE_ALTHOLD then
-            want_on = false
         end
     end
 
