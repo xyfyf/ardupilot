@@ -1,10 +1,10 @@
 --[[
-  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.9
+  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.11
   适用场景: EFT_CAAC 机控
               GPS1 = ublox GPS                       (instance 0)
               GPS2 = UM982 双天线 RTK on SERIAL7     (instance 1)
 
-  功能 (3 种工作状态):
+  功能 (4 种工作状态):
     1. GPS1 (ublox) + GPS2 (RTK) 双在线, GPS2 状态 >= 3D Fix 且双天线航向有效:
          GPS1_TYPE      = 1   (Auto, 识别 ublox)
          GPS2_TYPE      = 25  (UM982 / Unicore moving baseline, 启用 RTK)
@@ -12,14 +12,21 @@
          GPS_PRIMARY    = 1   (优先 GPS2)
          GPS_AUTO_SWITCH= 0   (NONE, 主 GPS 固定 GPS2, 不按 fix 等级被 ublox 抢走)
          COMPASS_USE/2/3= 0   (禁用罗盘, 强制 EKF 等待并使用 RTK 航向)
-    2. RTK 无航向 / GPS2 离线 / 状态 < 3D Fix (含冷启动尚未解算航向):
+    2. 冷启动等 RTK 航向 (未解锁, UM982 在线但双天线航向尚未解算, 宽限 GPSYS_RTK_WAIT 秒):
          GPS1_TYPE      = 1
-         GPS2_TYPE      = 0   (关闭 GPS2, 不再保持 25 等收敛)
+         GPS2_TYPE      = 25  (保持 UM982 在线收敛)
+         EK3_SRC1_YAW   = 2   (坚持等 GPS 双天线 yaw, 不切磁罗盘)
+         GPS_PRIMARY    = 1   (主 GPS 仍指 GPS2)
+         GPS_AUTO_SWITCH= 0
+         COMPASS_USE/2/3= 0   (禁用罗盘, 避免 EKF 提前用磁罗盘初始化航向)
+    3. RTK 宽限超时仍无航向 / 模块离线 / 飞行中 RTK 故障:
+         GPS1_TYPE      = 1
+         GPS2_TYPE      = 25  (UM982 模块在线时保持驱动; 仅拔掉/无串口数据时写 0)
          EK3_SRC1_YAW   = 1   (使用外置磁罗盘 yaw)
          GPS_PRIMARY    = 0   (只用 GPS1 定位)
          GPS_AUTO_SWITCH= 0   (NONE, 主 GPS 固定 GPS1)
-         COMPASS_USE/2/3= 1   (启用外置罗盘)
-    3. 仅识别 GPS2 RTK (ublox GPS1 掉线, gps:status(0)==0), RTK 完好:
+         COMPASS_USE/2/3= 1   (启用外置罗盘, 定点模式可用 GPS1+磁罗盘解锁)
+    4. 仅识别 GPS2 RTK (ublox GPS1 掉线, gps:status(0)==0), RTK 完好:
          GPS1_TYPE      = 0   (关闭 GPS1, 并周期性 reprobe 等待热插回)
          GPS2_TYPE      = 25  (UM982 保持在线)
          EK3_SRC1_YAW   = 2   (使用 GPS 双天线 yaw)
@@ -71,10 +78,14 @@
       · BOTH_OK / GPS2_ONLY -> 主 GPS 固定 UM982(GPS2), 航向进 EKF;
       · GPS1_ONLY (RTK 不可用) -> 主 GPS 固定 ublox(GPS1)。
 
-  v6.9 变更:
-  - RTK 无航向时立即切 GPS1_ONLY, 不再进入 RTK_WARMUP 宽限等待:
-      GPS2_TYPE=0, GPS_PRIMARY=0, EK3_SRC1_YAW=1, COMPASS_USE=1.
-    即使 UM982 模块仍在通信但未解算出双天线航向, 也一律关 GPS2 用 GPS1+磁罗盘.
+  v6.11 变更 (恢复冷启动等 RTK 航向, 默认宽限 30 秒):
+  - 未解锁且 UM982 在线但无航向: 先进入 RTK_WARMUP, 坚持 EK3_SRC1_YAW=2 + COMPASS_USE=0,
+    等 GPSYS_RTK_WAIT 秒 (默认 30); 航向到位无缝切 BOTH_OK, 超时再切 GPS1+磁罗盘.
+  - GPS1_ONLY 仍保持 v6.10: 模块在线不关 GPS2_TYPE=25, 不发 GCS 告警.
+
+  v6.10 变更 (恢复 v6.4, 撤销 v6.9 关 GPS2 逻辑):
+  - RTK 宽限超时后切 GPS1_ONLY: GPS_PRIMARY=0 + EK3_SRC1_YAW=1 + COMPASS_USE=1,
+    UM982 仍在通信时保持 GPS2_TYPE=25, 不关驱动.
 
   v6.8 变更:
   - 需求三: GPS1 故障但 RTK 完好时禁止解锁 (aux auth prearm 拦截).
@@ -116,7 +127,9 @@
 
 -- 脚本参数 (地面站 Full Parameter List 搜索 GPSYS_)
 --   GPSYS_ENABLE   : 0=禁用脚本(不改任何参数), 1=启用(默认)
---   GPSYS_RTK_WAIT : (v6.9 起已废弃, 保留参数兼容旧地面站, 不再使用)
+--   GPSYS_RTK_WAIT : 冷启动等 RTK 双天线航向的宽限秒数 (默认 30).
+--                    模块在线但航向未就绪时坚持 EK3_SRC1_YAW=2 不切磁罗盘;
+--                    等够仍无航向才退回 GPS1+磁罗盘. 设为 0 表示不等待.
 --   GPSYS_COMP_DLY : RTK 航向就绪后延迟多久再启用 COMPASS_USE (秒, 默认 30).
 --                    等待期间 COMPASS_USE 保持 0, 让 EKF3 充分稳定在 RTK 航向后
 --                    再融合罗盘, 避免刚切入时罗盘瞬时偏差干扰 EKF3.
@@ -125,7 +138,7 @@ local PARAM_TABLE_KEY    = 200
 local PARAM_TABLE_PREFIX = "GPSYS_"
 assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 3), "GPSYS: add_table fail")
 assert(param:add_param(PARAM_TABLE_KEY, 1, "ENABLE",   1),  "GPSYS: add ENABLE fail")
-assert(param:add_param(PARAM_TABLE_KEY, 2, "RTK_WAIT", 90), "GPSYS: add RTK_WAIT fail")
+assert(param:add_param(PARAM_TABLE_KEY, 2, "RTK_WAIT", 30), "GPSYS: add RTK_WAIT fail")
 assert(param:add_param(PARAM_TABLE_KEY, 3, "COMP_DLY", 30), "GPSYS: add COMP_DLY fail")
 local gpsys_enable    = Parameter("GPSYS_ENABLE")
 local gpsys_rtk_wait  = Parameter("GPSYS_RTK_WAIT")
@@ -133,6 +146,13 @@ local gpsys_comp_dly  = Parameter("GPSYS_COMP_DLY")
 
 local function script_enabled()
     return gpsys_enable:get() >= 1
+end
+
+-- 冷启动等 RTK 航向的宽限时间 (ms), 由 GPSYS_RTK_WAIT (秒) 换算
+local function rtk_wait_ms()
+    local s = gpsys_rtk_wait:get() or 30
+    if s < 0 then s = 0 end
+    return s * 1000
 end
 
 local RUN_INTERVAL_MS  = 1000   -- 运行频率 (1 秒)
@@ -173,6 +193,10 @@ local STATE_UNKNOWN   = 0
 local STATE_BOTH_OK   = 1   -- GPS1 在线 + GPS2 状态 >= 3D Fix 且双天线航向有效
 local STATE_GPS1_ONLY = 2   -- GPS1 在线, RTK 无航向/离线 → GPS1 定位 + 磁罗盘 yaw
 local STATE_GPS2_ONLY = 3   -- GPS1 掉线 (status==0), GPS2 RTK 在线且航向有效
+local STATE_RTK_WARMUP = 4  -- 未解锁, RTK 在线但航向未就绪: 宽限内等 GPS yaw
+
+-- RTK 航向宽限计时: 模块在线但航向未就绪的起始时刻 (0=未在等)
+local rtk_warmup_start_ms = 0
 
 local SEV_INFO = 6
 local SEV_WARN = 4
@@ -282,7 +306,8 @@ end
 
 -- 读取当前应处于的状态
 -- RTK 有 3D Fix 且双天线航向有效 → BOTH_OK / GPS2_ONLY
--- RTK 无航向 (含冷启动/副天线丢失) → 立即 GPS1_ONLY (GPS2_TYPE=0 + 磁罗盘)
+-- 未解锁 + RTK 在线但无航向 → RTK_WARMUP (宽限 GPSYS_RTK_WAIT 秒)
+-- 宽限超时 / 模块离线 / 已解锁 RTK 故障 → GPS1_ONLY
 local function read_state()
     local g1_status  = safe_gps_status(GPS1_INSTANCE)
     local g2_status  = safe_gps_status(GPS2_INSTANCE)
@@ -295,13 +320,27 @@ local function read_state()
 
     -- RTK 双天线航向已就绪 (fix 足够 + 航向有效)
     if g2_ok and g2_yaw_ok then
+        rtk_warmup_start_ms = 0
         if g1_present then
             return STATE_BOTH_OK
         end
         return STATE_GPS2_ONLY         -- GPS1 掉线, 仅 RTK
     end
 
-    -- RTK 无航向 / fix 不足 → 只用 GPS1 定位 + 外置磁罗盘
+    -- RTK 航向尚未就绪: 未解锁且模块在线 → 宽限内先等 RTK 航向
+    if (not arming:is_armed()) and rtk_module_online() then
+        if rtk_warmup_start_ms == 0 then
+            rtk_warmup_start_ms = millis():tofloat()
+        end
+        if (millis():tofloat() - rtk_warmup_start_ms) < rtk_wait_ms() then
+            return STATE_RTK_WARMUP
+        end
+        -- 宽限超时仍无航向 → 落到下方磁罗盘分支
+    else
+        rtk_warmup_start_ms = 0
+    end
+
+    -- 宽限超时 / 模块离线 / 飞行中 RTK 故障 → GPS1 定位 + 磁罗盘
     if g1_present then
         return STATE_GPS1_ONLY
     end
@@ -309,7 +348,14 @@ local function read_state()
 end
 
 local function apply_state(state)
-    if state == STATE_BOTH_OK then
+    if state == STATE_RTK_WARMUP then
+        -- 冷启动等 RTK 航向: 参数与 RTK 模式一致, 航向源固定 GPS, 罗盘由 manage_compass 保持关闭
+        set_param_if_diff("GPS1_TYPE",       TYPE_AUTO)
+        set_param_if_diff("GPS2_TYPE",       TYPE_UM982)
+        set_param_if_diff("EK3_SRC1_YAW",    YAW_GPS)
+        set_param_if_diff("GPS_PRIMARY",     PRIMARY_GPS2)
+        set_param_if_diff("GPS_AUTO_SWITCH", AUTOSW_USE_PRIMARY)
+    elseif state == STATE_BOTH_OK then
         -- 双 GPS 均在线: GPS2 提供位置 + 双天线 yaw.
         -- COMPASS_USE 由 manage_compass() 管理 (延迟 GPSYS_COMP_DLY 秒后启用).
         local a = set_param_if_diff("GPS1_TYPE",       TYPE_AUTO)
@@ -322,15 +368,17 @@ local function apply_state(state)
             gcs:send_text(SEV_INFO, "GPS: dual RTK")
         end
     elseif state == STATE_GPS1_ONLY then
-        -- RTK 无航向: 关 GPS2, 只用 GPS1 定位 + 外置磁罗盘定向
-        local a = set_param_if_diff("GPS1_TYPE",       TYPE_AUTO)
-        local e = set_param_if_diff("GPS2_TYPE",       TYPE_NONE)
-        local b = set_param_if_diff("EK3_SRC1_YAW",    YAW_COMPASS)
-        local c = set_param_if_diff("GPS_PRIMARY",     PRIMARY_GPS1)
-        local f = set_param_if_diff("GPS_AUTO_SWITCH", AUTOSW_USE_PRIMARY)
-        if a or b or c or e or f then
-            gcs:send_text(SEV_WARN, "GPS: GPS1 only")
+        -- RTK 无航向: GPS1 定位 + 外置磁罗盘; UM982 在线则保持 GPS2_TYPE=25 不关断
+        set_param_if_diff("GPS1_TYPE",       TYPE_AUTO)
+        if rtk_module_online() then
+            set_param_if_diff("GPS2_TYPE", TYPE_UM982)
+        else
+            set_param_if_diff("GPS2_TYPE", TYPE_NONE)
         end
+        set_param_if_diff("EK3_SRC1_YAW",    YAW_COMPASS)
+        set_param_if_diff("GPS_PRIMARY",     PRIMARY_GPS1)
+        set_param_if_diff("GPS_AUTO_SWITCH", AUTOSW_USE_PRIMARY)
+        -- 不发 GCS 告警: 无航向降级为 GPS1+磁罗盘属正常收敛过程
     elseif state == STATE_GPS2_ONLY then
         -- 注意写入顺序: 先设 GPS_PRIMARY=1 (GPS2), 再关 GPS1_TYPE=0,
         -- 避免 "GPS 1: primary but TYPE 0" 中间态告警
@@ -351,6 +399,7 @@ local compass_open_at_ms = 0
 -- 每帧统一管理 COMPASS_USE / COMPASS_USE2 / COMPASS_USE3.
 -- COMPASS_USE2/3 始终禁用.
 -- COMPASS_USE 逻辑:
+--   RTK_WARMUP : 关罗盘 (禁止 EKF 提前用磁罗盘初始化航向)
 --   BOTH_OK / GPS2_ONLY : RTK 航向就绪, 延迟 GPSYS_COMP_DLY 秒后再开罗盘
 --   GPS1_ONLY / 其他 : RTK 无航向, 立即 COMPASS_USE=1 (磁罗盘为航向源)
 local function manage_compass()
@@ -359,7 +408,10 @@ local function manage_compass()
 
     local rtk_ok = (current_state == STATE_BOTH_OK or current_state == STATE_GPS2_ONLY)
 
-    if rtk_ok then
+    if current_state == STATE_RTK_WARMUP then
+        set_param_if_diff("COMPASS_USE", COMPASS_OFF)
+        compass_open_at_ms = 0
+    elseif rtk_ok then
         -- RTK 航向已就绪: 第一次进入时启动延迟计时
         if compass_open_at_ms == 0 then
             local dly = (gpsys_comp_dly:get() or 30)
@@ -419,6 +471,7 @@ local function read_state_name(s)
     if s == STATE_BOTH_OK     then return "BOTH_OK"        end
     if s == STATE_GPS1_ONLY   then return "GPS1_ONLY"      end
     if s == STATE_GPS2_ONLY   then return "GPS2_ONLY(RTK)" end
+    if s == STATE_RTK_WARMUP  then return "RTK_WARMUP"     end
     return "UNKNOWN"
 end
 
@@ -544,6 +597,27 @@ function update()
     if s == STATE_UNKNOWN then
         pending_state = STATE_UNKNOWN
         pending_count = 0
+        manage_compass()
+        return update, RUN_INTERVAL_MS
+    end
+
+    -- 进入 RTK_WARMUP 立即生效 (不等 5 秒防抖), 尽早禁磁罗盘等 RTK 航向
+    if s == STATE_RTK_WARMUP and current_state ~= STATE_RTK_WARMUP then
+        apply_state(STATE_RTK_WARMUP)
+        current_state = STATE_RTK_WARMUP
+        pending_state = STATE_UNKNOWN
+        pending_count = 0
+        manage_compass()
+        return update, RUN_INTERVAL_MS
+    end
+
+    -- 宽限超时后退回 GPS1+磁罗盘, 立即切换 (已等够 GPSYS_RTK_WAIT)
+    if s == STATE_GPS1_ONLY and current_state == STATE_RTK_WARMUP then
+        apply_state(STATE_GPS1_ONLY)
+        current_state = STATE_GPS1_ONLY
+        pending_state = STATE_UNKNOWN
+        pending_count = 0
+        manage_compass()
         return update, RUN_INTERVAL_MS
     end
 
@@ -551,6 +625,7 @@ function update()
     if s == current_state then
         pending_state = STATE_UNKNOWN
         pending_count = 0
+        manage_compass()
         return update, RUN_INTERVAL_MS
     end
 
