@@ -1,5 +1,5 @@
 --[[
-  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.11
+  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.12
   适用场景: EFT_CAAC 机控
               GPS1 = ublox GPS                       (instance 0)
               GPS2 = UM982 双天线 RTK on SERIAL7     (instance 1)
@@ -19,9 +19,9 @@
          GPS_PRIMARY    = 1   (主 GPS 仍指 GPS2)
          GPS_AUTO_SWITCH= 0
          COMPASS_USE/2/3= 0   (禁用罗盘, 避免 EKF 提前用磁罗盘初始化航向)
-    3. RTK 宽限超时仍无航向 / 模块离线 / 飞行中 RTK 故障:
+    3. RTK 宽限超时 / 天线丢失 / 模块离线 / 飞行中 RTK 故障:
          GPS1_TYPE      = 1
-         GPS2_TYPE      = 25  (UM982 模块在线时保持驱动; 仅拔掉/无串口数据时写 0)
+         GPS2_TYPE      = 25  (始终保持 UM982 驱动, 不写 0)
          EK3_SRC1_YAW   = 1   (使用外置磁罗盘 yaw)
          GPS_PRIMARY    = 0   (只用 GPS1 定位)
          GPS_AUTO_SWITCH= 0   (NONE, 主 GPS 固定 GPS1)
@@ -34,6 +34,12 @@
          GPS_AUTO_SWITCH= 0   (NONE, 主 GPS 固定 GPS2)
          COMPASS_USE/2/3= 1   (启用外置罗盘)
          解锁拦截: GPS1 故障但 RTK 正常时禁止解锁, 须恢复 GPS1 后才能飞
+
+  v6.12 变更 (RTK 故障不切 GPS2_TYPE, 天线丢失立即降级):
+  - GPS1_ONLY 时 GPS2_TYPE 始终写 25, 不再因模块离线/拔掉/reprobe 写 0.
+  - 曾成功解出过 RTK 航向后航向丢失 (主/副天线掉): 立即切 GPS1+磁罗盘, 不再等 RTK_WARMUP.
+  - 仅冷启动从未出过航向时, 未解锁宽限内仍走 RTK_WARMUP 等收敛.
+  - 删除 GPS2 reprobe 写 0 逻辑 (保持驱动不断电, 热插回由状态机自然恢复).
 
   v6.0 变更:
   - read_state() 新增 RTK 双天线航向检测 (gps:gps_yaw_deg):
@@ -197,6 +203,8 @@ local STATE_RTK_WARMUP = 4  -- 未解锁, RTK 在线但航向未就绪: 宽限�
 
 -- RTK 航向宽限计时: 模块在线但航向未就绪的起始时刻 (0=未在等)
 local rtk_warmup_start_ms = 0
+-- 本会话是否曾解出过 RTK 双天线航向 (用于区分冷启动等待 vs 天线故障立即降级)
+local ever_had_rtk_yaw = false
 
 local SEV_INFO = 6
 local SEV_WARN = 4
@@ -216,17 +224,10 @@ local armed_rtk_fail_count     = 0
 local ARMED_RTK_FAIL_THRESHOLD = 3   -- 连续 3 秒检测到故障才切换
 
 -- ── GPS2 (UM982) 运行期再探测 ─────────────────────────────────────────────
--- 问题: GPS1_ONLY 状态下 GPS2_TYPE 被写成 0, AP_GPS 不再创建 GPS2 驱动,
---       此时热插回 RTK 也无法被识别 (status(1) 恒为 0, 永远回不到 BOTH_OK).
--- 方案: 未解锁且处于 GPS1_ONLY 时, 周期性把 GPS2_TYPE 临时设回 25 开一个
---       探测窗口. 窗口内检测到 UM982 → 正常切回 BOTH_OK; 窗口超时仍无数据
---       → 设回 0, 继续抑制 "GPS 2: not healthy" 告警.
-local reprobe_active     = false
-local reprobe_start_ms   = 0
-local last_reprobe_ms    = 0
-local REPROBE_INTERVAL_MS = 15000   -- 每次关闭后，等 15 秒发起一次再探测
-local REPROBE_WINDOW_MS   = 15000   -- 探测窗口 15 秒, 只需检测到 "模块开始出串口数据" 即可
-                                    -- (检测到后保持 25 让其在线慢慢收敛, 不再要求窗口内拿到定位/航向)
+-- v6.12: GPS1_ONLY 不再写 GPS2_TYPE=0, 故无需周期性关断/再探测.
+-- 保留启动时 probe_gps2_on_startup() 把 flash 里残留的 0 恢复为 25.
+
+local REPROBE_INTERVAL_MS = 15000   -- GPS1 热插再探测间隔
 
 -- ── GPS1 (ublox) 运行期再探测 ─────────────────────────────────────────────
 -- 对称问题: GPS2_ONLY 状态下 GPS1_TYPE 被写成 0, AP_GPS 不再创建 GPS1 驱动,
@@ -306,8 +307,8 @@ end
 
 -- 读取当前应处于的状态
 -- RTK 有 3D Fix 且双天线航向有效 → BOTH_OK / GPS2_ONLY
--- 未解锁 + RTK 在线但无航向 → RTK_WARMUP (宽限 GPSYS_RTK_WAIT 秒)
--- 宽限超时 / 模块离线 / 已解锁 RTK 故障 → GPS1_ONLY
+-- 未解锁 + 冷启动从未出过航向 + RTK 在线 → RTK_WARMUP (宽限 GPSYS_RTK_WAIT 秒)
+-- 曾出过航向后丢失 / 宽限超时 / 模块离线 / 已解锁 RTK 故障 → GPS1_ONLY
 local function read_state()
     local g1_status  = safe_gps_status(GPS1_INSTANCE)
     local g2_status  = safe_gps_status(GPS2_INSTANCE)
@@ -320,6 +321,7 @@ local function read_state()
 
     -- RTK 双天线航向已就绪 (fix 足够 + 航向有效)
     if g2_ok and g2_yaw_ok then
+        ever_had_rtk_yaw = true
         rtk_warmup_start_ms = 0
         if g1_present then
             return STATE_BOTH_OK
@@ -327,20 +329,22 @@ local function read_state()
         return STATE_GPS2_ONLY         -- GPS1 掉线, 仅 RTK
     end
 
-    -- RTK 航向尚未就绪: 未解锁且模块在线 → 宽限内先等 RTK 航向
-    if (not arming:is_armed()) and rtk_module_online() then
-        if rtk_warmup_start_ms == 0 then
-            rtk_warmup_start_ms = millis():tofloat()
-        end
-        if (millis():tofloat() - rtk_warmup_start_ms) < rtk_wait_ms() then
-            return STATE_RTK_WARMUP
+    -- 航向未就绪: 仅冷启动 (本会话从未出过 RTK 航向) 且未解锁 → 宽限内等 RTK
+    if (not arming:is_armed()) and rtk_module_online() and (not ever_had_rtk_yaw) then
+        if rtk_wait_ms() > 0 then
+            if rtk_warmup_start_ms == 0 then
+                rtk_warmup_start_ms = millis():tofloat()
+            end
+            if (millis():tofloat() - rtk_warmup_start_ms) < rtk_wait_ms() then
+                return STATE_RTK_WARMUP
+            end
         end
         -- 宽限超时仍无航向 → 落到下方磁罗盘分支
     else
         rtk_warmup_start_ms = 0
     end
 
-    -- 宽限超时 / 模块离线 / 飞行中 RTK 故障 → GPS1 定位 + 磁罗盘
+    -- 天线丢失 / 宽限超时 / 模块离线 / 飞行中 RTK 故障 → GPS1 定位 + 磁罗盘
     if g1_present then
         return STATE_GPS1_ONLY
     end
@@ -368,13 +372,9 @@ local function apply_state(state)
             gcs:send_text(SEV_INFO, "GPS: dual RTK")
         end
     elseif state == STATE_GPS1_ONLY then
-        -- RTK 无航向: GPS1 定位 + 外置磁罗盘; UM982 在线则保持 GPS2_TYPE=25 不关断
+        -- RTK 故障: GPS1 定位 + 外置磁罗盘; GPS2_TYPE 始终保持 25 不关断
         set_param_if_diff("GPS1_TYPE",       TYPE_AUTO)
-        if rtk_module_online() then
-            set_param_if_diff("GPS2_TYPE", TYPE_UM982)
-        else
-            set_param_if_diff("GPS2_TYPE", TYPE_NONE)
-        end
+        set_param_if_diff("GPS2_TYPE",       TYPE_UM982)
         set_param_if_diff("EK3_SRC1_YAW",    YAW_COMPASS)
         set_param_if_diff("GPS_PRIMARY",     PRIMARY_GPS1)
         set_param_if_diff("GPS_AUTO_SWITCH", AUTOSW_USE_PRIMARY)
@@ -528,41 +528,6 @@ function update()
     -- 重置解锁后故障计数 (每次落地归零)
     armed_rtk_fail_count = 0
 
-    -- GPS2 (UM982) 运行期再探测: 仅在 GPS1_ONLY (GPS2_TYPE 已被写成 0) 时进行
-    if current_state == STATE_GPS1_ONLY then
-        local g2_type = param:get("GPS2_TYPE")
-        local now = millis()
-        if not reprobe_active then
-            -- 仅当 GPS2_TYPE 当前确为 0 时才需要再探测
-            if g2_type ~= nil and g2_type == TYPE_NONE
-               and (now - last_reprobe_ms) >= REPROBE_INTERVAL_MS then
-                param:set_and_save("GPS2_TYPE", TYPE_UM982)
-                reprobe_active   = true
-                reprobe_start_ms = now
-                gcs:send_text(SEV_INFO, "GPS2 reprobe...")
-            end
-        else
-            -- 探测窗口进行中:
-            -- v6.4: 成功判据改为 "模块是否在通信" (rtk_module_online), 而不是
-            --   "拿到 3D Fix + 航向". 因为热插回 UM982 冷启动收敛需要 30~90 秒,
-            --   远超探测窗口; 只要检测到模块开始出数据, 就保持 GPS2_TYPE=25 不再
-            --   关断, 让它在线慢慢收敛, 收敛后由状态机自动切回 BOTH_OK.
-            if rtk_module_online() then
-                -- 模块已在通信: 结束探测并保持 25, 后续靠状态机自然升级
-                reprobe_active = false
-                last_reprobe_ms = now
-            elseif (now - reprobe_start_ms) >= REPROBE_WINDOW_MS then
-                -- 探测窗口超时仍完全无串口数据: 模块确实不在, 关回 0 抑制告警
-                param:set_and_save("GPS2_TYPE", TYPE_NONE)
-                reprobe_active  = false
-                last_reprobe_ms = now
-            end
-        end
-    else
-        -- 非 GPS1_ONLY 状态 (GPS2_TYPE 已是 25), 无需再探测
-        reprobe_active = false
-    end
-
     -- GPS1 (ublox) 运行期再探测: 仅在 GPS2_ONLY (GPS1_TYPE 已被写成 0) 时进行
     if current_state == STATE_GPS2_ONLY then
         local g1_type = param:get("GPS1_TYPE")
@@ -613,6 +578,16 @@ function update()
 
     -- 宽限超时后退回 GPS1+磁罗盘, 立即切换 (已等够 GPSYS_RTK_WAIT)
     if s == STATE_GPS1_ONLY and current_state == STATE_RTK_WARMUP then
+        apply_state(STATE_GPS1_ONLY)
+        current_state = STATE_GPS1_ONLY
+        pending_state = STATE_UNKNOWN
+        pending_count = 0
+        manage_compass()
+        return update, RUN_INTERVAL_MS
+    end
+
+    -- 曾出过 RTK 航向后丢失 (天线掉/RTK 拔): 立即切 GPS1+磁罗盘, 不等防抖
+    if s == STATE_GPS1_ONLY and ever_had_rtk_yaw and current_state ~= STATE_GPS1_ONLY then
         apply_state(STATE_GPS1_ONLY)
         current_state = STATE_GPS1_ONLY
         pending_state = STATE_UNKNOWN
