@@ -384,7 +384,7 @@ LAND_REPOSITION 1
 
 # Board / arming (match CAAC test airframe checks)
 BRD_OPTIONS 1
-ARMING_CHECK 20990
+ARMING_CHECK 26098
 ARMING_MAGTHRESH 100
 
 # Pilot control
