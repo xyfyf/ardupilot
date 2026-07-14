@@ -4647,6 +4647,9 @@ void GCS_MAVLINK::handle_message(const mavlink_message_t &msg)
 #endif
 
 #if AP_OPENDRONEID_ENABLED
+    case MAVLINK_MSG_ID_EFT_RID_CONFIG_REQUEST:
+        AP::opendroneid().handle_rid_config_request(chan, msg);
+        break;
     case MAVLINK_MSG_ID_OPEN_DRONE_ID_ARM_STATUS:
     case MAVLINK_MSG_ID_OPEN_DRONE_ID_OPERATOR_ID:
     case MAVLINK_MSG_ID_OPEN_DRONE_ID_SELF_ID:

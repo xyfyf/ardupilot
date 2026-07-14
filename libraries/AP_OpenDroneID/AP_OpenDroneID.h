@@ -81,6 +81,9 @@ public:
     // handle a message from the GCS
     void handle_msg(mavlink_channel_t chan, const mavlink_message_t &msg);
 
+    // reply to EFT_RID_CONFIG_REQUEST with EFT_RID_CONFIG_STATUS on the same channel
+    void handle_rid_config_request(mavlink_channel_t chan, const mavlink_message_t &msg);
+
     bool enabled(void) const {
         return _enable != 0;
     }
@@ -178,6 +181,11 @@ private:
         NEXT_MSG_ENUM_END
     } next_msg_to_send;
     uint32_t last_msg_send_ms;
+    uint32_t last_rid_config_reply_ms;
+
+    bool pre_arm_check_nolock(char* failmsg, uint8_t failmsg_len) const;
+    uint32_t compute_rid_status_flags(uint32_t now_ms) const;
+    void clear_rid_config_data();
 
     // helper functions
     MAV_ODID_HOR_ACC create_enum_horizontal_accuracy(float Accuracy) const;

@@ -41,6 +41,7 @@
 #include <AP_Vehicle/AP_Vehicle.h>
 #include <AP_DroneCAN/AP_DroneCAN.h>
 #include <stdio.h>
+#include <string.h>
 #include <GCS_MAVLink/GCS.h>
 
 extern const AP_HAL::HAL &hal;
@@ -158,10 +159,8 @@ void AP_OpenDroneID::get_persistent_params(ExpandingString &str) const
 
 // Perform the pre-arm checks and prevent arming if they are not satisifed
 // Except in the case of an in-flight reboot
-bool AP_OpenDroneID::pre_arm_check(char* failmsg, uint8_t failmsg_len)
+bool AP_OpenDroneID::pre_arm_check_nolock(char* failmsg, uint8_t failmsg_len) const
 {
-    WITH_SEMAPHORE(_sem);
-
     if (!option_enabled(Options::EnforceArming)) {
         return true;
     }
@@ -195,13 +194,19 @@ bool AP_OpenDroneID::pre_arm_check(char* failmsg, uint8_t failmsg_len)
         strncpy(failmsg, "SYSTEM not available", failmsg_len);
         return false;
     }
-    
+
     if (arm_status.status != MAV_ODID_ARM_STATUS_GOOD_TO_ARM) {
         strncpy(failmsg, arm_status.error, failmsg_len);
         return false;
     }
-    
+
     return true;
+}
+
+bool AP_OpenDroneID::pre_arm_check(char* failmsg, uint8_t failmsg_len)
+{
+    WITH_SEMAPHORE(_sem);
+    return pre_arm_check_nolock(failmsg, failmsg_len);
 }
 
 void AP_OpenDroneID::update()
@@ -740,6 +745,166 @@ float AP_OpenDroneID::create_location_timestamp(float timestamp) const
     }
 
     return timestamp;
+}
+
+static bool odid_field_non_empty(const char *str, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (str[i] == '\0') {
+            return i > 0;
+        }
+    }
+    return true;
+}
+
+uint32_t AP_OpenDroneID::compute_rid_status_flags(uint32_t now_ms) const
+{
+    uint32_t flags = 0;
+    const uint32_t max_age_ms = 3000;
+
+    if (_enable.get() != 0) {
+        flags |= (1U << 0);
+    }
+    if (pkt_basic_id.id_type != MAV_ODID_ID_TYPE_NONE) {
+        flags |= (1U << 1);
+    }
+    if (odid_field_non_empty(pkt_operator_id.operator_id, sizeof(pkt_operator_id.operator_id))) {
+        flags |= (1U << 2);
+    }
+    if (pkt_system.operator_latitude != 0 || pkt_system.operator_longitude != 0) {
+        flags |= (1U << 3);
+    }
+    if (odid_field_non_empty(pkt_self_id.description, sizeof(pkt_self_id.description))) {
+        flags |= (1U << 4);
+    }
+    if (last_arm_status_ms != 0 && now_ms - last_arm_status_ms < max_age_ms) {
+        flags |= (1U << 5);
+    }
+    const uint32_t system_latest_ms = MAX(last_system_ms, last_system_update_ms);
+    if (system_latest_ms != 0 && now_ms - system_latest_ms < max_age_ms) {
+        flags |= (1U << 6);
+    }
+    if (last_arm_status_ms != 0 && now_ms - last_arm_status_ms < 5000) {
+        flags |= (1U << 7);
+    }
+    if (arm_status.status == MAV_ODID_ARM_STATUS_GOOD_TO_ARM) {
+        flags |= (1U << 8);
+    }
+    char failmsg[50] {};
+    if (pre_arm_check_nolock(failmsg, sizeof(failmsg))) {
+        flags |= (1U << 9);
+    }
+    if (option_enabled(Options::LockUASIDOnFirstBasicIDRx) && id_len > 0) {
+        flags |= (1U << 10);
+    }
+
+    return flags;
+}
+
+void AP_OpenDroneID::clear_rid_config_data()
+{
+    // Restore DID parameters to EFT defaults (persist).
+    _enable.set_and_save(1);
+    _mav_port.set_and_save(2);
+    _options.set_and_save(0);
+    _can_driver.set_and_save(0);
+    _enable.notify();
+    _mav_port.notify();
+    _options.notify();
+    _can_driver.notify();
+
+    WITH_SEMAPHORE(_sem);
+
+    // Clear runtime OpenDroneID payloads seen by EFT_RID_CONFIG_STATUS.
+    memset(&pkt_basic_id, 0, sizeof(pkt_basic_id));
+    memset(&pkt_operator_id, 0, sizeof(pkt_operator_id));
+    memset(&pkt_self_id, 0, sizeof(pkt_self_id));
+    memset(&pkt_system, 0, sizeof(pkt_system));
+    memset(&pkt_location, 0, sizeof(pkt_location));
+    memset(&arm_status, 0, sizeof(arm_status));
+
+    last_arm_status_ms = 0;
+    last_system_ms = 0;
+    last_system_update_ms = 0;
+    last_lost_tx_ms = 0;
+    last_lost_operator_msg_ms = 0;
+
+    // Allow a new BASIC_ID to be accepted (runtime lock / cached persistent ID).
+    id_len = 0;
+    id_str[0] = '\0';
+    id_type[0] = '\0';
+    ua_type[0] = '\0';
+    bootloader_flashed = false;
+    _have_height_above_takeoff = false;
+
+    _chan = mavlink_channel_t(gcs().get_channel_from_port_number(_mav_port));
+    _initialised = true;
+}
+
+void AP_OpenDroneID::handle_rid_config_request(mavlink_channel_t chan, const mavlink_message_t &msg)
+{
+    mavlink_eft_rid_config_request_t request {};
+    mavlink_msg_eft_rid_config_request_decode(&msg, &request);
+
+    if (request.target_system != 0 && request.target_system != gcs().sysid_this_mav()) {
+        return;
+    }
+
+    const uint32_t now_ms = AP_HAL::millis();
+    if (now_ms - last_rid_config_reply_ms < 200) {
+        return;
+    }
+    last_rid_config_reply_ms = now_ms;
+
+    // type: 0=query, 1=clear then reply
+    if (request.type == 1) {
+        clear_rid_config_data();
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "ODID: RID config cleared");
+    }
+
+    if (!HAVE_PAYLOAD_SPACE(chan, EFT_RID_CONFIG_STATUS)) {
+        return;
+    }
+
+    mavlink_eft_rid_config_status_t reply {};
+    reply.target_system = msg.sysid;
+    reply.target_component = msg.compid;
+    reply.seq = request.seq;
+    reply.did_enable = uint8_t(_enable.get());
+    reply.did_mavport = int8_t(_mav_port.get());
+    reply.did_options = uint8_t(_options.get());
+    reply.did_can_driver = uint8_t(_can_driver.get());
+    reply.arm_status_age_ms = 0xFFFF;
+    reply.system_age_ms = 0xFFFF;
+
+    WITH_SEMAPHORE(_sem);
+
+    reply.ua_type = pkt_basic_id.ua_type;
+    reply.id_type = pkt_basic_id.id_type;
+    memcpy(reply.uas_id, pkt_basic_id.uas_id, sizeof(reply.uas_id));
+    reply.op_id_type = pkt_operator_id.operator_id_type;
+    memcpy(reply.operator_id, pkt_operator_id.operator_id, sizeof(reply.operator_id));
+    reply.desc_type = pkt_self_id.description_type;
+    memcpy(reply.self_desc, pkt_self_id.description, sizeof(reply.self_desc));
+    reply.operator_latitude = pkt_system.operator_latitude;
+    reply.operator_longitude = pkt_system.operator_longitude;
+    reply.operator_altitude_geo = pkt_system.operator_altitude_geo;
+    reply.arm_status = arm_status.status;
+    strncpy(reply.arm_error, arm_status.error, sizeof(reply.arm_error) - 1);
+    reply.arm_error[sizeof(reply.arm_error) - 1] = '\0';
+
+    if (last_arm_status_ms != 0) {
+        reply.arm_status_age_ms = uint16_t(MIN(now_ms - last_arm_status_ms, 0xFFFFU));
+    }
+
+    const uint32_t system_latest_ms = MAX(last_system_ms, last_system_update_ms);
+    if (system_latest_ms != 0) {
+        reply.system_age_ms = uint16_t(MIN(now_ms - system_latest_ms, 0xFFFFU));
+    }
+
+    reply.status_flags = compute_rid_status_flags(now_ms);
+
+    mavlink_msg_eft_rid_config_status_send_struct(chan, &reply);
 }
 
 // handle a message from the GCS
