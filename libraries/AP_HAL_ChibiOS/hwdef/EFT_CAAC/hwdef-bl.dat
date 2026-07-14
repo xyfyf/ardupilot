@@ -1,5 +1,8 @@
 # hw definition file for processing by chibios_hwdef.py
 
+# Default to all pins low to avoid ESD issues (must be before MCU)
+DEFAULTGPIO OUTPUT LOW PULLDOWN
+
 # MCU class and specific type
 MCU STM32H7xx STM32H743xx
 
@@ -15,13 +18,9 @@ FLASH_SIZE_KB 2048
 FLASH_RESERVE_START_KB 0
 FLASH_BOOTLOADER_LOAD_KB 128
 define HAL_BOOTLOADER_TIMEOUT 1000
-define HAL_BOOTLOADER_EARLY_PWM_1000_400HZ 1
 
 # Disable APP check in bootloader to prevent boot loops
 # define AP_BOOTLOADER_FLASH_NO_APP_CHECK 1
-
-# Default to all pins low to avoid ESD issues
-DEFAULTGPIO OUTPUT LOW PULLDOWN
 
 # Order of UARTs (and USB)
 # OTG1 (USB), USART1 (GPS1), UART4 (Telem2), USART2 (Telem1), UART8 (LINK)
