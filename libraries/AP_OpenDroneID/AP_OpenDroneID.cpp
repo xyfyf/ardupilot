@@ -803,14 +803,12 @@ uint32_t AP_OpenDroneID::compute_rid_status_flags(uint32_t now_ms) const
 
 void AP_OpenDroneID::clear_rid_config_data()
 {
-    // Restore DID parameters to EFT defaults (persist).
+    // Restore DID parameters to EFT defaults (persist). DID_OPTIONS left unchanged.
     _enable.set_and_save(1);
     _mav_port.set_and_save(2);
-    _options.set_and_save(0);
     _can_driver.set_and_save(0);
     _enable.notify();
     _mav_port.notify();
-    _options.notify();
     _can_driver.notify();
 
     WITH_SEMAPHORE(_sem);

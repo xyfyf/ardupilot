@@ -38,7 +38,7 @@
 `type=1` 清除效果：
 
 - 清空 UAS ID / Operator ID / Self ID / 操作员位置 / ARM_STATUS 缓存与新鲜度
-- DID 参数恢复为默认并掉电保存：`DID_ENABLE=1`，`DID_MAVPORT=2`，`DID_OPTIONS=0`，`DID_CANDRIVER=0`
+- DID 参数恢复为默认并掉电保存：`DID_ENABLE=1`，`DID_MAVPORT=2`，`DID_CANDRIVER=0`；**`DID_OPTIONS` 保持原值不改动**
 - 清除后本机可重新接收并写入新的 `OPEN_DRONE_ID_*` 配置
 
 写入身份信息仍用标准 OpenDroneID：`BASIC_ID(12900)` / `OPERATOR_ID(12905)` / `SELF_ID(12903)` / `SYSTEM(12904)`。  
@@ -341,4 +341,4 @@ else:
 |------|------|
 | 2026-07-13 | 初版 |
 | 2026-07-14 | 补充 CRC、common.xml include、抓包自检；明确不可用 REQUEST_MESSAGE |
-| 2026-07-14 | 517 增加 `type`（0 查询 / 1 清除）；LEN=4，CRC_EXTRA=**209**；清除后 DID 默认 ENABLE=1/MAVPORT=2/OPTIONS=0/CANDRIVER=0 |
+| 2026-07-14 | 517 增加 `type`（0 查询 / 1 清除）；LEN=4，CRC_EXTRA=**209**；清除后 DID 默认 ENABLE=1/MAVPORT=2/CANDRIVER=0，OPTIONS 不改 |
