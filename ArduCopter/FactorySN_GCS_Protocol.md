@@ -2,7 +2,7 @@
 
 > 适用版本：ArduCopter（本仓库定制版）
 > 飞控侧实现：`ArduCopter/FactorySN.{h,cpp}`、`ArduCopter/GCS_MAVLink_Copter.cpp`
-> 文档版本：v1.1（2026-06，**锁定语义改为严格 per-chunk write-once**）
+> 文档版本：v1.2（2026-07，**增加 EFT_RID_CONFIG_REQUEST type=2 作为唯一在线擦除通道**）
 
 ---
 
@@ -19,9 +19,10 @@
 
 每组用 7 个 `int32` 参数存储，每个参数装 3 个 ASCII 字节，单组最大容量 21 个字符（满足 ≤20 字符需求）。
 
-**严格 per-chunk write-once 语义**：**每个 `SN_xxxN` 一旦当前值非 0，立刻锁定**，无需重启。任何想把它改成不同值的 `PARAM_SET` 都会被拒绝并回弹原值。**写错就只能刷固件清 EEPROM**——所以 GCS 工厂工具必须先做严格校验后再下发。
+**严格 per-chunk write-once 语义**：**每个 `SN_xxxN` 一旦当前值非 0，立刻锁定**，无需重启。任何想把它改成不同值的 `PARAM_SET` 都会被拒绝并回弹原值。**写错不能靠 PARAM_SET 改回**——唯一在线擦除通道是 `EFT_RID_CONFIG_REQUEST`（msgid 517）的 **type=2**（清零四组共 28 段后仍回 `EFT_RID_CONFIG_STATUS`）。所以 GCS 工厂工具必须先做严格校验后再下发。
 - 允许"同值重写"通过（GCS 周期性 sync 不会触发警告）
-- 不允许改成不同值，**包括从非 0 改成 0**（清零也算修改）
+- 不允许改成不同值，**包括从非 0 改成 0**（PARAM_SET 清零被拒）
+- **只有** 517 / type=2 可擦除；type=0/1、PARAM_SET、脚本改参均不能擦
 
 ---
 
@@ -317,11 +318,17 @@ GCS 主动重新读 7 段、解码、与原 ASCII 完全比对
 允许。**锁是 per-chunk 的，不是 per-group。** 比如你只写了 `SN_PROD1..5`，那么 `SN_PROD6`、`SN_PROD7` 当前值还是 0 → 仍然可以写。
 但是注意一致性：如果你 ASCII 编码是按 21 字符对齐的，第二次写入"剩余段"时，前面已经写的段必须保持原值不变（同值重写会被允许）。
 
-### 6.5 解锁
+### 6.5 解锁 / 擦除
 
-**当前实现中没有解锁通道**，严格 write-once。若工厂返修流程需要"重置后重写"，需要重新刷固件擦除 EEPROM 参数区。
+**PARAM_SET 无法解锁或清零。** 唯一在线擦除通道：
 
-如需在线解锁机制（例如通过自定义 `MAV_CMD_USER_x` + 厂家密钥才允许清零），请联系飞控固件维护者增加。
+| 消息 | msgid | type | 效果 |
+| --- | ---: | ---: | --- |
+| `EFT_RID_CONFIG_REQUEST` | 517 | **2** | 清零四组 SN（`SN_PROD` / `SN_FACT` / `SN_FRM` / `SN_FC`，共 28 段）并掉电保存；**不**改 RID 配置；再回 `EFT_RID_CONFIG_STATUS`（518） |
+
+飞控成功擦除后会发 `STATUSTEXT`：`Factory SN cleared`（severity INFO）。擦除后各段值为 0，可重新按烧录流程写入。
+
+`type=0` 仅查询；`type=1` 只清 RID，**不会**清 FactorySN。
 
 ---
 
@@ -380,7 +387,7 @@ A. 允许 ASCII 范围 `0x20`（空格）~ `0x7E`（`~`）。但 `0x00` 在数�
 A. 推荐 GCS 在显示 SN 区域同时展示一个"锁定"图标——逻辑很简单：读到的某段 ≠ 0 就显示锁定（与飞控的判定一致）。
 
 **Q9. 已经写错了，能不能擦掉重写？**
-A. 不能通过 MAVLink 擦。必须把固件刷新（或用 STM32 编程器把整片 EEPROM 区域擦干净）。这是 write-once 的代价。
+A. 不能靠 `PARAM_SET` 清零。应发 `EFT_RID_CONFIG_REQUEST`（msgid **517**）且 **type=2**，擦除四组 SN 后再按烧录流程重写。其它 type / 其它消息都不能擦。
 
 ---
 
@@ -401,12 +408,13 @@ A. 不能通过 MAVLink 擦。必须把固件刷新（或用 STM32 编程器把�
 
 | 文件 | 内容 |
 | --- | --- |
-| `ArduCopter/FactorySN.h` | 类声明、常量（`NUM_CHUNKS = 7`、`BYTES_PER_CHUNK = 3`） |
-| `ArduCopter/FactorySN.cpp` | `var_info[]`（28 项）、`is_param_locked()`（实时查当前 AP_Int32 值）、`send_banner()` |
+| `ArduCopter/FactorySN.h` | 类声明、常量（`NUM_CHUNKS = 7`、`BYTES_PER_CHUNK = 3`）、`clear_all()` |
+| `ArduCopter/FactorySN.cpp` | `var_info[]`（28 项）、`is_param_locked()`、`clear_all()`、`send_banner()` |
 | `ArduCopter/Parameters.h` | 在 `ParametersG2` 中新增 `FactorySN factory_sn;` |
 | `ArduCopter/Parameters.cpp` | `var_info2[]` 中新增 `AP_SUBGROUPINFO(factory_sn, "SN_", 14, ParametersG2, FactorySN)` |
 | `ArduCopter/system.cpp` | `init_ardupilot()` 启动时调用 `send_banner()` |
-| `ArduCopter/GCS_MAVLink_Copter.cpp` | `handle_message()` 中拦截 `MAVLINK_MSG_ID_PARAM_SET`，已锁定且新值≠旧值时回弹当前值并发 STATUSTEXT |
+| `ArduCopter/GCS_MAVLink_Copter.cpp` | 拦截 `PARAM_SET` 锁定；拦截 `EFT_RID_CONFIG_REQUEST` type=2 调用 `clear_all()` |
+| `modules/mavlink/.../eft.xml` | msgid 517 `type`：0 查询 / 1 清 RID / 2 清 FactorySN |
 
 ---
 
@@ -421,6 +429,8 @@ A. 不能通过 MAVLink 擦。必须把固件刷新（或用 STM32 编程器把�
 | TC-03 | PARAM_SET `SN_PROD1` = 4539988 | 收到 PARAM_VALUE，值 = 4539988 |
 | TC-04 | **不重启**，再 PARAM_SET `SN_PROD1` = 9999 | **拒绝**：PARAM_VALUE 回 4539988 + STATUSTEXT "Factory SN locked (SN_PROD1)" |
 | TC-05 | **不重启**，再 PARAM_SET `SN_PROD1` = 0（尝试清零） | **拒绝**：PARAM_VALUE 回 4539988 + STATUSTEXT |
+| TC-05b | 发 `EFT_RID_CONFIG_REQUEST` type=2 | 四组 SN 全 0 + STATUSTEXT `Factory SN cleared` + 回 518；之后可重新烧录 |
+| TC-05c | 发 type=1（清 RID） | RID 清掉，**SN 不变** |
 | TC-06 | **不重启**，再 PARAM_SET `SN_PROD1` = 4539988（同值重写） | 允许：PARAM_VALUE 回 4539988，**无** STATUSTEXT 警告 |
 | TC-07 | 同会话写 `SN_PROD2` = 3168310（首次写） | 写入成功 |
 | TC-08 | 写完 7 段，重启 | 启动 banner 显示已解码 ASCII |

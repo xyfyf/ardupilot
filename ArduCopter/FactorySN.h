@@ -27,8 +27,9 @@
     the SAME value (no-op refreshes) are allowed so periodic GCS sync
     does not produce spurious "locked" warnings.
 
-    Consequence: each chunk MUST be written correctly on the very first
-    try. A typo cannot be repaired short of erasing EEPROM (re-flashing).
+    The only in-software erase path is EFT_RID_CONFIG_REQUEST type=2
+    (clear_all()). PARAM_SET / scripting / other MAVLink cannot zero a
+    locked chunk.
 */
 class FactorySN {
 public:
@@ -45,6 +46,10 @@ public:
     // (NOT a boot snapshot), so it engages instantly after the first
     // successful write.
     bool is_param_locked(const char *name) const;
+
+    // Zero and persist all four SN groups (28 chunks). Only callable from
+    // the EFT_RID_CONFIG_REQUEST type=2 handler — not exposed via PARAM_SET.
+    void clear_all();
 
     // Send each configured SN to all GCS connections via STATUSTEXT.
     void send_banner() const;

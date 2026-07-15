@@ -1278,13 +1278,27 @@ void GCS_MAVLINK_Copter::handle_message(const mavlink_message_t &msg)
         copter.g2.toy_mode.handle_message(msg);
         break;
 #endif
+    case MAVLINK_MSG_ID_EFT_RID_CONFIG_REQUEST: {
+        // type=2 is the sole in-software erase path for FactorySN.
+        // RID clear (type=1) and status reply remain in AP_OpenDroneID.
+        mavlink_eft_rid_config_request_t request {};
+        mavlink_msg_eft_rid_config_request_decode(&msg, &request);
+        if ((request.target_system == 0 || request.target_system == gcs().sysid_this_mav()) &&
+            request.type == 2) {
+            copter.g2.factory_sn.clear_all();
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Factory SN cleared");
+        }
+        GCS_MAVLINK::handle_message(msg);
+        break;
+    }
     case MAVLINK_MSG_ID_PARAM_SET: {
         // Enforce strict per-chunk write-once for factory SN parameters.
         // Once a SN_xxxN parameter holds a non-zero value, any subsequent
         // PARAM_SET that would actually change it is rejected (no boot
         // snapshot dependency — the lock engages instantly). Same-value
         // refreshes are allowed to pass through so periodic GCS sync does
-        // not produce spurious "locked" warnings.
+        // not produce spurious "locked" warnings. Clear is only via
+        // EFT_RID_CONFIG_REQUEST type=2 (handled above).
         mavlink_param_set_t packet;
         mavlink_msg_param_set_decode(&msg, &packet);
         char key[AP_MAX_NAME_SIZE + 1];

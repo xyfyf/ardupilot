@@ -34,12 +34,18 @@
 |-----:|------|
 | 0 | 仅查询当前状态，然后回 518 |
 | 1 | **清除** RID 运行配置/状态后，再回 518 |
+| 2 | **仅清除** FactorySN 四组参数（`SN_PROD`/`SN_FACT`/`SN_FRM`/`SN_FC`）后，再回 518；**不**改 RID |
 
 `type=1` 清除效果：
 
 - 清空 UAS ID / Operator ID / Self ID / 操作员位置 / ARM_STATUS 缓存与新鲜度
 - DID 参数恢复为默认并掉电保存：`DID_ENABLE=1`，`DID_MAVPORT=2`，`DID_CANDRIVER=0`；**`DID_OPTIONS` 保持原值不改动**
 - 清除后本机可重新接收并写入新的 `OPEN_DRONE_ID_*` 配置
+
+`type=2` 清除效果：
+
+- 清零全部 28 个工厂 SN 段并掉电保存；随后可重新烧录
+- **不**清 RID；FactorySN **只能**用 type=2 擦除（`PARAM_SET` 清零会被拒绝）
 
 写入身份信息仍用标准 OpenDroneID：`BASIC_ID(12900)` / `OPERATOR_ID(12905)` / `SELF_ID(12903)` / `SYSTEM(12904)`。  
 **不要**用 `MAV_CMD_REQUEST_MESSAGE(512)` 去“请求 517/518/12900”。
@@ -66,7 +72,7 @@
 uint8_t target_system
 uint8_t target_component
 uint8_t seq
-uint8_t type          // 0=查询, 1=清除后查询
+uint8_t type          // 0=查询, 1=清 RID 后查询, 2=清 FactorySN 后查询
 ```
 
 名称、类型、顺序都不能改，否则 CRC 会变。
@@ -132,7 +138,7 @@ FD 04 00 00 <seq> <gcs_sys> <gcs_comp> 05 02 00 <target_sys> <target_comp> <req_
 | `target_system` | uint8 | 飞控 SYSID（心跳里的 system）。**0 = 广播**（本机也会处理） |
 | `target_component` | uint8 | 一般填 **0** |
 | `seq` | uint8 | 自增序号 |
-| `type` | uint8 | **0**=仅查询；**1**=清除 RID 配置/状态后查询 |
+| `type` | uint8 | **0**=仅查询；**1**=清除 RID 后查询；**2**=仅清除 FactorySN 后查询 |
 
 ### 4.1 不要搞混「源地址」和「目标地址」
 

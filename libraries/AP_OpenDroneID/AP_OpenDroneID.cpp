@@ -854,11 +854,12 @@ void AP_OpenDroneID::handle_rid_config_request(mavlink_channel_t chan, const mav
     }
     last_rid_config_reply_ms = now_ms;
 
-    // type: 0=query, 1=clear then reply
+    // type: 0=query, 1=clear RID then reply, 2=FactorySN clear (Copter) then reply
     if (request.type == 1) {
         clear_rid_config_data();
         GCS_SEND_TEXT(MAV_SEVERITY_INFO, "ODID: RID config cleared");
     }
+    // type=2 does not touch RID data; FactorySN erase is done in GCS_MAVLINK_Copter.
 
     if (!HAVE_PAYLOAD_SPACE(chan, EFT_RID_CONFIG_STATUS)) {
         return;

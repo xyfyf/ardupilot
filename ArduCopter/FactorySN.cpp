@@ -228,6 +228,18 @@ bool FactorySN::is_param_locked(const char *name) const
     return chunks[idx].get() != 0;
 }
 
+void FactorySN::clear_all()
+{
+    AP_Int32 *groups[4] = { _prod, _fact, _frame, _fc };
+    for (uint8_t g = 0; g < 4; g++) {
+        for (uint8_t i = 0; i < NUM_CHUNKS; i++) {
+            if (groups[g][i].get() != 0) {
+                groups[g][i].set_and_save(0);
+            }
+        }
+    }
+}
+
 void FactorySN::decode_to_string(const AP_Int32 *chunks, char *dest, size_t dest_size)
 {
     if (dest == nullptr || dest_size == 0) {
