@@ -1,5 +1,5 @@
 --[[
-  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.14
+  脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.15
   适用场景: EFT_CAAC 机控
               GPS1 = ublox GPS                       (instance 0)
               GPS2 = UM982 双天线 RTK on SERIAL7     (instance 1)
@@ -11,44 +11,47 @@
          EK3_SRC1_YAW   = 2   (使用 GPS 双天线 yaw)
          GPS_PRIMARY    = 1   (优先 GPS2)
          GPS_AUTO_SWITCH= 0   (主 GPS 固定听 GPS_PRIMARY)
-         COMPASS_USE    = 1   (延迟 GPSYS_COMP_DLY 秒后启用)
+         COMPASS_USE2   = 1   (延迟 GPSYS_COMP_DLY 秒后启用; 注册顺序反, 外置在 USE2)
     2. 冷启动等 RTK 航向 (未解锁, UM982 在线但双天线航向尚未解算, 宽限 GPSYS_RTK_WAIT 秒):
          GPS1_TYPE      = 1
          GPS2_TYPE      = 25  (保持 UM982 驱动不断电, 让其慢慢收敛)
          EK3_SRC1_YAW   = 2   (坚持等 GPS 双天线 yaw, 不切磁罗盘)
          GPS_PRIMARY    = 1   (主 GPS 仍指 GPS2)
          GPS_AUTO_SWITCH= 0
-         COMPASS_USE    = 0   (禁用罗盘, 避免 EKF 提前用磁罗盘初始化航向)
+         COMPASS_USE2   = 0   (禁用罗盘, 避免 EKF 提前用磁罗盘初始化航向)
     3. RTK 宽限超时 / 天线丢失 / 模块离线 / 飞行中 RTK 故障:
          GPS1_TYPE      = 1
          GPS2_TYPE      = 25  (始终保持 UM982 驱动, 不写 0)
          EK3_SRC1_YAW   = 1   (使用外置磁罗盘 yaw)
          GPS_PRIMARY    = 0   (只用 GPS1 定位)
          GPS_AUTO_SWITCH= 0
-         COMPASS_USE    = 1   (立即启用外置罗盘)
+         COMPASS_USE2   = 1   (立即启用外置罗盘)
     4. 仅识别 GPS2 RTK (ublox GPS1 掉线, gps:status(0)==0), RTK 完好:
          GPS1_TYPE      = 0   (关闭 GPS1, 并周期性 reprobe 等待热插回)
          GPS2_TYPE      = 25  (UM982 保持在线)
          EK3_SRC1_YAW   = 2   (使用 GPS 双天线 yaw)
          GPS_PRIMARY    = 1   (使用 GPS2)
          GPS_AUTO_SWITCH= 0
-         COMPASS_USE    = 1
+         COMPASS_USE2   = 1
          解锁拦截: GPS1 故障但 RTK 正常时禁止解锁, 须恢复 GPS1 后才能飞
+
+  v6.15 变更 (罗盘注册顺序反了):
+  - 外置罗盘开关改管 COMPASS_USE2; COMPASS_USE / USE3 保持关闭.
 
   v6.14 变更 (修复断电插回 RTK 首次上电无法解锁):
   - boot_rtk_guard: 脚本加载瞬间若 GPS2_TYPE=25, 立即写 EK3_SRC1_YAW=2 / GPS_PRIMARY=1 /
-    COMPASS_USE=0, 抢在 EKF 磁罗盘对准前生效, 不等待 5s 启动延迟.
+    COMPASS_USE2=0, 抢在 EKF 磁罗盘对准前生效, 不等待 5s 启动延迟.
   - RTK_WARMUP 宽限改为看 GPS2_TYPE=25 配置, 不再要求 rtk_module_online(), 避免 UM982
     探测期被误判为 GPS1_ONLY.
   - GPS1_ONLY 降级参数改用 param:set 运行期写入, 不写 flash, 防止热拔 RTK 污染下次冷启动.
 
   v6.13 变更 (基于 v6.3 + UM982 冷启动优化):
   - 新增 RTK_WARMUP: 冷启动 UM982 在线但航向未就绪时, 保持 GPS2_TYPE=25 不断电,
-    坚持 EK3_SRC1_YAW=2 + COMPASS_USE=0, 宽限 GPSYS_RTK_WAIT 秒等收敛.
+    坚持 EK3_SRC1_YAW=2 + COMPASS_USE2=0, 宽限 GPSYS_RTK_WAIT 秒等收敛.
   - GPS1_ONLY 时 GPS2_TYPE 始终写 25, 不因模块离线/reprobe 写 0.
   - 曾出过 RTK 航向后丢失 (主/副天线掉): 立即切 GPS1+磁罗盘, 不等 WARMUP/防抖.
   - GPS_AUTO_SWITCH=0, 防止 ublox DGPS 抢走主 GPS 导致 EKF 航向漂移.
-  - 罗盘由 manage_compass() 统一管理: WARMUP 关, BOTH_OK 延迟开, 故障立即开.
+  - 罗盘由 manage_compass() 统一管理 COMPASS_USE2: WARMUP 关, BOTH_OK 延迟开, 故障立即开.
 
   安全约束:
   - 未解锁状态才修改 EK3_SRC1_YAW / GPS_PRIMARY (解锁后 RTK 故障例外)
@@ -307,13 +310,14 @@ local function apply_state(state)
 end
 
 local function manage_compass()
-    set_param_if_diff("COMPASS_USE2", COMPASS_OFF)
+    -- 注册顺序反了: 外置罗盘在 COMPASS_USE2, 内置在 COMPASS_USE
+    set_param_if_diff("COMPASS_USE", COMPASS_OFF)
     set_param_if_diff("COMPASS_USE3", COMPASS_OFF)
 
     local rtk_ok = (current_state == STATE_BOTH_OK or current_state == STATE_GPS2_ONLY)
 
     if current_state == STATE_RTK_WARMUP then
-        set_param_if_diff("COMPASS_USE", COMPASS_OFF)
+        set_param_if_diff("COMPASS_USE2", COMPASS_OFF)
         compass_open_at_ms = 0
     elseif rtk_ok then
         if compass_open_at_ms == 0 then
@@ -322,13 +326,13 @@ local function manage_compass()
             compass_open_at_ms = millis():tofloat() + dly * 1000
         end
         if millis():tofloat() >= compass_open_at_ms then
-            set_param_if_diff("COMPASS_USE", COMPASS_ON)
+            set_param_if_diff("COMPASS_USE2", COMPASS_ON)
         else
-            set_param_if_diff("COMPASS_USE", COMPASS_OFF)
+            set_param_if_diff("COMPASS_USE2", COMPASS_OFF)
         end
     else
         compass_open_at_ms = 0
-        set_param_if_diff("COMPASS_USE", COMPASS_ON)
+        set_param_if_diff("COMPASS_USE2", COMPASS_ON)
     end
 end
 
