@@ -1,5 +1,5 @@
 --[[
-  CAN 雷达自动检测 + RC7 飞行中避障切换 一体脚本 v6.1
+  CAN 雷达自动检测 + RC7 飞行中避障切换 一体脚本 v6.2
   =====================================================================
   合并自：
     - 1auto_detect_radar5.1.lua  （DroneCAN 雷达识别 + 参数自适应 + ARMING_CHECK 管理）
@@ -13,10 +13,10 @@
     超时走 apply_radar_not_ok() 把 RNGFND1_TYPE/PRX1_TYPE 写成 0 并持久化；
     下次上电脚本再把 TYPE 改回 24，驱动才真正就绪 → 表现为第二次上电才正常。
 
-  v6.1 策略：
+  v6.2 策略（修复拔掉雷达后一直报 PreArm: PRX1: No Data 的问题）：
     1. 以 rangefinder Good 为主判定（与 CAN 分析仪看到的 Measurement 一致）
     2. NodeStatus 仅作辅助，用于尽早 ensure TYPE=24
-    3. 永不因误判把 TYPE/PRX 写成 0；真离线只关 AVOID_ENABLE
+    3. 拔掉雷达时将 PRX1_TYPE 写成 0 以屏蔽一直报错（RNGFND1_TYPE 保持 24，避免下次必须二次上电）
     4. BOOT_DELAY 从「检测开始时刻」计时，不再用飞控上电绝对时间
 
   整体逻辑
@@ -32,7 +32,7 @@
       保持 TYPE=24/PRX=4, AVOID_ENABLE=1
 
     全程无任何雷达迹象（无节点、无 Good）:
-      保持 TYPE=24/PRX=4, AVOID_ENABLE=1（不写 0，避免破坏下次上电）
+      保持 RNGFND1_TYPE=24, 修改 PRX1_TYPE=0, AVOID_ENABLE=1（屏蔽报错）
 
   Phase 2 - 飞行中 RC7 切换（radar_ok 后启用）
     仅 Loiter 模式且 RC7 > 1500 → AVOID_ENABLE=7
@@ -205,6 +205,9 @@ local function apply_radar_ok()
 
     if c1 or c2 then
         gcs:send_text(4, "Radar: OK, reboot for avoid")
+        if not arming:is_armed() then
+            vehicle:reboot(false)
+        end
     else
         gcs:send_text(6, "Radar: OK")
     end
@@ -213,24 +216,34 @@ end
 -- 曾见雷达迹象但未稳定 Good：保持驱动，只关避障
 local function apply_radar_degraded()
     local _, c1 = set_param_persist(rngfnd_param, "RNGFND1_TYPE", TARGET_RNGFND_TYPE)
-    local _, c2 = set_param_persist(prx_param,    "PRX1_TYPE",    TARGET_PRX_TYPE)
+    local _, c2 = set_param_persist(prx_param,    "PRX1_TYPE",    0)
     set_param_persist(avoid_param, "AVOID_ENABLE", AVOID_OFF)
     set_arming_rngfnd_check(false)
 
     if c1 or c2 then
         gcs:send_text(4, "Radar: unstable, reboot")
+        if not arming:is_armed() then
+            vehicle:reboot(false)
+        end
     else
         gcs:send_text(4, "Radar: unstable, AVOID=1")
     end
 end
 
--- 全程无节点且无 Good：只关避障，绝不写 TYPE=0
+-- 全程无节点且无 Good：只关避障，若不需报错则需改 TYPE=0
 local function apply_radar_absent()
     set_param_persist(rngfnd_param, "RNGFND1_TYPE", TARGET_RNGFND_TYPE)
-    set_param_persist(prx_param,    "PRX1_TYPE",    TARGET_PRX_TYPE)
+    local _, c2 = set_param_persist(prx_param,    "PRX1_TYPE",    0)
     set_param_persist(avoid_param,  "AVOID_ENABLE", AVOID_OFF)
     set_arming_rngfnd_check(false)
-    gcs:send_text(4, "Radar: absent, AVOID=1")
+    if c2 then
+        gcs:send_text(4, "Radar: absent, reboot to clear err")
+        if not arming:is_armed() then
+            vehicle:reboot(false)
+        end
+    else
+        gcs:send_text(4, "Radar: absent, AVOID=1")
+    end
 end
 
 local function finish_detect(radar_ok)
