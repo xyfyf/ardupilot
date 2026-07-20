@@ -52,7 +52,8 @@ extern mavlink_system_t mavlink_system;
 
 /// ArduPilot custom: runtime override of the outgoing MAVLink2 frame format.
 /// Set via the MAV_FRAMING_OVERRIDE_CMD (msgid 516) message. See mavlink_helpers.h.
-/// mav_tx_magic_override: 0 = default 0xFD start byte, otherwise the byte to use on all channels (e.g. 0xEF).
+/// mav_tx_magic_override: 0 = use per-channel/board default (may be 0xEF), otherwise force that byte on all channels (e.g. 0xFD).
+/// Persisted via MAV_TX_MAGIC when set by MAV_FRAMING_OVERRIDE_CMD.
 /// mav_tx_magic_override_chan[]: per-channel default magic when mav_tx_magic_override is zero.
 /// mav_tx_crc_override_enable: 0 = normal computed CRC, non-zero = force the CRC field.
 /// mav_tx_crc_override_value: 16-bit CRC value used when the override is enabled.

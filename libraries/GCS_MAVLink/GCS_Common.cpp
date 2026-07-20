@@ -226,6 +226,8 @@ bool GCS_MAVLINK::init(uint8_t instance)
         mavlink_set_channel_magic_override(chan, 0xEF);
     }
 #endif
+    // Re-apply persisted global framing (e.g. forced 0xFD) so it wins over per-port EF.
+    gcs().apply_saved_framing_override();
 
     const auto mavlink_protocol = uartstate->get_protocol();
 
@@ -1895,12 +1897,17 @@ void GCS_MAVLINK::packetReceived(const mavlink_status_t &status,
                   "FrameOverride: cmd=%u magic=0x%02X crc=0x%04X hits=%lu",
                   (unsigned)cmd, (unsigned)magic, (unsigned)crc_value,
                   (unsigned long)mav_tx_override_hits);
-        mav_tx_magic_override = (cmd & 0x02) ? magic : 0;
+        // bit1 clear => force standard MAVLink2 STX (0xFD), not "clear override"
+        // (clearing would fall back to per-channel board default 0xEF).
+        // bit1 set + magic=0 => clear global override (board default / EF mask).
+        mav_tx_magic_override = (cmd & 0x02) ? magic : MAVLINK_STX;
         mav_tx_crc_override_enable = (cmd & 0x01) ? 1 : 0;
         mav_tx_crc_override_value = crc_value;
+        // Persist magic so the same framing is used after the next reboot.
+        gcs().persist_framing_magic(mav_tx_magic_override);
         // Report the resulting state that all outgoing frames will now use.
         send_text(MAV_SEVERITY_INFO,
-                  "FrameOverride active: STX=0x%02X CRC=%s(0x%04X)",
+                  "FrameOverride active: STX=0x%02X CRC=%s(0x%04X) saved",
                   (unsigned)(mav_tx_magic_override ? mav_tx_magic_override : 0xFD),
                   mav_tx_crc_override_enable ? "forced" : "normal",
                   (unsigned)mav_tx_crc_override_value);

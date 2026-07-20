@@ -74,6 +74,13 @@ const AP_Param::GroupInfo GCS::var_info[] {
     // @Increment: 1
     AP_GROUPINFO("_TELEM_DELAY",    4,      GCS, mav_telem_delay, 0),
 
+    // @Param: _TX_MAGIC
+    // @DisplayName: MAVLink2 TX start-of-frame magic
+    // @Description: Persistent outgoing MAVLink2 frame start byte. 0 uses the board default (e.g. 0xEF on USB/LINK). 253 (0xFD) forces standard MAVLink2 framing on all channels across reboots. Set automatically by MAV_FRAMING_OVERRIDE_CMD.
+    // @Range: 0 255
+    // @User: Advanced
+    AP_GROUPINFO("_TX_MAGIC",    6,      GCS, mav_tx_magic, 0),
+
 #if MAVLINK_COMM_NUM_BUFFERS > 0
     // @Group: 1
     // @Path: GCS_MAVLink_Parameters.cpp
@@ -152,6 +159,20 @@ MissionItemProtocol *GCS::missionitemprotocols[3];
 void GCS::init()
 {
     mavlink_system.sysid = sysid_this_mav();
+    apply_saved_framing_override();
+}
+
+void GCS::apply_saved_framing_override()
+{
+    const int16_t magic = mav_tx_magic.get();
+    if (magic > 0 && magic <= 255) {
+        mav_tx_magic_override = (uint8_t)magic;
+    }
+}
+
+void GCS::persist_framing_magic(uint8_t magic)
+{
+    mav_tx_magic.set_and_save_ifchanged(magic);
 }
 
 /*

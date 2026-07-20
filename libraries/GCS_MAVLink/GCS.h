@@ -1197,6 +1197,10 @@ public:
     void setup_console();
     void setup_uarts();
 
+    // Apply / persist framing magic used by MAV_FRAMING_OVERRIDE_CMD (msgid 516).
+    void apply_saved_framing_override();
+    void persist_framing_magic(uint8_t magic);
+
     enum class Option {
       GCS_SYSID_ENFORCE = (1U << 0),
     };
@@ -1298,6 +1302,9 @@ protected:
     AP_Int16                 mav_gcs_sysid_high;
     AP_Enum16<Option>        mav_options;
     AP_Int8                  mav_telem_delay;
+    // Persistent MAVLink2 TX start-of-frame magic (from MAV_FRAMING_OVERRIDE_CMD).
+    // 0 = board default (e.g. 0xEF on masked ports); non-zero = force that byte on all channels.
+    AP_Int16                 mav_tx_magic;
 
 private:
 
