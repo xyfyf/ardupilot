@@ -419,8 +419,8 @@ static void log_filename_fc_sn(char *dest, size_t dest_size)
 }
 
 /*
-  format the current UTC time (from RTC/GPS) as YYYYMMDDHHMMSS. Writes "NOTIME"
-  when no valid UTC time is available (e.g. no GPS fix yet).
+  format the current China Standard Time (UTC+8, from RTC/GPS) as YYYYMMDDHHMMSS.
+  Writes "NOTIME" when no valid UTC time is available (e.g. no GPS fix yet).
  */
 static void log_filename_timestamp(char *dest, size_t dest_size)
 {
@@ -431,20 +431,25 @@ static void log_filename_timestamp(char *dest, size_t dest_size)
         return;
     }
 #if AP_RTC_ENABLED
-    uint16_t year;
-    uint8_t month, day, hour, min, sec;
-    uint16_t ms;
-    // month is returned 0~11, so add 1 to get a human 1~12 value
-    if (AP::rtc().get_date_and_time_utc(year, month, day, hour, min, sec, ms)) {
-        const unsigned y = MIN((unsigned)year, 9999U);
-        const unsigned m = MIN((unsigned)month + 1U, 12U);
-        const unsigned d = MIN((unsigned)day, 31U);
-        const unsigned h = MIN((unsigned)hour, 23U);
-        const unsigned mi = MIN((unsigned)min, 59U);
-        const unsigned s = MIN((unsigned)sec, 60U);
-        // fixed 15-byte buffer: YYYYMMDDHHMMSS + null
-        snprintf(dest, 15, "%04u%02u%02u%02u%02u%02u", y, m, d, h, mi, s);
-        return;
+    uint64_t time_us = 0;
+    if (AP::rtc().get_utc_usec(time_us)) {
+        // China Standard Time = UTC + 8 hours (handles day/month/year rollover)
+        constexpr uint32_t china_offset_s = 8U * 3600U;
+        const uint32_t local_sec = (uint32_t)(time_us / 1000000ULL) + china_offset_s;
+        uint16_t year;
+        uint8_t month, day, hour, min, sec, wday;
+        // month is returned 0~11, so add 1 to get a human 1~12 value
+        if (AP::rtc().clock_s_to_date_fields(local_sec, year, month, day, hour, min, sec, wday)) {
+            const unsigned y = MIN((unsigned)year, 9999U);
+            const unsigned m = MIN((unsigned)month + 1U, 12U);
+            const unsigned d = MIN((unsigned)day, 31U);
+            const unsigned h = MIN((unsigned)hour, 23U);
+            const unsigned mi = MIN((unsigned)min, 59U);
+            const unsigned s = MIN((unsigned)sec, 60U);
+            // fixed 15-byte buffer: YYYYMMDDHHMMSS + null
+            snprintf(dest, 15, "%04u%02u%02u%02u%02u%02u", y, m, d, h, mi, s);
+            return;
+        }
     }
 #endif
     snprintf(dest, 15, "NOTIME");
@@ -456,7 +461,7 @@ static void log_filename_timestamp(char *dest, size_t dest_size)
   New logs are named  NNNNNNNN_<fc_sn>_<YYYYMMDDHHMMSS>.EFT  where the leading
   zero-padded number is the log index (kept so log download and auto-cleanup
   keep working), the middle field is the flight controller serial number and
-  the trailing field is the arm-time UTC timestamp.
+  the trailing field is the arm-time China Standard Time (UTC+8) timestamp.
 
   For an existing log we scan the directory and return its real on-disk name
   (whatever suffix it has), so all existing-log operations work regardless of
