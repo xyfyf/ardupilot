@@ -56,6 +56,7 @@ const AP_Param::GroupInfo FactorySN::var_info[] = {
     // @DisplayName: Factory SN chunk 1
     // @Description: ASCII chunk 1 of factory_sn. Write-once via MAVLink.
     // @User: Advanced
+    // @ReadOnly: True
 
     // @Param: FACT2
     // @DisplayName: Factory SN chunk 2
