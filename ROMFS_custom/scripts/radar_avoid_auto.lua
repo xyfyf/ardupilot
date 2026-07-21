@@ -55,7 +55,6 @@ local INIT_DELAY_MS      = 1000    -- 脚本启动后首次检测延迟
 
 local RC_CH              = 7       -- RC 切换通道
 local PWM_THRESHOLD      = 1500    -- RC7 > 此值 → AVOID=7，否则 AVOID=1
-local DIST_NOTICE_MS     = 5000    -- 前方障碍通知间隔（仅避障开启且需刹车时）
 
 ------------------------------------------------------------------
 -- 常量
@@ -83,7 +82,6 @@ local MODE_LOITER  = 5
 local rngfnd_param       = Parameter("RNGFND1_TYPE")
 local prx_param          = Parameter("PRX1_TYPE")
 local avoid_param        = Parameter("AVOID_ENABLE")
-local avoid_margin_param = Parameter("AVOID_MARGIN")
 local arming_check_param = Parameter("ARMING_CHECK")
 
 ------------------------------------------------------------------
@@ -107,7 +105,6 @@ end
 -- 状态
 ------------------------------------------------------------------
 local phase             = 1          -- 1=detect, 2=rc7 toggle, 0=disabled
-local last_dist_notice_ms = 0        -- 上次发送距离通知的时刻
 local radar_seen        = false      -- 收到了 RADAR_NODE_ID 的 NodeStatus
 local had_rngfnd_good   = false      -- 检测窗口内曾出现 Good
 local first_good_ms     = nil        -- 当前连续 Good 段起始时间
@@ -357,39 +354,6 @@ local function rc_toggle_step()
 end
 
 ------------------------------------------------------------------
--- 前方障碍距离通知（RC 打开避障后，进入刹车距离内，5s 一次）
-------------------------------------------------------------------
-local function distance_notice_step()
-    if not is_radar_rc_on() then
-        return
-    end
-
-    local now = millis():tofloat()
-    if now - last_dist_notice_ms < DIST_NOTICE_MS then
-        return
-    end
-
-    local status = rangefinder and rangefinder:status_orient(RANGEFINDER_ORIENT) or 0
-    if status ~= RNGFND_STATUS_GOOD then
-        return
-    end
-
-    local dist_m = rangefinder:distance_orient(RANGEFINDER_ORIENT)
-    if not dist_m or dist_m <= 0 then
-        return
-    end
-
-    -- 进入 AVOID_MARGIN 内才会触发避障刹车（Stop）
-    local margin = avoid_margin_param:get()
-    if margin == nil or dist_m > margin then
-        return
-    end
-
-    gcs:send_text(6, string.format("前方 %.1f 米有障碍物", dist_m))
-    last_dist_notice_ms = now
-end
-
-------------------------------------------------------------------
 -- 主循环
 ------------------------------------------------------------------
 function update()
@@ -398,7 +362,6 @@ function update()
     elseif phase == 2 then
         rc_toggle_step()
     end
-    distance_notice_step()
     return update, 100
 end
 

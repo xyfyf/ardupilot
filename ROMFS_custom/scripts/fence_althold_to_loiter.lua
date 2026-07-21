@@ -9,6 +9,8 @@
 --      Home 的水平距离；多边形/其他：fallback 到 fence:get_breaches()）；
 --      避免依赖 fence:get_margin_breaches()——该接口对圆形围栏在实际飞行
 --      中存在不能可靠触发的问题，导致总是飞出去才切 Loiter；
+--      同时按当前朝围栏方向的速度预测刹车距离，速度越快越提前切换，
+--      保证切到 Loiter 后刹得住、不冲出围栏（与定点模式避障原理一致）；
 --   3. 切换成功后保持 Loiter，不再反复切（飞手可自行再切回任何模式）；
 --   4. 一旦飞手手动切到非 AltHold/Loiter 的模式，脚本认为飞手已接管，复位状态；
 --   5. 切到 Loiter 失败（例如没有 GPS / 卫星不足）会通过 GCS 弹出提示。
@@ -25,7 +27,21 @@ local MODE_LOITER  = 5
 -- ====== 内部状态 ======
 local switched = false    -- 是否本次已经由脚本切到 Loiter 了
 
--- 判断飞机是否已进入圆形围栏缓冲带（距边界 < FENCE_MARGIN）或已越界
+-- 估算切到 Loiter 后沿外飞方向还要冲出去多远（刹车距离，米）
+-- v_out: 朝围栏外的径向速度 m/s（<=0 时无需刹车）
+local function braking_distance(v_out)
+    if v_out <= 0 then
+        return 0
+    end
+    -- Loiter 刹车加速度 cm/s/s，默认 250；刹车启动延迟 s，默认 1
+    local brk_accel = param:get("LOIT_BRK_ACCEL") or 250
+    local brk_delay = param:get("LOIT_BRK_DELAY") or 1.0
+    local accel = math.max(brk_accel, 50) * 0.01   -- 转 m/s^2，防止除 0
+    -- 延迟期间匀速 + 之后匀减速；再加脚本检测周期的裕量
+    return v_out * (brk_delay + LOOP_MS * 0.001) + (v_out * v_out) / (2 * accel)
+end
+
+-- 判断飞机是否已进入圆形围栏缓冲带（距边界 < FENCE_MARGIN + 刹车距离）或已越界
 -- 返回 true 表示需要切 Loiter，同时返回原因字符串
 local function circle_fence_triggered()
     -- 直接算水平距离，不依赖 get_margin_breaches()
@@ -41,10 +57,17 @@ local function circle_fence_triggered()
         return false, ""
     end
 
+    -- 计算朝围栏外的径向速度（水平速度在"Home->飞机"方向上的投影）
+    local v_out = 0
+    local vel = ahrs:get_velocity_NED()
+    if vel ~= nil and dist > 0.1 then
+        v_out = (vel:x() * pos:x() + vel:y() * pos:y()) / dist
+    end
+
     if dist >= fence_radius then
         return true, string.format("breach(%.1fm out)", dist - fence_radius)
-    elseif dist >= fence_radius - fence_margin then
-        return true, string.format("margin(%.1fm left)", fence_radius - dist)
+    elseif dist + braking_distance(v_out) >= fence_radius - fence_margin then
+        return true, string.format("margin(%.1fm left, %.1fm/s out)", fence_radius - dist, v_out)
     end
     return false, ""
 end
