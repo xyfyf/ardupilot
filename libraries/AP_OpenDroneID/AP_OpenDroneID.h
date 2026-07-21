@@ -90,6 +90,9 @@ public:
 
     void set_arm_status(mavlink_open_drone_id_arm_status_t &status);
 
+    bool has_error_code(const char* codes);       // locks _sem, call from outside
+    bool has_error_code_nolock(const char* codes) const; // no lock, caller must hold _sem
+
     void set_basic_id();
 
     void get_persistent_params(ExpandingString &str) const;

@@ -196,8 +196,10 @@ bool AP_OpenDroneID::pre_arm_check_nolock(char* failmsg, uint8_t failmsg_len) co
     }
 
     if (arm_status.status != MAV_ODID_ARM_STATUS_GOOD_TO_ARM) {
-        strncpy(failmsg, arm_status.error, failmsg_len);
-        return false;
+        if (has_error_code_nolock("1234567")) {
+            strncpy(failmsg, arm_status.error, failmsg_len);
+            return false;
+        }
     }
 
     return true;
@@ -955,6 +957,25 @@ void AP_OpenDroneID::handle_msg(mavlink_channel_t chan, const mavlink_message_t 
         break;
     }
     }
+}
+
+bool AP_OpenDroneID::has_error_code_nolock(const char* codes) const
+{
+    if (arm_status.status == MAV_ODID_ARM_STATUS_GOOD_TO_ARM) {
+        return false;
+    }
+    for (uint8_t i = 0; codes[i] != '\0'; i++) {
+        if (strchr(arm_status.error, codes[i]) != nullptr) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool AP_OpenDroneID::has_error_code(const char* codes)
+{
+    WITH_SEMAPHORE(_sem);
+    return has_error_code_nolock(codes);
 }
 
 // singleton instance

@@ -733,6 +733,11 @@ void Copter::three_hz_loop()
     // check for deadreckoning failsafe
     failsafe_deadreckon_check();
 
+#if AP_OPENDRONEID_ENABLED
+    // check for ODID failsafe
+    failsafe_odid_check();
+#endif
+
 #if AP_RC_TRANSMITTER_TUNING_ENABLED
     //update transmitter based in flight tuning
     tuning();
