@@ -55,6 +55,7 @@ local INIT_DELAY_MS      = 1000    -- 脚本启动后首次检测延迟
 
 local RC_CH              = 7       -- RC 切换通道
 local PWM_THRESHOLD      = 1500    -- RC7 > 此值 → AVOID=7，否则 AVOID=1
+local DIST_NOTICE_MS     = 5000    -- 前方障碍通知间隔（仅避障开启且需刹车时）
 
 ------------------------------------------------------------------
 -- 常量
@@ -82,6 +83,7 @@ local MODE_LOITER  = 5
 local rngfnd_param       = Parameter("RNGFND1_TYPE")
 local prx_param          = Parameter("PRX1_TYPE")
 local avoid_param        = Parameter("AVOID_ENABLE")
+local avoid_margin_param = Parameter("AVOID_MARGIN")
 local arming_check_param = Parameter("ARMING_CHECK")
 
 ------------------------------------------------------------------
@@ -320,6 +322,15 @@ end
 ------------------------------------------------------------------
 -- Phase 2：RC7 切换 AVOID_ENABLE
 ------------------------------------------------------------------
+-- 雷达避障 RC 已打开：定点模式 + RC7 高位
+local function is_radar_rc_on()
+    if vehicle:get_mode() ~= MODE_LOITER or not rc:has_valid_input() then
+        return false
+    end
+    local pwm = rc:get_pwm(RC_CH)
+    return pwm ~= nil and pwm > PWM_THRESHOLD
+end
+
 local function apply_avoid(want_on)
     local v = want_on and AVOID_ON or AVOID_OFF
     if avoid_param:get() == v then
@@ -329,15 +340,7 @@ local function apply_avoid(want_on)
 end
 
 local function rc_toggle_step()
-    local want_on = false
-    local mode = vehicle:get_mode()
-
-    if mode == MODE_LOITER and rc:has_valid_input() then
-        local pwm = rc:get_pwm(RC_CH)
-        if pwm ~= nil and pwm > PWM_THRESHOLD then
-            want_on = true
-        end
-    end
+    local want_on = is_radar_rc_on()
 
     if want_on ~= last_avoid_on then
         if apply_avoid(want_on) then
@@ -354,21 +357,36 @@ local function rc_toggle_step()
 end
 
 ------------------------------------------------------------------
--- 前方障碍距离通知（2s 一次，仅雷达 Good 时发送）
+-- 前方障碍距离通知（RC 打开避障后，进入刹车距离内，5s 一次）
 ------------------------------------------------------------------
 local function distance_notice_step()
-    local now = millis():tofloat()
-    if now - last_dist_notice_ms < 2000 then
+    if not is_radar_rc_on() then
         return
     end
-    local status = rangefinder and rangefinder:status_orient(RANGEFINDER_ORIENT) or 0
-    if status == RNGFND_STATUS_GOOD then
-        local dist_m = rangefinder:distance_orient(RANGEFINDER_ORIENT)
-        if dist_m and dist_m > 0 then
-            gcs:send_text(6, string.format("前方 %.1f 米有障碍物", dist_m))
-            last_dist_notice_ms = now
-        end
+
+    local now = millis():tofloat()
+    if now - last_dist_notice_ms < DIST_NOTICE_MS then
+        return
     end
+
+    local status = rangefinder and rangefinder:status_orient(RANGEFINDER_ORIENT) or 0
+    if status ~= RNGFND_STATUS_GOOD then
+        return
+    end
+
+    local dist_m = rangefinder:distance_orient(RANGEFINDER_ORIENT)
+    if not dist_m or dist_m <= 0 then
+        return
+    end
+
+    -- 进入 AVOID_MARGIN 内才会触发避障刹车（Stop）
+    local margin = avoid_margin_param:get()
+    if margin == nil or dist_m > margin then
+        return
+    end
+
+    gcs:send_text(6, string.format("前方 %.1f 米有障碍物", dist_m))
+    last_dist_notice_ms = now
 end
 
 ------------------------------------------------------------------
