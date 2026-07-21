@@ -105,6 +105,7 @@ end
 -- 状态
 ------------------------------------------------------------------
 local phase             = 1          -- 1=detect, 2=rc7 toggle, 0=disabled
+local last_dist_notice_ms = 0        -- 上次发送距离通知的时刻
 local radar_seen        = false      -- 收到了 RADAR_NODE_ID 的 NodeStatus
 local had_rngfnd_good   = false      -- 检测窗口内曾出现 Good
 local first_good_ms     = nil        -- 当前连续 Good 段起始时间
@@ -353,6 +354,24 @@ local function rc_toggle_step()
 end
 
 ------------------------------------------------------------------
+-- 前方障碍距离通知（2s 一次，仅雷达 Good 时发送）
+------------------------------------------------------------------
+local function distance_notice_step()
+    local now = millis():tofloat()
+    if now - last_dist_notice_ms < 2000 then
+        return
+    end
+    local status = rangefinder and rangefinder:status_orient(RANGEFINDER_ORIENT) or 0
+    if status == RNGFND_STATUS_GOOD then
+        local dist_m = rangefinder:distance_orient(RANGEFINDER_ORIENT)
+        if dist_m and dist_m > 0 then
+            gcs:send_text(6, string.format("前方 %.1f 米有障碍物", dist_m))
+            last_dist_notice_ms = now
+        end
+    end
+end
+
+------------------------------------------------------------------
 -- 主循环
 ------------------------------------------------------------------
 function update()
@@ -361,6 +380,7 @@ function update()
     elseif phase == 2 then
         rc_toggle_step()
     end
+    distance_notice_step()
     return update, 100
 end
 
