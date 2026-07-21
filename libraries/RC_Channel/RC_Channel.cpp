@@ -140,6 +140,7 @@ const AP_Param::GroupInfo RC_Channel::var_info[] = {
     // @Values{Rover}: 30:Lost Rover Sound
     // @Values{Plane}: 30:Lost Plane Sound
     // @Values{Copter, Rover, Plane, Sub}: 31:Motor Emergency Stop
+    // @Values{Copter}: 221:Pre Motor Emergency Stop
     // @Values{Copter}: 32:Motor Interlock
     // @Values{Copter}: 33:BRAKE Mode
     // @Values{Copter, Rover, Plane, Sub}: 34:Relay2 On/Off, 35:Relay3 On/Off, 36:Relay4 On/Off
@@ -777,6 +778,7 @@ void RC_Channel::init_aux_function(const AUX_FUNC ch_option, const AuxSwitchPos 
     case AUX_FUNC::MISSION_RESET:
 #endif
     case AUX_FUNC::MOTOR_ESTOP:
+    case AUX_FUNC::PRE_MOTOR_ESTOP:
     case AUX_FUNC::RC_OVERRIDE_ENABLE:
 #if AP_CAMERA_RUNCAM_ENABLED
     case AUX_FUNC::RUNCAM_CONTROL:
@@ -855,6 +857,7 @@ const RC_Channel::LookupTable RC_Channel::lookuptable[] = {
     { AUX_FUNC::RELAY,"Relay1"},
 #endif
     { AUX_FUNC::MOTOR_ESTOP,"MotorEStop"},
+    { AUX_FUNC::PRE_MOTOR_ESTOP,"PreMotorEStop"},
     { AUX_FUNC::MOTOR_INTERLOCK,"MotorInterlock"},
 #if AP_SERVORELAYEVENTS_ENABLED && AP_RELAY_ENABLED
     { AUX_FUNC::RELAY2,"Relay2"},
@@ -1652,7 +1655,11 @@ bool RC_Channel::do_aux_function(const AuxFuncTrigger &trigger)
     case AUX_FUNC::MOTOR_ESTOP:
         switch (ch_flag) {
         case AuxSwitchPos::HIGH: {
-            SRV_Channels::set_emergency_stop(true);
+            // if PRE_MOTOR_ESTOP channel is configured, it must be HIGH first
+            RC_Channel *pre_chan = rc().find_channel_for_option(AUX_FUNC::PRE_MOTOR_ESTOP);
+            if (pre_chan == nullptr || pre_chan->get_aux_switch_pos() == AuxSwitchPos::HIGH) {
+                SRV_Channels::set_emergency_stop(true);
+            }
             break;
         }
         case AuxSwitchPos::MIDDLE:
@@ -1663,6 +1670,10 @@ bool RC_Channel::do_aux_function(const AuxFuncTrigger &trigger)
             break;
         }
         }
+        break;
+
+    case AUX_FUNC::PRE_MOTOR_ESTOP:
+        // acts as safety gate for MOTOR_ESTOP; no direct action
         break;
 
 #if HAL_VISUALODOM_ENABLED
