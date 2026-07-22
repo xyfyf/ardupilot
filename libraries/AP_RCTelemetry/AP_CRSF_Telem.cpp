@@ -1945,7 +1945,7 @@ void AP_CRSF_Telem::ScriptedMenu::dump_structure(uint8_t indent)
 
 // AppID 0x5010 在标准 4 字节 data 后再追加 2 字节告警（仅 calc_radar_data 使用）
 #define AP_CRSF_RADAR_APPID           0x5010U
-#define AP_CRSF_RADAR_EXTRA_BYTES     2U
+#define AP_CRSF_RADAR_EXTRA_BYTES     6U  // payload[4]/[5] 告警 + payload[6..9] 通道映射
 
 // 手杆死区：roll/pitch/yaw 在该范围内视为未在手动大幅打杆
 static const int16_t RADAR_RC_STICK_DEADBAND = 100;
@@ -2278,6 +2278,21 @@ static void radar_pack_warning_flags(uint8_t &payload4, uint8_t &payload5)
 }
 
 /*
+  RCx_OPTION 值 → 4-bit 半字节（通道映射编码）
+  0000=无映射 / 0001=雷达开关 / 0010=防误触 / 0011=锁桨 / 0100=返航
+*/
+static uint8_t radar_option_to_nibble(int16_t opt)
+{
+    switch (opt) {
+        case 300: return 1;  // SCRIPTING_1 → 雷达开关
+        case 221: return 2;  // PRE_MOTOR_ESTOP → 防误触
+        case 31:  return 3;  // MOTOR_ESTOP → 锁桨
+        case 4:   return 4;  // RTL → 返航
+        default:  return 0;
+    }
+}
+
+/*
   前向雷达距离 + 低电量 + 扩展告警，打包为 FrSky passthrough 0x5010 单包帧直接注入 CRSF 调度器。
   data（uint32 小端）：
     bits[15:0]  = 前向距离，单位 cm（无效时为 0；仅在解锁且离地高度 > 0.5m 时上报真实值）
@@ -2286,6 +2301,10 @@ static void radar_pack_warning_flags(uint8_t &payload4, uint8_t &payload5)
     bit[28]     = 低电量标志（1 = 飞控已触发低电量/临界保护）
   扩展字节（仅本 AppID）：
     payload[4] / payload[5] 见 radar_pack_warning_flags()
+    payload[6] bits[3:0]=CH7  bits[7:4]=CH8
+    payload[7] bits[3:0]=CH9  bits[7:4]=CH10
+    payload[8] bits[3:0]=CH11 bits[7:4]=CH12
+    payload[9] bits[3:0]=CH13 bits[7:4]=预留=0
 */
 void AP_CRSF_Telem::calc_radar_data()
 {
@@ -2400,7 +2419,37 @@ void AP_CRSF_Telem::calc_radar_data()
     uint8_t payload5 = 0;
     radar_pack_warning_flags(payload4, payload5);
 
-    // --- 6. 填入 CRSF 单包 passthrough 帧（AppID = 0x5010）---
+    // --- 6. 通道映射 payload[6..9]：RC7~RC13 OPTION → 4-bit 半字节（每 1s 缓存）---
+    static uint8_t s_ch_nibble[7];  // index 0=RC7 .. 6=RC13
+    static uint32_t s_ch_check_ms = 0;
+    static const char * const ch_option_names[7] = {
+        "RC7_OPTION", "RC8_OPTION", "RC9_OPTION", "RC10_OPTION",
+        "RC11_OPTION", "RC12_OPTION", "RC13_OPTION"
+    };
+    if (now_ms2 - s_ch_check_ms >= 1000U) {
+        s_ch_check_ms = now_ms2;
+        for (uint8_t i = 0; i < 7; i++) {
+            enum ap_var_type ptype;
+            AP_Param *p = AP_Param::find(ch_option_names[i], &ptype);
+            if (p != nullptr) {
+                int16_t opt = 0;
+                if (ptype == AP_PARAM_INT8) {
+                    opt = ((AP_Int8 *)p)->get();
+                } else if (ptype == AP_PARAM_INT16) {
+                    opt = ((AP_Int16 *)p)->get();
+                }
+                s_ch_nibble[i] = radar_option_to_nibble(opt);
+            } else {
+                s_ch_nibble[i] = 0;
+            }
+        }
+    }
+    const uint8_t payload6 = (s_ch_nibble[0] & 0xF) | ((s_ch_nibble[1] & 0xF) << 4);
+    const uint8_t payload7 = (s_ch_nibble[2] & 0xF) | ((s_ch_nibble[3] & 0xF) << 4);
+    const uint8_t payload8 = (s_ch_nibble[4] & 0xF) | ((s_ch_nibble[5] & 0xF) << 4);
+    const uint8_t payload9 =  s_ch_nibble[6] & 0xF;
+
+    // --- 7. 填入 CRSF 单包 passthrough 帧（AppID = 0x5010）---
     _telem.bcast.custom_telem.single_packet_passthrough.sub_type =
         AP_RCProtocol_CRSF::CustomTelemSubTypeID::CRSF_AP_CUSTOM_TELEM_SINGLE_PACKET_PASSTHROUGH;
     _telem.bcast.custom_telem.single_packet_passthrough.appid = AP_CRSF_RADAR_APPID;
@@ -2410,6 +2459,10 @@ void AP_CRSF_Telem::calc_radar_data()
     const uint8_t core_len = sizeof(AP_CRSF_Telem::PassthroughSinglePacketFrame);
     frame_bytes[core_len + 0] = payload4;
     frame_bytes[core_len + 1] = payload5;
+    frame_bytes[core_len + 2] = payload6;
+    frame_bytes[core_len + 3] = payload7;
+    frame_bytes[core_len + 4] = payload8;
+    frame_bytes[core_len + 5] = payload9;
 
     _telem_size = core_len + AP_CRSF_RADAR_EXTRA_BYTES;
     _telem_type = get_custom_telem_frame_id();

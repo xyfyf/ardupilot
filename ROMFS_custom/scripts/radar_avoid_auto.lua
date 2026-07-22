@@ -53,8 +53,7 @@ local BOOT_DELAY_MS      = 15000   -- 自检测开始起最长等待（7s 有数
 local CONFIRM_DELAY_MS   = 2000    -- Good 持续多久才认定稳定
 local INIT_DELAY_MS      = 1000    -- 脚本启动后首次检测延迟
 
-local RC_CH              = 7       -- RC 切换通道
-local PWM_THRESHOLD      = 1500    -- RC7 > 此值 → AVOID=7，否则 AVOID=1
+local SCRIPTING1_FN      = 300     -- RC 切换功能：SCRIPTING_1（RCx_OPTION=300）
 
 ------------------------------------------------------------------
 -- 常量
@@ -317,15 +316,14 @@ local function detect_step()
 end
 
 ------------------------------------------------------------------
--- Phase 2：RC7 切换 AVOID_ENABLE
+-- Phase 2：Scripting1(300) 切换 AVOID_ENABLE
 ------------------------------------------------------------------
--- 雷达避障 RC 已打开：定点模式 + RC7 高位
+-- 雷达避障已打开：定点模式 + SCRIPTING_1 通道拨高
 local function is_radar_rc_on()
     if vehicle:get_mode() ~= MODE_LOITER or not rc:has_valid_input() then
         return false
     end
-    local pwm = rc:get_pwm(RC_CH)
-    return pwm ~= nil and pwm > PWM_THRESHOLD
+    return rc:get_aux_cached(SCRIPTING1_FN) == 1
 end
 
 local function apply_avoid(want_on)
