@@ -1,4 +1,4 @@
--- 1stick_inner_arm_outer_disarm5.0.lua
+-- 1stick_inner_arm_outer_disarm5.1.lua
 -- 美国手 Mode 2，摇杆通道：1横滚 2俯仰 3油门 4偏航
 --
 -- 关于遥控器 PWM（例如左/下=1000，右/上=2000）：
@@ -20,8 +20,186 @@
 --
 -- 安全：空中强制上锁需固件/参数允许空中 DISARM（见机型文档）；组合键仅在本脚本内解析。
 -- 原生摇杆解锁：脚本启动时尝试 ARMING_RUDDER=0。
+-- UOM 解锁鉴权：收到 GCS 下发的 UOM_ARM_STATUS (msg 519) 后判断是否允许解锁，
+--   1107=允许；1101/1102/1103/1104/1106=禁止并在地面站显示原因。
 
 local SCRIPT_NAME = "InOutArm5"
+
+-- ========== UOM 解锁鉴权 ==========
+local mavlink_msgs = require("MAVLink/mavlink_msgs")
+
+local UOM_MAVMSG_ID       = 519
+local UOM_FC_STATUS_ID    = 520
+local UOM_OPERATOR_ID_MSG = 521
+local UOM_MSG_MAP         = {
+    [UOM_MAVMSG_ID]       = "UOM_ARM_STATUS",
+    [UOM_FC_STATUS_ID]    = "UOM_FC_STATUS",
+    [UOM_OPERATOR_ID_MSG] = "UOM_OPERATOR_ID",
+}
+-- 重复告警的最小间隔（毫秒），避免刷屏
+local UOM_WARN_INTERVAL_MS = 5000
+-- FC→GCS 上报间隔（毫秒）
+local UOM_REPORT_MS        = 5000
+
+-- 各状态码对应的地面站提示文字
+local UOM_STATUS_MSG = {
+    [1101] = "UOM: 无人机不存在于系统中，请联系管理员",
+    [1102] = "UOM: 实名登记已注销，请到UOM官网进行实名登记",
+    [1103] = "UOM: 未实名登记，请到UOM官网进行实名登记",
+    [1104] = "UOM: 实名登记验证失败，请稍后重新请求获取状态",
+    [1106] = "UOM: 设备未激活，请先激活",
+    [1107] = "UOM: 设备已激活",
+}
+
+local uom_status_code  = 0      -- 当前状态码（持久化恢复 or 最后收到）
+local uom_allow_arm    = false  -- 当前是否允许解锁
+local uom_last_msg_ms  = nil    -- 最近一次收到 GCS 消息的时间戳（nil=本次启动后未收到）
+local uom_auth_id      = nil    -- PreArm 鉴权 ID
+local uom_last_warn_ms = 0      -- 上次向地面站发告警的时间戳
+local uom_report_ms    = 0      -- 上次向地面站发 UOM_FC_STATUS 的时间戳
+local uom_param        = nil    -- 持久化参数对象（UOM_STATUS）
+local uom_param_enable = nil    -- 持久化参数对象（UOM_ENABLE）
+local uom_enabled      = true   -- 功能开关（由参数 UOM_ENABLE 控制）
+
+-- ---------- 参数持久化初始化 ----------
+-- key=91, prefix="UOM_"
+--   UOM_ENABLE : 1=启用 UOM 解锁鉴权（默认），0=禁用（任何状态码都不拦截解锁）
+--   UOM_STATUS : 最后一次有效状态码，断电不丢失，开机即生效
+local UOM_PARAM_KEY = 91
+do
+    local ok_t  = param:add_table(UOM_PARAM_KEY, "UOM_", 2)
+    local ok_en = ok_t and param:add_param(UOM_PARAM_KEY, 1, "ENABLE", 1)
+    local ok_st = ok_t and param:add_param(UOM_PARAM_KEY, 2, "STATUS", 0)
+    if ok_en then
+        uom_param_enable = Parameter("UOM_ENABLE")
+        local v = uom_param_enable:get()
+        uom_enabled = (v == nil) or (math.floor(v + 0.5) ~= 0)
+    else
+        gcs:send_text(4, SCRIPT_NAME .. ": UOM_ENABLE param init failed")
+    end
+    if ok_st then
+        uom_param = Parameter("UOM_STATUS")
+        local saved = uom_param:get()
+        if saved ~= nil then
+            uom_status_code = math.floor(saved + 0.5)
+            uom_allow_arm   = (uom_status_code == 1107)
+        end
+    else
+        gcs:send_text(4, SCRIPT_NAME .. ": UOM_STATUS param init failed, status not persistent")
+    end
+end
+
+-- 初始化 MAVLink 接收：队列深度 5，注册 3 种消息 ID
+mavlink:init(5, 3)
+mavlink:register_rx_msgid(UOM_MAVMSG_ID)
+mavlink:register_rx_msgid(UOM_OPERATOR_ID_MSG)
+
+-- 向飞控申请一个独立的 PreArm 鉴权槽
+uom_auth_id = arming:get_aux_auth_id()
+if uom_auth_id == nil then
+    gcs:send_text(3, SCRIPT_NAME .. ": UOM auth_id 获取失败，UOM 鉴权不可用")
+end
+
+-- 向 GCS 广播当前 UOM_FC_STATUS（channel 0 和 1）
+local function uom_send_report(now)
+    local age_s = 0xFFFF
+    if uom_last_msg_ms ~= nil then
+        local diff_ms = tonumber(now - uom_last_msg_ms) or 0
+        age_s = math.min(0xFFFF, math.floor(diff_ms / 1000))
+    end
+    local msgid, payload = mavlink_msgs.encode("UOM_FC_STATUS", {
+        status_code  = uom_status_code,
+        status_age_s = age_s,
+        allow_arm    = uom_allow_arm and 1 or 0,
+        is_armed     = arming:is_armed() and 1 or 0,
+    })
+    mavlink:send_chan(0, msgid, payload)
+    mavlink:send_chan(1, msgid, payload)
+    uom_report_ms = now
+end
+
+-- 每次 update() 调用：接收 GCS→FC 消息、更新 PreArm 鉴权、定期上报 FC→GCS
+local function uom_update(now)
+    -- UOM_ENABLE=0 时直接放行，不拦截解锁
+    if not uom_enabled then
+        if uom_auth_id ~= nil then
+            arming:set_aux_auth_passed(uom_auth_id)
+        end
+        return
+    end
+
+    local currently_armed = arming:is_armed()
+
+    -- 排空接收队列，处理 UOM_ARM_STATUS (519) 和 UOM_OPERATOR_ID (521)
+    local msg, _ = mavlink:receive_chan()
+    while msg ~= nil do
+        local parsed = mavlink_msgs.decode(msg, UOM_MSG_MAP)
+        if parsed ~= nil then
+            if parsed.msgid == UOM_MAVMSG_ID then
+                -- ---- 519: 激活状态码 ----
+                local new_code  = parsed.status_code
+                local new_allow = (parsed.allow_arm == 1)
+                uom_last_msg_ms = now
+
+                if currently_armed and not new_allow then
+                    -- 飞行中收到"禁止解锁"状态 → 忽略，等降落后再生效
+                    gcs:send_text(4, "UOM: armed, status " .. new_code .. " deferred until landing")
+                else
+                    -- 未解锁，或新状态仍为允许 → 正常更新
+                    if new_code ~= uom_status_code then
+                        uom_status_code = new_code
+                        if uom_param ~= nil then
+                            uom_param:set_and_save(uom_status_code)
+                        end
+                    end
+                    uom_allow_arm = new_allow
+                end
+
+            elseif parsed.msgid == UOM_OPERATOR_ID_MSG then
+                -- ---- 521: operate_id 持久化 + 写入 RID ----
+                local op_id   = parsed.operator_id or ""
+                local op_type = parsed.operator_id_type or 0
+                -- 去掉尾部 null 字节（char[20] 可能有填充 \0）
+                op_id = op_id:match("^([^%z]*)") or ""
+                if #op_id > 0 then
+                    if opendroneid ~= nil then
+                        opendroneid:set_operator_id_from_script(op_id, op_type)
+                        gcs:send_text(6, "UOM: operator_id set: " .. op_id)
+                    else
+                        gcs:send_text(4, "UOM: opendroneid not available, operator_id not set")
+                    end
+                end
+            end
+        end
+        msg, _ = mavlink:receive_chan()
+    end
+
+    -- 定期向 GCS 上报 FC 侧状态（每 5s）
+    if (now - uom_report_ms) >= UOM_REPORT_MS then
+        uom_send_report(now)
+    end
+
+    if uom_auth_id == nil then return end
+
+    -- 解锁判断：以当前 uom_allow_arm（来自持久化或最新 GCS 消息）为准，无超时逻辑
+    if uom_allow_arm then
+        arming:set_aux_auth_passed(uom_auth_id)
+    else
+        local fail_msg
+        if uom_status_code == 0 then
+            fail_msg = "UOM: 等待激活状态，请检查网络连接"
+        else
+            fail_msg = UOM_STATUS_MSG[uom_status_code]
+                       or ("UOM: 未知状态 " .. tostring(uom_status_code) .. "，禁止解锁")
+        end
+        arming:set_aux_auth_failed(uom_auth_id, fail_msg)
+        if (now - uom_last_warn_ms) >= UOM_WARN_INTERVAL_MS then
+            gcs:send_text(3, fail_msg)
+            uom_last_warn_ms = now
+        end
+    end
+end
+-- ========== END UOM 解锁鉴权 ==========
 
 -- 俯仰通道是否在飞控/遥控器中相对「未反转」时符号相反。
 -- false：内八/外八要求俯仰在负端满偏（经典：拉杆对应 norm 为负）。
@@ -148,6 +326,9 @@ function update()
     end
 
     local now = millis()
+
+    -- UOM 解锁鉴权：接收 GCS 下发的激活状态，更新 PreArm 结果
+    uom_update(now)
     local is_throttle_low = throttle < -STICK_THRESHOLD
     -- 内八/外八的「两杆下角」需俯仰满偏（拉杆）一端；俯仰反转后 norm 符号对调，由 PITCH_REVERSED_FOR_GESTURE 选择正端或负端
     local is_pitch_for_cross = (PITCH_REVERSED_FOR_GESTURE and (pitch > STICK_THRESHOLD))
@@ -317,4 +498,4 @@ function update()
 end
 
 return update()
-
+

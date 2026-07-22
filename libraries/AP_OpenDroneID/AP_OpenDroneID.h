@@ -99,6 +99,10 @@ public:
     // Truncates to ODID_ID_SIZE (20). No-op if uas_id is null/empty.
     void set_uas_id(const char *uas_id, uint8_t id_type, uint8_t ua_type);
 
+    // Set OperatorID from a Lua script; persists to EEPROM and updates pkt_operator_id immediately.
+    // op_id: ASCII string up to 20 chars; type: MAV_ODID_OPERATOR_ID_TYPE value.
+    void set_operator_id_from_script(const char *op_id, uint8_t type);
+
     void get_persistent_params(ExpandingString &str) const;
 
     void load_UAS_ID_from_persistent_memory();
@@ -117,6 +121,18 @@ private:
     AP_Int16 _options;
     AP_Int8  _mav_port;
     AP_Int8  _can_driver;
+
+    // OperatorID persistent storage: 20-byte string packed into 5 × AP_Int32 (4 bytes each, big-endian).
+    AP_Int32 _op_id_0;   // operator_id bytes  0-3
+    AP_Int32 _op_id_1;   // operator_id bytes  4-7
+    AP_Int32 _op_id_2;   // operator_id bytes  8-11
+    AP_Int32 _op_id_3;   // operator_id bytes 12-15
+    AP_Int32 _op_id_4;   // operator_id bytes 16-19
+    AP_Int8  _op_id_type; // MAV_ODID_OPERATOR_ID_TYPE
+
+    // Load/save OperatorID from/to the AP_Int32 params above.
+    void load_operator_id_from_params();
+    void save_operator_id_to_params();
 
     char ua_type[4];
     char id_type[4];

@@ -90,6 +90,12 @@ singleton AP_Arming method get_aux_auth_id boolean uint8_t'Null
 singleton AP_Arming method set_aux_auth_passed void uint8_t'skip_check
 singleton AP_Arming method set_aux_auth_failed void uint8_t'skip_check string
 
+include AP_OpenDroneID/AP_OpenDroneID.h
+
+singleton AP_OpenDroneID rename opendroneid
+singleton AP_OpenDroneID depends AP_OPENDRONEID_ENABLED
+singleton AP_OpenDroneID method set_operator_id_from_script void string uint8_t 0 255
+
 include AP_BattMonitor/AP_BattMonitor.h
 
 include AP_BattMonitor/AP_BattMonitor_Scripting.h

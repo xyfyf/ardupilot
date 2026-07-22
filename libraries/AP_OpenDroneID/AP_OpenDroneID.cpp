@@ -79,6 +79,33 @@ const AP_Param::GroupInfo AP_OpenDroneID::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("BARO_ACC", 5, AP_OpenDroneID, _baro_accuracy, -1.0),
 
+    // @Param: OP_ID_0
+    // @DisplayName: OperatorID bytes 0-3
+    // @Description: Packed big-endian bytes 0-3 of the UOM operator_id string
+    // @User: Advanced
+    AP_GROUPINFO("OP_ID_0",  6, AP_OpenDroneID, _op_id_0, 0),
+
+    // @Param: OP_ID_1
+    // @DisplayName: OperatorID bytes 4-7
+    AP_GROUPINFO("OP_ID_1",  7, AP_OpenDroneID, _op_id_1, 0),
+
+    // @Param: OP_ID_2
+    // @DisplayName: OperatorID bytes 8-11
+    AP_GROUPINFO("OP_ID_2",  8, AP_OpenDroneID, _op_id_2, 0),
+
+    // @Param: OP_ID_3
+    // @DisplayName: OperatorID bytes 12-15
+    AP_GROUPINFO("OP_ID_3",  9, AP_OpenDroneID, _op_id_3, 0),
+
+    // @Param: OP_ID_4
+    // @DisplayName: OperatorID bytes 16-19
+    AP_GROUPINFO("OP_ID_4", 10, AP_OpenDroneID, _op_id_4, 0),
+
+    // @Param: OP_TYPE
+    // @DisplayName: OperatorID type
+    // @Description: MAV_ODID_OPERATOR_ID_TYPE value (0=Undefined, 1=CAA registration)
+    AP_GROUPINFO("OP_TYPE", 11, AP_OpenDroneID, _op_id_type, 0),
+
     AP_GROUPEND
 };
 
@@ -112,9 +139,77 @@ void AP_OpenDroneID::init()
     }
 
     load_UAS_ID_from_persistent_memory();
+    load_operator_id_from_params();
     _chan = mavlink_channel_t(gcs().get_channel_from_port_number(_mav_port));
     _initialised = true;
 }
+
+// ---------- OperatorID pack/unpack helpers ----------
+
+static inline int32_t pack4(const uint8_t *src)
+{
+    return (int32_t(src[0]) << 24) | (int32_t(src[1]) << 16) |
+           (int32_t(src[2]) <<  8) |  int32_t(src[3]);
+}
+
+static inline void unpack4(int32_t v, uint8_t *dst)
+{
+    dst[0] = uint8_t((uint32_t(v) >> 24) & 0xFF);
+    dst[1] = uint8_t((uint32_t(v) >> 16) & 0xFF);
+    dst[2] = uint8_t((uint32_t(v) >>  8) & 0xFF);
+    dst[3] = uint8_t( uint32_t(v)        & 0xFF);
+}
+
+void AP_OpenDroneID::load_operator_id_from_params()
+{
+    const int32_t v0 = _op_id_0.get();
+    const int32_t v1 = _op_id_1.get();
+    const int32_t v2 = _op_id_2.get();
+    const int32_t v3 = _op_id_3.get();
+    const int32_t v4 = _op_id_4.get();
+    if (v0 == 0 && v1 == 0 && v2 == 0 && v3 == 0 && v4 == 0) {
+        return;
+    }
+    uint8_t buf[ODID_ID_SIZE] = {};
+    unpack4(v0, buf +  0);
+    unpack4(v1, buf +  4);
+    unpack4(v2, buf +  8);
+    unpack4(v3, buf + 12);
+    unpack4(v4, buf + 16);
+    WITH_SEMAPHORE(_sem);
+    pkt_operator_id.target_system    = mavlink_system.sysid;
+    pkt_operator_id.target_component = MAV_COMP_ID_AUTOPILOT1;
+    pkt_operator_id.operator_id_type = (uint8_t)_op_id_type.get();
+    memcpy(pkt_operator_id.operator_id, buf, ODID_ID_SIZE);
+}
+
+void AP_OpenDroneID::save_operator_id_to_params()
+{
+    uint8_t buf[ODID_ID_SIZE] = {};
+    memcpy(buf, pkt_operator_id.operator_id, ODID_ID_SIZE);
+    _op_id_0.set_and_save(pack4(buf +  0));
+    _op_id_1.set_and_save(pack4(buf +  4));
+    _op_id_2.set_and_save(pack4(buf +  8));
+    _op_id_3.set_and_save(pack4(buf + 12));
+    _op_id_4.set_and_save(pack4(buf + 16));
+    _op_id_type.set_and_save((int8_t)pkt_operator_id.operator_id_type);
+}
+
+void AP_OpenDroneID::set_operator_id_from_script(const char *op_id, uint8_t type)
+{
+    if (op_id == nullptr || op_id[0] == '\0') {
+        return;
+    }
+    WITH_SEMAPHORE(_sem);
+    pkt_operator_id.target_system    = mavlink_system.sysid;
+    pkt_operator_id.target_component = MAV_COMP_ID_AUTOPILOT1;
+    pkt_operator_id.operator_id_type = type;
+    memset(pkt_operator_id.operator_id, 0, sizeof(pkt_operator_id.operator_id));
+    strncpy(pkt_operator_id.operator_id, op_id, sizeof(pkt_operator_id.operator_id) - 1);
+    save_operator_id_to_params();
+}
+
+// ---------- end OperatorID helpers ----------
 
 void AP_OpenDroneID::load_UAS_ID_from_persistent_memory()
 {
@@ -851,6 +946,12 @@ void AP_OpenDroneID::clear_rid_config_data()
     // Clear runtime OpenDroneID payloads seen by EFT_RID_CONFIG_STATUS.
     memset(&pkt_basic_id, 0, sizeof(pkt_basic_id));
     memset(&pkt_operator_id, 0, sizeof(pkt_operator_id));
+    _op_id_0.set_and_save(0);
+    _op_id_1.set_and_save(0);
+    _op_id_2.set_and_save(0);
+    _op_id_3.set_and_save(0);
+    _op_id_4.set_and_save(0);
+    _op_id_type.set_and_save(0);
     memset(&pkt_self_id, 0, sizeof(pkt_self_id));
     memset(&pkt_system, 0, sizeof(pkt_system));
     memset(&pkt_location, 0, sizeof(pkt_location));
@@ -961,6 +1062,7 @@ void AP_OpenDroneID::handle_msg(mavlink_channel_t chan, const mavlink_message_t 
     // accept other messages from the GCS
     case MAVLINK_MSG_ID_OPEN_DRONE_ID_OPERATOR_ID:
         mavlink_msg_open_drone_id_operator_id_decode(&msg, &pkt_operator_id);
+        save_operator_id_to_params();
         break;
     case MAVLINK_MSG_ID_OPEN_DRONE_ID_SELF_ID:
         mavlink_msg_open_drone_id_self_id_decode(&msg, &pkt_self_id);
