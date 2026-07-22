@@ -95,6 +95,10 @@ public:
 
     void set_basic_id();
 
+    // Set BasicID UAS ID from an ASCII string (e.g. Frame SN at boot).
+    // Truncates to ODID_ID_SIZE (20). No-op if uas_id is null/empty.
+    void set_uas_id(const char *uas_id, uint8_t id_type, uint8_t ua_type);
+
     void get_persistent_params(ExpandingString &str) const;
 
     void load_UAS_ID_from_persistent_memory();
@@ -114,8 +118,8 @@ private:
     AP_Int8  _mav_port;
     AP_Int8  _can_driver;
 
-    char ua_type[3];
-    char id_type[3];
+    char ua_type[4];
+    char id_type[4];
     size_t id_len;
     char id_str[21];
     bool bootloader_flashed;

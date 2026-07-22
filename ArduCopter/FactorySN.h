@@ -54,6 +54,10 @@ public:
     // Send each configured SN to all GCS connections via STATUSTEXT.
     void send_banner() const;
 
+    // Decode SN_FRM1..7 into a NUL-terminated ASCII string.
+    // Returns true if at least one character was produced.
+    bool get_frame_sn(char *dest, size_t dest_size) const;
+
 private:
     enum class Group : uint8_t {
         PRODUCT_MODEL = 0,

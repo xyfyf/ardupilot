@@ -99,6 +99,10 @@ AP_OpenDroneID::AP_OpenDroneID()
 #endif
     _singleton = this;
     AP_Param::setup_object_defaults(this, var_info);
+    id_len = 0;
+    id_str[0] = '\0';
+    id_type[0] = '\0';
+    ua_type[0] = '\0';
 }
 
 void AP_OpenDroneID::init()
@@ -114,6 +118,10 @@ void AP_OpenDroneID::init()
 
 void AP_OpenDroneID::load_UAS_ID_from_persistent_memory()
 {
+    // Prefer an ID already supplied at boot (e.g. Frame SN from FactorySN).
+    if (id_len > 0) {
+        return;
+    }
     id_len = sizeof(id_str);
     size_t id_type_len = sizeof(id_type);
     size_t ua_type_len = sizeof(ua_type);
@@ -128,6 +136,31 @@ void AP_OpenDroneID::load_UAS_ID_from_persistent_memory()
     } else {
         id_len = 0;
     }
+}
+
+void AP_OpenDroneID::set_uas_id(const char *uas_id, uint8_t id_type_v, uint8_t ua_type_v)
+{
+    if (uas_id == nullptr || uas_id[0] == '\0') {
+        return;
+    }
+
+    // ODID BasicID.uas_id is fixed 20 bytes; keep a trailing NUL in id_str.
+    strncpy(id_str, uas_id, ODID_ID_SIZE);
+    id_str[ODID_ID_SIZE] = '\0';
+    id_len = strlen(id_str);
+
+    snprintf(id_type, sizeof(id_type), "%u", (unsigned)id_type_v);
+    snprintf(ua_type, sizeof(ua_type), "%u", (unsigned)ua_type_v);
+
+    WITH_SEMAPHORE(_sem);
+    pkt_basic_id.target_system = gcs().sysid_this_mav();
+    pkt_basic_id.target_component = MAV_COMP_ID_ODID_TXRX_1;
+    pkt_basic_id.id_type = id_type_v;
+    pkt_basic_id.ua_type = ua_type_v;
+    memset(pkt_basic_id.uas_id, 0, sizeof(pkt_basic_id.uas_id));
+    memcpy(pkt_basic_id.uas_id, id_str, id_len);
+
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OpenDroneID: UAS_ID from FrameSN: %s", id_str);
 }
 
 void AP_OpenDroneID::set_basic_id() {

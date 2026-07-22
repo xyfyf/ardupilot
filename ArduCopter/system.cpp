@@ -40,6 +40,19 @@ void Copter::init_ardupilot()
     // Print factory SNs to GCS
     g2.factory_sn.send_banner();
 
+#if AP_OPENDRONEID_ENABLED
+    // Use Frame SN (SN_FRM1..7) as OpenDroneID BasicID UAS ID at boot.
+    // Must run before AP_OpenDroneID::init() so persistent DID_UAS_ID does not override.
+    {
+        char frame_sn[FactorySN::MAX_CHARS + 1];
+        if (g2.factory_sn.get_frame_sn(frame_sn, sizeof(frame_sn))) {
+            opendroneid.set_uas_id(frame_sn,
+                                   MAV_ODID_ID_TYPE_SERIAL_NUMBER,
+                                   MAV_ODID_UA_TYPE_HELICOPTER_OR_MULTIROTOR);
+        }
+    }
+#endif
+
 #if OSD_ENABLED
     osd.init();
 #endif
