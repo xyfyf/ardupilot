@@ -138,7 +138,7 @@ local function uom_update(now)
             if parsed.msgid == UOM_MAVMSG_ID then
                 -- ---- 519: 激活状态码 ----
                 local new_code  = parsed.status_code
-                local new_allow = (parsed.allow_arm == 1)
+                local new_allow = (new_code == 1107)
                 uom_last_msg_ms = now
 
                 if currently_armed and not new_allow then

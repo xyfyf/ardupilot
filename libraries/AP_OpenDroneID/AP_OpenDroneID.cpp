@@ -209,6 +209,14 @@ void AP_OpenDroneID::set_operator_id_from_script(const char *op_id, uint8_t type
     save_operator_id_to_params();
 }
 
+bool AP_OpenDroneID::transmitter_healthy(uint32_t max_age_ms) const
+{
+    if (last_arm_status_ms == 0) {
+        return false;
+    }
+    return (AP_HAL::millis() - last_arm_status_ms) <= max_age_ms;
+}
+
 // ---------- end OperatorID helpers ----------
 
 void AP_OpenDroneID::load_UAS_ID_from_persistent_memory()

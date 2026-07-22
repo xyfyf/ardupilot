@@ -95,6 +95,7 @@ include AP_OpenDroneID/AP_OpenDroneID.h
 singleton AP_OpenDroneID rename opendroneid
 singleton AP_OpenDroneID depends AP_OPENDRONEID_ENABLED
 singleton AP_OpenDroneID method set_operator_id_from_script void string uint8_t 0 255
+singleton AP_OpenDroneID method transmitter_healthy boolean uint32_t'skip_check
 
 include AP_BattMonitor/AP_BattMonitor.h
 

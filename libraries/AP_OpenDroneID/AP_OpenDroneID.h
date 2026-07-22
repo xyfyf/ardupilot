@@ -103,6 +103,9 @@ public:
     // op_id: ASCII string up to 20 chars; type: MAV_ODID_OPERATOR_ID_TYPE value.
     void set_operator_id_from_script(const char *op_id, uint8_t type);
 
+    // True if OPEN_DRONE_ID_ARM_STATUS was received on DID_MAVPORT within max_age_ms.
+    bool transmitter_healthy(uint32_t max_age_ms) const;
+
     void get_persistent_params(ExpandingString &str) const;
 
     void load_UAS_ID_from_persistent_memory();
