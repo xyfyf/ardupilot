@@ -11,128 +11,6 @@
 
 extern const AP_HAL::HAL& hal;
 
-#if defined(HAL_EFT_CAAC_BATT_VOLT_CALIB) && HAL_EFT_CAAC_BATT_VOLT_CALIB
-/*
- * EFT_CAAC 板载分压采样非线性校正表
- * 输入：经 VOLT_MULT 换算后的软件实测电压 (V)
- * 输出：与标准表计一致的真实电压 (V)
- * 校准数据：12.3~80V 共 69 点（2026 实测，全范围逐伏校准）
- */
-struct EFT_CAAC_BattVoltLUT {
-    float measured_v;
-    float actual_v;
-};
-
-static const EFT_CAAC_BattVoltLUT eft_caac_batt_volt_lut[] = {
-    {11.88f, 12.3f},
-    {11.98f, 12.4f},
-    {12.60f, 13.0f},
-    {13.64f, 14.0f},
-    {14.67f, 15.0f},
-    {15.69f, 16.0f},
-    {16.72f, 17.0f},
-    {17.73f, 18.0f},
-    {18.75f, 19.0f},
-    {19.74f, 20.0f},
-    {20.76f, 21.0f},
-    {21.78f, 22.0f},
-    {22.78f, 23.0f},
-    {23.81f, 24.0f},
-    {24.83f, 25.0f},
-    {25.85f, 26.0f},
-    {26.87f, 27.0f},
-    {27.88f, 28.0f},
-    {28.91f, 29.0f},
-    {29.92f, 30.0f},
-    {30.94f, 31.0f},
-    {31.95f, 32.0f},
-    {32.95f, 33.0f},
-    {33.96f, 34.0f},
-    {34.99f, 35.0f},
-    {36.00f, 36.0f},
-    {37.03f, 37.0f},
-    {38.04f, 38.0f},
-    {39.09f, 39.0f},
-    {40.10f, 40.0f},
-    {41.13f, 41.0f},
-    {42.14f, 42.0f},
-    {43.16f, 43.0f},
-    {44.19f, 44.0f},
-    {45.18f, 45.0f},
-    {46.20f, 46.0f},
-    {47.22f, 47.0f},
-    {48.24f, 48.0f},
-    {49.26f, 49.0f},
-    {50.28f, 50.0f},
-    {51.35f, 51.0f},
-    {52.36f, 52.0f},
-    {53.39f, 53.0f},
-    {54.41f, 54.0f},
-    {55.43f, 55.0f},
-    {56.45f, 56.0f},
-    {57.47f, 57.0f},
-    {58.47f, 58.0f},
-    {59.49f, 59.0f},
-    {60.51f, 60.0f},
-    {61.53f, 61.0f},
-    {62.56f, 62.0f},
-    {63.58f, 63.0f},
-    {64.63f, 64.0f},
-    {65.65f, 65.0f},
-    {66.68f, 66.0f},
-    {67.69f, 67.0f},
-    {68.72f, 68.0f},
-    {69.74f, 69.0f},
-    {70.74f, 70.0f},
-    {71.76f, 71.0f},
-    {72.79f, 72.0f},
-    {73.81f, 73.0f},
-    {74.85f, 74.0f},
-    {75.87f, 75.0f},
-    {76.89f, 76.0f},
-    {77.92f, 77.0f},
-    {78.94f, 78.0f},
-    {79.97f, 79.0f},
-    {81.00f, 80.0f},
-};
-
-static float eft_caac_correct_battery_voltage(float measured_v)
-{
-    const uint8_t lut_size = ARRAY_SIZE(eft_caac_batt_volt_lut);
-
-    if (measured_v <= eft_caac_batt_volt_lut[0].measured_v) {
-        return linear_interpolate(
-            eft_caac_batt_volt_lut[0].actual_v,
-            eft_caac_batt_volt_lut[1].actual_v,
-            measured_v,
-            eft_caac_batt_volt_lut[0].measured_v,
-            eft_caac_batt_volt_lut[1].measured_v);
-    }
-
-    if (measured_v >= eft_caac_batt_volt_lut[lut_size - 1].measured_v) {
-        return linear_interpolate(
-            eft_caac_batt_volt_lut[lut_size - 2].actual_v,
-            eft_caac_batt_volt_lut[lut_size - 1].actual_v,
-            measured_v,
-            eft_caac_batt_volt_lut[lut_size - 2].measured_v,
-            eft_caac_batt_volt_lut[lut_size - 1].measured_v);
-    }
-
-    for (uint8_t i = 0; i < lut_size - 1; i++) {
-        if (measured_v <= eft_caac_batt_volt_lut[i + 1].measured_v) {
-            return linear_interpolate(
-                eft_caac_batt_volt_lut[i].actual_v,
-                eft_caac_batt_volt_lut[i + 1].actual_v,
-                measured_v,
-                eft_caac_batt_volt_lut[i].measured_v,
-                eft_caac_batt_volt_lut[i + 1].measured_v);
-        }
-    }
-
-    return measured_v;
-}
-#endif  // HAL_EFT_CAAC_BATT_VOLT_CALIB
-
 const AP_Param::GroupInfo AP_BattMonitor_Analog::var_info[] = {
 
     // @Param: VOLT_PIN
@@ -236,9 +114,6 @@ AP_BattMonitor_Analog::read()
 
         // get voltage
         _state.voltage = (_volt_pin_analog_source->voltage_average() - _volt_offset) * _volt_multiplier;
-#if defined(HAL_EFT_CAAC_BATT_VOLT_CALIB) && HAL_EFT_CAAC_BATT_VOLT_CALIB
-        _state.voltage = eft_caac_correct_battery_voltage(_state.voltage);
-#endif
     } else {
         _state.healthy = 1;
         _state.voltage = 0.0f;

@@ -1,11 +1,14 @@
 --[[
-  CAN 雷达自动检测 + RC7 飞行中避障切换 一体脚本 v6.2
+  CAN 雷达自动检测 + Scripting1 飞行中避障切换 一体脚本 v6.4
   =====================================================================
   合并自：
     - 1auto_detect_radar5.1.lua  （DroneCAN 雷达识别 + 参数自适应 + ARMING_CHECK 管理）
-    - 0radar_avoid_rc7_toggle3.0.lua（RC7 飞行中切换 AVOID_ENABLE）
+    - 0radar_avoid_rc7_toggle3.0.lua（RC 飞行中切换 AVOID_ENABLE）
 
-  v6.1 修复「第一次上电不行、第二次才正常」
+  v6.4 任意 Scripting1 通道 PWM>1500 即开避障
+  --------------------------------------------
+    扫描 RC1~RC16，任一 RCx_OPTION=300 且 PWM>1500 → AVOID_ENABLE=7；
+    否则 AVOID_ENABLE=1。不限飞行模式，不限具体通道号（RC7/RC8 等均可）。
   -----------------------------------------
   根因（v6.0）：
     判定 radar_ok 必须同时满足 NodeStatus + RNGFND Good。
@@ -34,9 +37,9 @@
     全程无任何雷达迹象（无节点、无 Good）:
       保持 RNGFND1_TYPE=24, 修改 PRX1_TYPE=0, AVOID_ENABLE=1（屏蔽报错）
 
-  Phase 2 - 飞行中 RC7 切换（radar_ok 后启用）
-    仅 Loiter 模式且 RC7 > 1500 → AVOID_ENABLE=7
-    定高及其他模式、或 RC7 ≤ 1500 → AVOID_ENABLE=1
+  Phase 2 - 飞行中 Scripting1 切换（radar_ok 后启用）
+    任一 RCx_OPTION=300 的通道 PWM > 1500 → AVOID_ENABLE=7
+    全部 Scripting1 通道 PWM ≤ 1500 → AVOID_ENABLE=1
 
   依赖
   ----
@@ -54,6 +57,7 @@ local CONFIRM_DELAY_MS   = 2000    -- Good 持续多久才认定稳定
 local INIT_DELAY_MS      = 1000    -- 脚本启动后首次检测延迟
 
 local SCRIPTING1_FN      = 300     -- RC 切换功能：SCRIPTING_1（RCx_OPTION=300）
+local AVOID_PWM_ON       = 1500    -- 任一 Scripting1 通道 PWM 超过此值即开避障
 
 ------------------------------------------------------------------
 -- 常量
@@ -73,8 +77,6 @@ local RNGFND_STATUS_GOOD = 4       -- enum RangeFinder::Status::Good
 local NODESTATUS_ID        = 341
 local NODESTATUS_SIGNATURE = uint64_t(0x0F0868D0, 0xC1A7C6F1)
 
-local MODE_LOITER  = 5
-
 ------------------------------------------------------------------
 -- 参数对象
 ------------------------------------------------------------------
@@ -82,6 +84,11 @@ local rngfnd_param       = Parameter("RNGFND1_TYPE")
 local prx_param          = Parameter("PRX1_TYPE")
 local avoid_param        = Parameter("AVOID_ENABLE")
 local arming_check_param = Parameter("ARMING_CHECK")
+
+local rc_option_params = {}
+for ch = 1, 16 do
+    rc_option_params[ch] = Parameter(string.format("RC%d_OPTION", ch))
+end
 
 ------------------------------------------------------------------
 -- DroneCAN NodeStatus 订阅（CAN1=driver0, CAN2=driver1）
@@ -318,17 +325,27 @@ end
 ------------------------------------------------------------------
 -- Phase 2：Scripting1(300) 切换 AVOID_ENABLE
 ------------------------------------------------------------------
--- 雷达避障已打开：定点模式 + SCRIPTING_1 通道拨高
+-- 任一 RCx_OPTION=300 的通道 PWM > AVOID_PWM_ON 即开避障
 local function is_radar_rc_on()
-    if vehicle:get_mode() ~= MODE_LOITER or not rc:has_valid_input() then
+    if not rc:has_valid_input() then
         return false
     end
-    return rc:get_aux_cached(SCRIPTING1_FN) == 1
+    for ch = 1, 16 do
+        local opt = rc_option_params[ch]:get()
+        if opt ~= nil and math.floor(opt) == SCRIPTING1_FN then
+            local pwm = rc:get_pwm(ch)
+            if pwm and pwm > AVOID_PWM_ON then
+                return true
+            end
+        end
+    end
+    return false
 end
 
 local function apply_avoid(want_on)
     local v = want_on and AVOID_ON or AVOID_OFF
-    if avoid_param:get() == v then
+    local cur = avoid_param:get()
+    if cur ~= nil and math.floor(cur) == v then
         return true
     end
     return avoid_param:set(v)
