@@ -11,6 +11,32 @@
 
 extern const AP_HAL::HAL& hal;
 
+#if defined(HAL_EFT_CAAC_BATT_VOLT_CALIB) && HAL_EFT_CAAC_BATT_VOLT_CALIB
+/*
+ * EFT_CAAC 分压采样分段补偿（实测偏低）
+ * 12-20V +0.44, 20-30V +0.42, 30-40V +0.54, 40-50V +0.60, 55-60V +0.50
+ * 50-55V 在 0.60~0.50 间线性过渡
+ */
+static float eft_caac_correct_battery_voltage(float measured_v)
+{
+    float offset = 0.0f;
+    if (measured_v >= 55.0f) {
+        offset = 0.50f;
+    } else if (measured_v >= 50.0f) {
+        offset = linear_interpolate(0.60f, 0.50f, measured_v, 50.0f, 55.0f);
+    } else if (measured_v >= 40.0f) {
+        offset = 0.60f;
+    } else if (measured_v >= 30.0f) {
+        offset = 0.54f;
+    } else if (measured_v >= 20.0f) {
+        offset = 0.42f;
+    } else if (measured_v >= 12.0f) {
+        offset = 0.44f;
+    }
+    return measured_v + offset;
+}
+#endif  // HAL_EFT_CAAC_BATT_VOLT_CALIB
+
 const AP_Param::GroupInfo AP_BattMonitor_Analog::var_info[] = {
 
     // @Param: VOLT_PIN
@@ -114,6 +140,9 @@ AP_BattMonitor_Analog::read()
 
         // get voltage
         _state.voltage = (_volt_pin_analog_source->voltage_average() - _volt_offset) * _volt_multiplier;
+#if defined(HAL_EFT_CAAC_BATT_VOLT_CALIB) && HAL_EFT_CAAC_BATT_VOLT_CALIB
+        _state.voltage = eft_caac_correct_battery_voltage(_state.voltage);
+#endif
     } else {
         _state.healthy = 1;
         _state.voltage = 0.0f;
