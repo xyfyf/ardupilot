@@ -416,10 +416,11 @@ private:
         uint8_t terrain             : 1; // true if the missing terrain data failsafe has occurred
         uint8_t adsb                : 1; // true if an adsb related failsafe has occurred
         uint8_t deadreckon          : 1; // true if a dead reckoning failsafe has triggered
+        uint8_t odid                : 1; // true if an ODID (RID 106/107) failsafe has occurred
     } failsafe;
 
     bool any_failsafe_triggered() const {
-        return failsafe.radio || battery.has_failsafed() || failsafe.gcs || failsafe.ekf || failsafe.terrain || failsafe.adsb || failsafe.deadreckon;
+        return failsafe.radio || battery.has_failsafed() || failsafe.gcs || failsafe.ekf || failsafe.terrain || failsafe.adsb || failsafe.deadreckon || failsafe.odid;
     }
 
     // dead reckoning state
@@ -811,6 +812,7 @@ private:
     void handle_battery_failsafe(const char* type_str, const int8_t action);
     void failsafe_gcs_check();
     void failsafe_gcs_on_event(void);
+    void failsafe_odid_check();
     void failsafe_gcs_off_event(void);
     void failsafe_terrain_check();
     void failsafe_terrain_set_status(bool data_ok);

@@ -7,7 +7,7 @@
     超过 HB_TIMEOUT_MS 未收到 → 地面站报警并禁止解锁。
 
   参数 (地面站搜索 RIDHB_):
-    RIDHB_ENABLE : 0=关闭检测, 1=开启(默认)
+    RIDHB_ENABLE : 0=关闭(12918 转发给地面站时改为无错误、不拦解锁), 1=开启(默认)
 
   相关飞控参数:
     DID_ENABLE=1, DID_MAVPORT=2（RID 接在 SERIAL2 / UART4）
@@ -17,7 +17,7 @@
 
 local SCRIPT_NAME      = "RID_HB"
 local RUN_INTERVAL_MS  = 1000    -- 1 Hz 检查
-local STARTUP_DELAY_MS = 10000   -- 等待 RID 模块上电（10s）
+local STARTUP_DELAY_MS = 10000   -- 等待 RID 模块上电（10s，仅开启时）
 local HB_TIMEOUT_MS    = 5000    -- 超过 5s 未收到 ARM_STATUS 视为 RID 丢失
 local WARN_INTERVAL_MS = 5000    -- 重复告警最小间隔（ms）
 
@@ -31,22 +31,32 @@ local ridhb_enable = Parameter("RIDHB_ENABLE")
 local rid_auth_id  = nil
 local last_warn_ms = 0
 
-rid_auth_id = arming:get_aux_auth_id()
-if rid_auth_id == nil then
-    gcs:send_text(3, SCRIPT_NAME .. ": 鉴权槽获取失败，无法禁止解锁")
-end
-
 local function script_enabled()
     return (ridhb_enable:get() or 0) >= 1
+end
+
+local function release_auth()
+    if rid_auth_id ~= nil then
+        arming:set_aux_auth_passed(rid_auth_id)
+    end
+end
+
+rid_auth_id = arming:get_aux_auth_id()
+if rid_auth_id == nil then
+    if script_enabled() then
+        gcs:send_text(3, SCRIPT_NAME .. ": 鉴权槽获取失败，无法禁止解锁")
+    end
+else
+    if not script_enabled() then
+        release_auth()
+    end
 end
 
 function update()
     local now = millis()
 
     if not script_enabled() then
-        if rid_auth_id ~= nil then
-            arming:set_aux_auth_passed(rid_auth_id)
-        end
+        release_auth()
         return update, RUN_INTERVAL_MS
     end
 
@@ -69,4 +79,7 @@ function update()
     return update, RUN_INTERVAL_MS
 end
 
-return update, STARTUP_DELAY_MS
+if script_enabled() then
+    return update, STARTUP_DELAY_MS
+end
+return update, RUN_INTERVAL_MS

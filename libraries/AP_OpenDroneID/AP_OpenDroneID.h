@@ -90,8 +90,8 @@ public:
 
     void set_arm_status(mavlink_open_drone_id_arm_status_t &status);
 
-    bool has_error_code(const char* codes);       // locks _sem, call from outside
-    bool has_error_code_nolock(const char* codes) const; // no lock, caller must hold _sem
+    bool has_error_code(const char* code);       // locks _sem; true if error has numeric token
+    bool has_error_code_nolock(const char* code) const; // no lock; e.g. "106" not matched by "1106"
 
     void set_basic_id();
 
@@ -105,6 +105,10 @@ public:
 
     // True if OPEN_DRONE_ID_ARM_STATUS was received on DID_MAVPORT within max_age_ms.
     bool transmitter_healthy(uint32_t max_age_ms) const;
+
+    // RIDHB_ENABLE (scripting): 0 = treat RID arm checks as off.
+    // Missing param (script not loaded) => true.
+    bool rid_heartbeat_enabled() const;
 
     void get_persistent_params(ExpandingString &str) const;
 

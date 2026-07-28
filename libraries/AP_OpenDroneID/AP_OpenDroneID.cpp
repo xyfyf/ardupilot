@@ -42,6 +42,7 @@
 #include <AP_DroneCAN/AP_DroneCAN.h>
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 #include <GCS_MAVLink/GCS.h>
 
 extern const AP_HAL::HAL &hal;
@@ -217,6 +218,17 @@ bool AP_OpenDroneID::transmitter_healthy(uint32_t max_age_ms) const
     return (AP_HAL::millis() - last_arm_status_ms) <= max_age_ms;
 }
 
+bool AP_OpenDroneID::rid_heartbeat_enabled() const
+{
+    // RIDHB_ENABLE is created by rid_heartbeat_check.lua (AP_Float scripting param).
+    enum ap_var_type ptype;
+    const AP_Param *vp = AP_Param::find("RIDHB_ENABLE", &ptype);
+    if (vp == nullptr || ptype != AP_PARAM_FLOAT) {
+        return true;
+    }
+    return ((const AP_Float *)vp)->get() >= 1.0f;
+}
+
 // ---------- end OperatorID helpers ----------
 
 void AP_OpenDroneID::load_UAS_ID_from_persistent_memory()
@@ -297,6 +309,22 @@ void AP_OpenDroneID::get_persistent_params(ExpandingString &str) const
 // Except in the case of an in-flight reboot
 bool AP_OpenDroneID::pre_arm_check_nolock(char* failmsg, uint8_t failmsg_len) const
 {
+    // RIDHB_ENABLE=0: ignore RID ARM_STATUS errors, do not block arming
+    if (!rid_heartbeat_enabled()) {
+        return true;
+    }
+
+    // 106/107 (no-fly): block arm even when DID_OPTIONS EnforceArming is off
+    if (_enable != 0 &&
+        (has_error_code_nolock("106") || has_error_code_nolock("107"))) {
+        if (arm_status.error[0] != '\0') {
+            strncpy(failmsg, arm_status.error, failmsg_len);
+        } else {
+            strncpy(failmsg, "RID error 106/107", failmsg_len);
+        }
+        return false;
+    }
+
     if (!option_enabled(Options::EnforceArming)) {
         return true;
     }
@@ -332,10 +360,8 @@ bool AP_OpenDroneID::pre_arm_check_nolock(char* failmsg, uint8_t failmsg_len) co
     }
 
     if (arm_status.status != MAV_ODID_ARM_STATUS_GOOD_TO_ARM) {
-        if (has_error_code_nolock("1234567")) {
-            strncpy(failmsg, arm_status.error, failmsg_len);
-            return false;
-        }
+        strncpy(failmsg, arm_status.error, failmsg_len);
+        return false;
     }
 
     return true;
@@ -1034,6 +1060,11 @@ void AP_OpenDroneID::handle_rid_config_request(mavlink_channel_t chan, const mav
     reply.operator_altitude_geo = pkt_system.operator_altitude_geo;
     reply.arm_status = arm_status.status;
     strncpy(reply.arm_error, arm_status.error, sizeof(reply.arm_error) - 1);
+    if (!rid_heartbeat_enabled()) {
+        // RIDHB_ENABLE=0: report as no-error to GCS
+        reply.arm_status = MAV_ODID_ARM_STATUS_GOOD_TO_ARM;
+        memset(reply.arm_error, 0, sizeof(reply.arm_error));
+    }
     reply.arm_error[sizeof(reply.arm_error) - 1] = '\0';
 
     if (last_arm_status_ms != 0) {
@@ -1064,6 +1095,13 @@ void AP_OpenDroneID::handle_msg(mavlink_channel_t chan, const mavlink_message_t 
         if (chan == _chan) {
             mavlink_msg_open_drone_id_arm_status_decode(&msg, &arm_status);
             last_arm_status_ms = AP_HAL::millis();
+            // RIDHB_ENABLE=0: still notify GCS with 12918, but as no-error
+            if (!rid_heartbeat_enabled()) {
+                mavlink_open_drone_id_arm_status_t clean {};
+                clean.status = MAV_ODID_ARM_STATUS_GOOD_TO_ARM;
+                gcs().send_to_active_channels(MAVLINK_MSG_ID_OPEN_DRONE_ID_ARM_STATUS,
+                                              (const char *)&clean);
+            }
         }
         break;
     }
@@ -1102,23 +1140,32 @@ void AP_OpenDroneID::handle_msg(mavlink_channel_t chan, const mavlink_message_t 
     }
 }
 
-bool AP_OpenDroneID::has_error_code_nolock(const char* codes) const
+// True if arm_status.error contains numeric token `code` (e.g. "106"),
+// not as part of a longer number (so "1106" does not match "106").
+bool AP_OpenDroneID::has_error_code_nolock(const char* code) const
 {
+    if (code == nullptr || code[0] == '\0') {
+        return false;
+    }
     if (arm_status.status == MAV_ODID_ARM_STATUS_GOOD_TO_ARM) {
         return false;
     }
-    for (uint8_t i = 0; codes[i] != '\0'; i++) {
-        if (strchr(arm_status.error, codes[i]) != nullptr) {
+
+    const size_t n = strlen(code);
+    for (const char *p = arm_status.error; (p = strstr(p, code)) != nullptr; p++) {
+        const bool left_ok = (p == arm_status.error) || !isdigit((unsigned char)p[-1]);
+        const bool right_ok = !isdigit((unsigned char)p[n]);
+        if (left_ok && right_ok) {
             return true;
         }
     }
     return false;
 }
 
-bool AP_OpenDroneID::has_error_code(const char* codes)
+bool AP_OpenDroneID::has_error_code(const char* code)
 {
     WITH_SEMAPHORE(_sem);
-    return has_error_code_nolock(codes);
+    return has_error_code_nolock(code);
 }
 
 // singleton instance

@@ -733,6 +733,11 @@ void Copter::three_hz_loop()
     // check for deadreckoning failsafe
     failsafe_deadreckon_check();
 
+#if AP_OPENDRONEID_ENABLED
+    // RID error 106/107: RTL while present, Loiter when cleared
+    failsafe_odid_check();
+#endif
+
 #if AP_RC_TRANSMITTER_TUNING_ENABLED
     //update transmitter based in flight tuning
     tuning();

@@ -120,7 +120,13 @@ end
 
 -- 每次 update() 调用：接收 GCS→FC 消息、更新 PreArm 鉴权、定期上报 FC→GCS
 local function uom_update(now)
-    -- UOM_ENABLE=0 时直接放行，不拦截解锁
+    -- 每周期重读 UOM_ENABLE，运行中改为 0 即可立即放行（与 UOM_STATUS 无关）
+    if uom_param_enable ~= nil then
+        local v = uom_param_enable:get()
+        uom_enabled = (v == nil) or (math.floor(v + 0.5) ~= 0)
+    end
+
+    -- UOM_ENABLE=0：直接放行解锁，不看 UOM_STATUS
     if not uom_enabled then
         if uom_auth_id ~= nil then
             arming:set_aux_auth_passed(uom_auth_id)

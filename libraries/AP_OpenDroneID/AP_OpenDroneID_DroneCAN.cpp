@@ -220,7 +220,13 @@ static void handle_arm_status(AP_DroneCAN *ap_dronecan, const CanardRxTransfer& 
     AP::opendroneid().set_arm_status(status);
 
     // Push DroneCAN Arm Message to GCS
-    gcs().send_to_active_channels(MAVLINK_MSG_ID_OPEN_DRONE_ID_ARM_STATUS,(const char*)&status);
+    mavlink_open_drone_id_arm_status_t to_gcs = status;
+    if (!AP::opendroneid().rid_heartbeat_enabled()) {
+        // RIDHB_ENABLE=0: send as no-error
+        to_gcs.status = MAV_ODID_ARM_STATUS_GOOD_TO_ARM;
+        memset(to_gcs.error, 0, sizeof(to_gcs.error));
+    }
+    gcs().send_to_active_channels(MAVLINK_MSG_ID_OPEN_DRONE_ID_ARM_STATUS,(const char*)&to_gcs);
 }
 
 // copy arm status for DroneCAN

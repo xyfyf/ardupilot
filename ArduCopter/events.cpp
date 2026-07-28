@@ -512,3 +512,36 @@ void Copter::do_failsafe_action(FailsafeAction action, ModeReason reason){
 #endif
 }
 
+#if AP_OPENDRONEID_ENABLED
+// failsafe_odid_check - RID ARM_STATUS error 106/107 -> RTL; clear -> Loiter
+void Copter::failsafe_odid_check()
+{
+    if (!motors->armed()) {
+        failsafe.odid = false;
+        return;
+    }
+
+    AP_OpenDroneID *odid = AP_OpenDroneID::get_singleton();
+    if (odid == nullptr || !odid->enabled() || !odid->rid_heartbeat_enabled()) {
+        failsafe.odid = false;
+        return;
+    }
+
+    const bool has_106_or_107 = odid->has_error_code("106") || odid->has_error_code("107");
+
+    if (has_106_or_107 && !failsafe.odid) {
+        failsafe.odid = true;
+        set_mode(Mode::Number::RTL, ModeReason::FAILSAFE);
+        LOGGER_WRITE_ERROR(LogErrorSubsystem::FAILSAFE_FENCE, LogErrorCode::FAILSAFE_OCCURRED);
+        gcs().send_text(MAV_SEVERITY_WARNING, "ODID: 106/107 Failsafe RTL");
+    } else if (!has_106_or_107 && failsafe.odid) {
+        failsafe.odid = false;
+        if (flightmode->mode_number() == Mode::Number::RTL) {
+            set_mode(Mode::Number::LOITER, ModeReason::FAILSAFE);
+        }
+        LOGGER_WRITE_ERROR(LogErrorSubsystem::FAILSAFE_FENCE, LogErrorCode::FAILSAFE_RESOLVED);
+        gcs().send_text(MAV_SEVERITY_NOTICE, "ODID: 106/107 cleared, Loiter");
+    }
+}
+#endif
+
