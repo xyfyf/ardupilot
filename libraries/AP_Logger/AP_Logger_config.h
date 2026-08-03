@@ -51,6 +51,11 @@
 #define HAL_LOGGER_FILE_CONTENTS_ENABLED HAL_LOGGING_FILESYSTEM_ENABLED && !AP_FILESYSTEM_LITTLEFS_ENABLED
 #endif
 
+// EFT encrypted .EFT logs (ChaCha20-CTR). Enable in board hwdef.dat.
+#ifndef AP_LOGGER_EFT_ENCRYPT_ENABLED
+#define AP_LOGGER_EFT_ENCRYPT_ENABLED 0
+#endif
+
 // range of IDs to allow for new messages during replay. It is very
 // useful to be able to add new messages during a replay, but we need
 // to avoid colliding with existing messages

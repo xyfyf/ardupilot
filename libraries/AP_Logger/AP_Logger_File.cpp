@@ -22,6 +22,9 @@
 
 #include "AP_Logger.h"
 #include "AP_Logger_File.h"
+#if AP_LOGGER_EFT_ENCRYPT_ENABLED
+#include "AP_Logger_EFT_Crypto.h"
+#endif
 
 #include <AP_Common/AP_Common.h>
 #include <AP_InternalError/AP_InternalError.h>
@@ -52,6 +55,10 @@ AP_Logger_File::AP_Logger_File(AP_Logger &front,
                                LoggerMessageWriter_DFLogStart *writer) :
     AP_Logger_Backend(front, writer),
     _log_directory(HAL_BOARD_LOG_DIRECTORY)
+#if AP_LOGGER_EFT_ENCRYPT_ENABLED
+    , _write_encrypted(false)
+    , _read_encrypted(false)
+#endif
 {
     df_stats_clear();
 }
@@ -418,6 +425,64 @@ static void log_filename_fc_sn(char *dest, size_t dest_size)
     dest[pos] = '\0';
 }
 
+#if AP_LOGGER_EFT_ENCRYPT_ENABLED
+bool AP_Logger_File::log_file_is_encrypted(const char *fname) const
+{
+    if (fname == nullptr) {
+        return false;
+    }
+    EXPECT_DELAY_MS(3000);
+    const int fd = AP::FS().open(fname, O_RDONLY);
+    if (fd == -1) {
+        return false;
+    }
+    uint8_t magic[4];
+    const ssize_t n = AP::FS().read(fd, magic, sizeof(magic));
+    AP::FS().close(fd);
+    return n == (ssize_t)sizeof(magic) && AP_Logger_EFT_Crypto::is_eftl_header(magic, sizeof(magic));
+}
+
+uint32_t AP_Logger_File::log_plain_size(const char *fname, const uint32_t file_size) const
+{
+    if (file_size <= AP_Logger_EFT_Crypto::HEADER_SIZE) {
+        return 0;
+    }
+    if (!log_file_is_encrypted(fname)) {
+        return file_size;
+    }
+    return file_size - AP_Logger_EFT_Crypto::HEADER_SIZE;
+}
+
+bool AP_Logger_File::setup_read_crypto(const char *fname)
+{
+    _read_encrypted = false;
+    if (fname == nullptr) {
+        return false;
+    }
+    EXPECT_DELAY_MS(3000);
+    const int fd = AP::FS().open(fname, O_RDONLY);
+    if (fd == -1) {
+        return false;
+    }
+    uint8_t hdr[AP_Logger_EFT_Crypto::HEADER_SIZE];
+    const ssize_t n = AP::FS().read(fd, hdr, sizeof(hdr));
+    AP::FS().close(fd);
+    if (n != (ssize_t)sizeof(hdr) || !AP_Logger_EFT_Crypto::is_eftl_header(hdr, sizeof(hdr))) {
+        return false;
+    }
+    if (hdr[4] != AP_Logger_EFT_Crypto::VERSION) {
+        return false;
+    }
+    log_filename_fc_sn(_read_fc_sn, sizeof(_read_fc_sn));
+    memcpy(_read_nonce, hdr + 5, sizeof(_read_nonce));
+    if (!_eft_crypto.begin_read(_read_fc_sn, _read_nonce)) {
+        return false;
+    }
+    _read_encrypted = true;
+    return true;
+}
+#endif // AP_LOGGER_EFT_ENCRYPT_ENABLED
+
 /*
   format the current China Standard Time (UTC+8, from RTC/GPS) as YYYYMMDDHHMMSS.
   Writes "NOTIME" when no valid UTC time is available (e.g. no GPS fix yet).
@@ -462,6 +527,10 @@ static void log_filename_timestamp(char *dest, size_t dest_size)
   zero-padded number is the log index (kept so log download and auto-cleanup
   keep working), the middle field is the flight controller serial number and
   the trailing field is the arm-time China Standard Time (UTC+8) timestamp.
+
+  When AP_LOGGER_EFT_ENCRYPT_ENABLED, each new log begins with a 17-byte EFTL
+  header and ChaCha20-CTR ciphertext (see Tools/eft_log/eft-log-decrypt-地面站开发说明.md).
+  MAVLink log download decrypts transparently in get_log_data().
 
   For an existing log we scan the directory and return its real on-disk name
   (whatever suffix it has), so all existing-log operations work regardless of
@@ -638,6 +707,11 @@ uint32_t AP_Logger_File::_get_log_size(const uint16_t log_num)
             // it is the file we are currently writing
             free(fname);
             write_fd_semaphore.give();
+#if AP_LOGGER_EFT_ENCRYPT_ENABLED
+            if (_write_encrypted && _write_offset > AP_Logger_EFT_Crypto::HEADER_SIZE) {
+                return _write_offset - AP_Logger_EFT_Crypto::HEADER_SIZE;
+            }
+#endif
             return _write_offset;
         }
         write_fd_semaphore.give();
@@ -648,8 +722,13 @@ uint32_t AP_Logger_File::_get_log_size(const uint16_t log_num)
         free(fname);
         return 0;
     }
+#if AP_LOGGER_EFT_ENCRYPT_ENABLED
+    const uint32_t ret = log_plain_size(fname, st.st_size);
+#else
+    const uint32_t ret = st.st_size;
+#endif
     free(fname);
-    return st.st_size;
+    return ret;
 }
 
 uint32_t AP_Logger_File::_get_log_time(const uint16_t log_num)
@@ -728,6 +807,9 @@ int16_t AP_Logger_File::get_log_data(const uint16_t list_entry, const uint16_t p
         }
         stop_logging();
         EXPECT_DELAY_MS(3000);
+#if AP_LOGGER_EFT_ENCRYPT_ENABLED
+        setup_read_crypto(fname);
+#endif
         _read_fd = AP::FS().open(fname, O_RDONLY);
         if (_read_fd == -1) {
             _open_error_ms = AP_HAL::millis();
@@ -743,18 +825,29 @@ int16_t AP_Logger_File::get_log_data(const uint16_t list_entry, const uint16_t p
         _read_offset = 0;
         _read_fd_log_num = log_num;
     }
-    uint32_t ofs = page * (uint32_t)LOGGER_PAGE_SIZE + offset;
+    const uint32_t plain_ofs = page * (uint32_t)LOGGER_PAGE_SIZE + offset;
+    uint32_t file_ofs = plain_ofs;
+#if AP_LOGGER_EFT_ENCRYPT_ENABLED
+    if (_read_encrypted) {
+        file_ofs = AP_Logger_EFT_Crypto::HEADER_SIZE + plain_ofs;
+    }
+#endif
 
-    if (ofs != _read_offset) {
-        if (AP::FS().lseek(_read_fd, ofs, SEEK_SET) == (off_t)-1) {
+    if (file_ofs != _read_offset) {
+        if (AP::FS().lseek(_read_fd, file_ofs, SEEK_SET) == (off_t)-1) {
             AP::FS().close(_read_fd);
             _read_fd = -1;
             return -1;
         }
-        _read_offset = ofs;
+        _read_offset = file_ofs;
     }
     int16_t ret = (int16_t)AP::FS().read(_read_fd, data, len);
     if (ret > 0) {
+#if AP_LOGGER_EFT_ENCRYPT_ENABLED
+        if (_read_encrypted) {
+            _eft_crypto.crypt_buffer(data, ret, plain_ofs);
+        }
+#endif
         _read_offset += ret;
     }
     return ret;
@@ -766,6 +859,9 @@ void AP_Logger_File::end_log_transfer()
         AP::FS().close(_read_fd);
         _read_fd = -1;
     }
+#if AP_LOGGER_EFT_ENCRYPT_ENABLED
+    _read_encrypted = false;
+#endif
 }
 
 /*
@@ -961,6 +1057,17 @@ void AP_Logger_File::start_new_log(void)
     _open_error_ms = 0;
     _write_offset = 0;
     _writebuf.clear();
+#if AP_LOGGER_EFT_ENCRYPT_ENABLED
+    _write_encrypted = false;
+    if (_eft_crypto.begin_write()) {
+        uint8_t hdr[AP_Logger_EFT_Crypto::HEADER_SIZE];
+        _eft_crypto.format_header(hdr);
+        if (AP::FS().write(_write_fd, hdr, sizeof(hdr)) == (ssize_t)sizeof(hdr)) {
+            _write_offset = AP_Logger_EFT_Crypto::HEADER_SIZE;
+            _write_encrypted = true;
+        }
+    }
+#endif
     write_fd_semaphore.give();
 
     // now update lastlog.txt with the new log number
@@ -1107,7 +1214,21 @@ void AP_Logger_File::io_timer(void)
         nbytes = bytes_until_fsync; // write exactly enough to sync
     }
 
-    ssize_t nwritten = AP::FS().write(_write_fd, head, nbytes);
+    ssize_t nwritten;
+#if AP_LOGGER_EFT_ENCRYPT_ENABLED
+    if (_write_encrypted) {
+        if (nbytes > _writebuf_chunk) {
+            nbytes = _writebuf_chunk;
+        }
+        memcpy(_enc_buf, head, nbytes);
+        const uint32_t plain_off = _write_offset - AP_Logger_EFT_Crypto::HEADER_SIZE;
+        _eft_crypto.crypt_buffer(_enc_buf, nbytes, plain_off);
+        nwritten = AP::FS().write(_write_fd, _enc_buf, nbytes);
+    } else
+#endif
+    {
+        nwritten = AP::FS().write(_write_fd, head, nbytes);
+    }
     last_io_operation = "";
     if (nwritten <= 0) {
         if (errno == ENOSPC) {

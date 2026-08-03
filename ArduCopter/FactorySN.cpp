@@ -277,6 +277,15 @@ bool FactorySN::get_frame_sn(char *dest, size_t dest_size) const
     return dest[0] != '\0';
 }
 
+bool FactorySN::get_fc_sn(char *dest, size_t dest_size) const
+{
+    if (dest == nullptr || dest_size == 0) {
+        return false;
+    }
+    decode_to_string(_fc, dest, dest_size);
+    return dest[0] != '\0';
+}
+
 void FactorySN::send_banner() const
 {
 #if HAL_GCS_ENABLED

@@ -11,6 +11,10 @@
 #include <AP_HAL/utility/RingBuffer.h>
 #include "AP_Logger_Backend.h"
 
+#if AP_LOGGER_EFT_ENCRYPT_ENABLED
+#include "AP_Logger_EFT_Crypto.h"
+#endif
+
 #if HAL_LOGGING_FILESYSTEM_ENABLED
 
 #ifndef HAL_LOGGER_WRITE_CHUNK_SIZE
@@ -112,6 +116,10 @@ private:
     // write buffer
     ByteBuffer _writebuf{0};
     const uint16_t _writebuf_chunk = HAL_LOGGER_WRITE_CHUNK_SIZE;
+#if AP_LOGGER_EFT_ENCRYPT_ENABLED
+    // encrypt-before-write scratch (must not live on io_timer stack; -Wframe-larger-than=1300)
+    uint8_t _enc_buf[HAL_LOGGER_WRITE_CHUNK_SIZE];
+#endif
     uint32_t _last_write_time;
 
     /* construct a file name given a log number. Caller must free. */
@@ -156,6 +164,18 @@ private:
     const char *last_io_operation = "";
 
     bool start_new_log_pending;
+
+#if AP_LOGGER_EFT_ENCRYPT_ENABLED
+    AP_Logger_EFT_Crypto _eft_crypto;
+    bool _write_encrypted;
+    bool _read_encrypted;
+    char _read_fc_sn[22];
+    uint8_t _read_nonce[12];
+
+    bool log_file_is_encrypted(const char *fname) const;
+    uint32_t log_plain_size(const char *fname, uint32_t file_size) const;
+    bool setup_read_crypto(const char *fname);
+#endif
 };
 
 #endif // HAL_LOGGING_FILESYSTEM_ENABLED

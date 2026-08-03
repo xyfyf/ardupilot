@@ -173,3 +173,6 @@ env.bak/
 venv.bak/
 autotest_result_*_junit.xml
 .python-version
+
+# EFT log decrypt tools/docs (local + GCS pack; not for git)
+/Tools/eft_log/

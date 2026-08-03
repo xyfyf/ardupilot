@@ -176,6 +176,9 @@ define AP_COMPASS_UBLOX_GPS_ENABLED 1
 # Enable OpenDroneID (Remote ID) support for drone identification and tracking
 define AP_OPENDRONEID_ENABLED 1
 
+# Encrypt SD flight logs (.EFT ChaCha20-CTR). See Tools/eft_log/eft-log-decrypt-地面站开发说明.md
+define AP_LOGGER_EFT_ENCRYPT_ENABLED 1
+
 # enable DFU reboot for installing bootloader
 ENABLE_DFU_BOOT 1
 

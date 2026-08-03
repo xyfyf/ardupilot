@@ -58,6 +58,9 @@ public:
     // Returns true if at least one character was produced.
     bool get_frame_sn(char *dest, size_t dest_size) const;
 
+    // Decode SN_FC1..7 into a NUL-terminated ASCII string.
+    bool get_fc_sn(char *dest, size_t dest_size) const;
+
 private:
     enum class Group : uint8_t {
         PRODUCT_MODEL = 0,
