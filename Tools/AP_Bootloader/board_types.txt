@@ -1095,7 +1095,8 @@ AP_HW_Accton_Godwit_GA1        7120
 AP_HW_ZZZ-EVTOL-H753                7121
 AP_HW_ZZZ-EVTOL-F405                7122
 AP_HW_ZZZ-EVTOL-H743                7123
-AP_HW_EFT_CAAC                      8000
+AP_HW_EFT_CAAC                      9902
+AP_HW_EFT_EDU                       9903
 
 # OpenDroneID enabled boards. Use 10000 + the base board ID
 AP_HW_CubeOrange_ODID               10140

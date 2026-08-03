@@ -369,11 +369,11 @@ local function pick_pattern()
         return P_RC_LOSS
     end
 
-    -- ── 4. 电压告警 ────────────────────────────────────────────────────────────
+    -- ── 4. 电压告警（不锁存：只看当前电压，电压回升后灯语恢复）────────────────
     local vbat = main_battery_voltage()
     local crt  = param_volt("BATT_CRT_VOLT")
     local low  = param_volt("BATT_LOW_VOLT")
-    if battery:has_failsafed() or (vbat and crt and vbat <= crt) then
+    if vbat and crt and vbat <= crt then
         return P_BATT_LVL2
     elseif vbat and low and vbat <= low then
         return P_BATT_LVL1
