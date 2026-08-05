@@ -11,6 +11,7 @@
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Common/AP_Common.h>
 #include "GCS_MAVLink.h"
+#include "GCS_MAVLink_Crypto.h"
 #include <AP_Mission/AP_Mission.h>
 #include <stdint.h>
 #include "MAVLink_routing.h"
@@ -529,6 +530,7 @@ protected:
         MAVLINK2_SIGNING_DISABLED = (1U << 0),
         NO_FORWARD                = (1U << 1),  // don't forward MAVLink data to or from this device
         NOSTREAMOVERRIDE          = (1U << 2),  // ignore REQUEST_DATA_STREAM messages (eg. from GCSs)
+        LINK_ENCRYPTED            = (1U << 3),  // encrypt the raw MAVLink byte stream on this channel
     };
     bool option_enabled(Option option) const {
         return options & static_cast<uint16_t>(option);
@@ -1020,6 +1022,15 @@ private:
     static void save_signing_timestamp(bool force_save_now);
 #endif  // AP_MAVLINK_SIGNING_ENABLED
 
+#if AP_MAVLINK_LINK_CRYPTO_ENABLED
+public:
+    // public so the free function comm_send_buffer() can use it
+    bool link_encryption_enabled(void) const { return option_enabled(Option::LINK_ENCRYPTED); }
+    GCS_MAVLink_Crypto_TX link_crypto_tx;
+private:
+    GCS_MAVLink_Crypto_RX link_crypto_rx;
+#endif
+
 #if HAL_MAVLINK_INTERVALS_FROM_FILES_ENABLED
     // structure containing default intervals read from files for this
     // link:
@@ -1303,7 +1314,7 @@ protected:
     AP_Enum16<Option>        mav_options;
     AP_Int8                  mav_telem_delay;
     // Persistent MAVLink2 TX start-of-frame magic (from MAV_FRAMING_OVERRIDE_CMD).
-    // 0 = board default (e.g. 0xEF on masked ports); non-zero = force that byte on all channels.
+    // 0 or 0xEF = board EF mask (masked ports only); other non-zero = force that byte on all channels.
     AP_Int16                 mav_tx_magic;
 
 private:

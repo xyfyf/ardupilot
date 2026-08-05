@@ -1897,20 +1897,48 @@ void GCS_MAVLINK::packetReceived(const mavlink_status_t &status,
                   "FrameOverride: cmd=%u magic=0x%02X crc=0x%04X hits=%lu",
                   (unsigned)cmd, (unsigned)magic, (unsigned)crc_value,
                   (unsigned long)mav_tx_override_hits);
-        // bit1 clear => force standard MAVLink2 STX (0xFD), not "clear override"
-        // (clearing would fall back to per-channel board default 0xEF).
-        // bit1 set + magic=0 => clear global override (board default / EF mask).
-        mav_tx_magic_override = (cmd & 0x02) ? magic : MAVLINK_STX;
-        mav_tx_crc_override_enable = (cmd & 0x01) ? 1 : 0;
-        mav_tx_crc_override_value = crc_value;
-        // Persist magic so the same framing is used after the next reboot.
-        gcs().persist_framing_magic(mav_tx_magic_override);
-        // Report the resulting state that all outgoing frames will now use.
-        send_text(MAV_SEVERITY_INFO,
-                  "FrameOverride active: STX=0x%02X CRC=%s(0x%04X) saved",
-                  (unsigned)(mav_tx_magic_override ? mav_tx_magic_override : 0xFD),
-                  mav_tx_crc_override_enable ? "forced" : "normal",
-                  (unsigned)mav_tx_crc_override_value);
+        // Truncated payload (<4B, e.g. GCS "restore default" with LEN=1):
+        // missing cmd/magic must NOT fall through as cmd=0 (force FD).
+        // Treat short 516 as clear override → board default (EF), CRC normal.
+        // Full 4B cmd=0 still forces FD as documented.
+        if (plen < 4) {
+            mav_tx_magic_override = 0;
+            mav_tx_crc_override_enable = 0;
+            mav_tx_crc_override_value = 0;
+            gcs().persist_framing_magic(0);
+            send_text(MAV_SEVERITY_INFO,
+                      "FrameOverride active: STX=board(0xEF) CRC=normal short-restore saved");
+        } else {
+            // bit1 clear => force standard MAVLink2 STX (0xFD) on ALL channels.
+            // bit1 set + magic=0 or 0xEF => clear global override so only ports in
+            // HAL_MAVLINK_EF_MAGIC_SERIAL_MASK (USB/LINK) TX 0xEF; RID stays 0xFD.
+            // bit1 set + other magic (e.g. 0xFD) => force that byte on ALL channels.
+            uint8_t persist_magic;
+            if (!(cmd & 0x02)) {
+                mav_tx_magic_override = MAVLINK_STX;
+                persist_magic = MAVLINK_STX;
+            } else if (magic == 0 || magic == 0xEF) {
+                mav_tx_magic_override = 0;
+                persist_magic = magic;
+            } else {
+                mav_tx_magic_override = magic;
+                persist_magic = magic;
+            }
+            mav_tx_crc_override_enable = (cmd & 0x01) ? 1 : 0;
+            mav_tx_crc_override_value = crc_value;
+            gcs().persist_framing_magic(persist_magic);
+            if (mav_tx_magic_override == 0) {
+                send_text(MAV_SEVERITY_INFO,
+                          "FrameOverride active: STX=mask(0xEF) RID=0xFD CRC=%s saved",
+                          mav_tx_crc_override_enable ? "forced" : "normal");
+            } else {
+                send_text(MAV_SEVERITY_INFO,
+                          "FrameOverride active: STX=0x%02X CRC=%s(0x%04X) saved",
+                          (unsigned)mav_tx_magic_override,
+                          mav_tx_crc_override_enable ? "forced" : "normal",
+                          (unsigned)mav_tx_crc_override_value);
+            }
+        }
     }
     const auto mavlink_protocol = uartstate->get_protocol();
     if (!(status.flags & MAVLINK_STATUS_FLAG_IN_MAVLINK1) &&
@@ -1974,9 +2002,27 @@ GCS_MAVLINK::update_receive(uint32_t max_time_us)
     status.packet_rx_drop_count = 0;
 
     const uint16_t nbytes = _port->available();
-    for (uint16_t i=0; i<nbytes; i++)
+    uint16_t processed_count = 0;
+    bool time_exceeded = false;
+    for (uint16_t i=0; i<nbytes && !time_exceeded; i++)
     {
-        const uint8_t c = (uint8_t)_port->read();
+        const uint8_t raw_byte = (uint8_t)_port->read();
+
+        const uint8_t *plain_bytes = &raw_byte;
+        uint16_t plain_count = 1;
+#if AP_MAVLINK_LINK_CRYPTO_ENABLED
+        uint8_t plain_buf[GCS_MAVLink_Crypto::MAX_FRAME_LEN];
+        if (link_encryption_enabled()) {
+            plain_count = 0;
+            if (!link_crypto_rx.feed(raw_byte, plain_buf, plain_count)) {
+                continue;
+            }
+            plain_bytes = plain_buf;
+        }
+#endif
+    for (uint16_t j=0; j<plain_count; j++) {
+        const uint8_t c = plain_bytes[j];
+        processed_count++;
         const uint32_t protocol_timeout = 4000;
         
         if (alternative.handler &&
@@ -2034,12 +2080,14 @@ GCS_MAVLINK::update_receive(uint32_t max_time_us)
         }
 #endif // AP_SCRIPTING_ENABLED
 
-        if (parsed_packet || i % 100 == 0) {
+        if (parsed_packet || processed_count % 100 == 0) {
             // make sure we don't spend too much time parsing mavlink messages
             if (AP_HAL::micros() - tstart_us > max_time_us) {
+                time_exceeded = true;
                 break;
             }
         }
+    } // inner plaintext-byte loop
     }
 
     const uint32_t tnow = AP_HAL::millis();

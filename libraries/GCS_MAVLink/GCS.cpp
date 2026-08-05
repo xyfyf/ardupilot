@@ -76,7 +76,7 @@ const AP_Param::GroupInfo GCS::var_info[] {
 
     // @Param: _TX_MAGIC
     // @DisplayName: MAVLink2 TX start-of-frame magic
-    // @Description: Persistent outgoing MAVLink2 frame start byte. 0 uses the board default (e.g. 0xEF on USB/LINK). 253 (0xFD) forces standard MAVLink2 framing on all channels across reboots. Set automatically by MAV_FRAMING_OVERRIDE_CMD.
+    // @Description: Persistent outgoing MAVLink2 frame start byte. 0 or 239 (0xEF) = board EF mask (USB/LINK TX 0xEF; RID stays 0xFD). 253 (0xFD) forces standard MAVLink2 framing on all channels across reboots. Set automatically by MAV_FRAMING_OVERRIDE_CMD.
     // @Range: 0 255
     // @User: Advanced
     AP_GROUPINFO("_TX_MAGIC",    6,      GCS, mav_tx_magic, 0),
@@ -165,6 +165,12 @@ void GCS::init()
 void GCS::apply_saved_framing_override()
 {
     const int16_t magic = mav_tx_magic.get();
+    // 0xEF means "board EF mask mode" (USB/LINK only), same as 0 — never force
+    // EF onto every MAVLink channel (RID must stay 0xFD).
+    if (magic == 0xEF) {
+        mav_tx_magic_override = 0;
+        return;
+    }
     if (magic > 0 && magic <= 255) {
         mav_tx_magic_override = (uint8_t)magic;
     }

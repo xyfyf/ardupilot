@@ -135,9 +135,11 @@ void comm_send_buffer(mavlink_channel_t chan, const uint8_t *buf, uint8_t len)
     if (!valid_channel(chan) || mavlink_comm_port[chan] == nullptr || chan_discard[chan]) {
         return;
     }
+#if HAL_HIGH_LATENCY2_ENABLED || AP_MAVLINK_LINK_CRYPTO_ENABLED
+    GCS_MAVLINK *link = gcs().chan(chan);
+#endif
 #if HAL_HIGH_LATENCY2_ENABLED
     // if it's a disabled high latency channel, don't send
-    GCS_MAVLINK *link = gcs().chan(chan);
     if (link->is_high_latency_link && !gcs().get_high_latency_status()) {
         return;
     }
@@ -146,6 +148,18 @@ void comm_send_buffer(mavlink_channel_t chan, const uint8_t *buf, uint8_t len)
         // an alternative protocol is active
         return;
     }
+#if AP_MAVLINK_LINK_CRYPTO_ENABLED
+    if (link != nullptr && link->link_encryption_enabled()) {
+        uint8_t envelope[GCS_MAVLink_Crypto::MAX_FRAME_LEN + GCS_MAVLink_Crypto::ENVELOPE_OVERHEAD];
+        const uint16_t envelope_len = link->link_crypto_tx.encrypt((uint8_t)chan, buf, len, envelope, sizeof(envelope));
+        if (envelope_len == 0) {
+            return;
+        }
+        const size_t written = mavlink_comm_port[chan]->write(envelope, envelope_len);
+        (void)written;
+        return;
+    }
+#endif
     const size_t written = mavlink_comm_port[chan]->write(buf, len);
 #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
     if (written < len && !mavlink_comm_port[chan]->is_write_locked()) {

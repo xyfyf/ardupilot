@@ -19,6 +19,11 @@
 #define AP_MAVLINK_SIGNING_ENABLED HAL_GCS_ENABLED
 #endif  // AP_MAVLINK_SIGNING_ENABLED
 
+// link-layer MAVLink encryption (ChaCha20, confidentiality only). Enable in board hwdef.dat.
+#ifndef AP_MAVLINK_LINK_CRYPTO_ENABLED
+#define AP_MAVLINK_LINK_CRYPTO_ENABLED 0
+#endif  // AP_MAVLINK_LINK_CRYPTO_ENABLED
+
 #ifndef HAL_HIGH_LATENCY2_ENABLED
 #define HAL_HIGH_LATENCY2_ENABLED 1
 #endif

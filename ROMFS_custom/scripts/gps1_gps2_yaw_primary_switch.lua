@@ -1,6 +1,6 @@
 --[[
   脚本名称: gps1_gps2_yaw_primary_switch.lua  v6.15
-  适用场景: EFT_CAAC 机控
+  适用场景: EFT_CAAC 机控; 仅 SN_PROD 含 616/610 (E616/X6100) 时启用, 否则直接退出
               GPS1 = ublox GPS                       (instance 0)
               GPS2 = UM982 双天线 RTK on SERIAL7     (instance 1)
 
@@ -61,6 +61,42 @@
 --]]
 
 ---@diagnostic disable: need-check-nil, cast-local-type, assign-type-mismatch, param-type-mismatch
+
+-- 仅 E616 / X6100（SN_PROD 含 616 或 610）启用; SN_PROD 为空则直接退出
+local function get_product_model()
+    local name = ""
+    for i = 1, 7 do
+        local p = param:get("SN_PROD" .. tostring(i))
+        if not p or p == 0 then
+            break
+        end
+        local p_int = math.floor(p)
+        local b1 = (p_int >> 16) & 0xFF
+        local b2 = (p_int >> 8) & 0xFF
+        local b3 = p_int & 0xFF
+
+        if b1 == 0 then break end
+        name = name .. string.char(b1)
+        if b2 == 0 then break end
+        name = name .. string.char(b2)
+        if b3 == 0 then break end
+        name = name .. string.char(b3)
+    end
+    return name
+end
+
+local function is_target_model(model_str)
+    if string.len(model_str) == 0 then
+        return false
+    end
+    local substring = string.sub(model_str, 1, 8)
+    return string.find(substring, "616") ~= nil
+        or string.find(substring, "610") ~= nil
+end
+
+if not is_target_model(get_product_model()) then
+    return
+end
 
 -- 脚本参数 (地面站 Full Parameter List 搜索 GPSYS_)
 --   GPSYS_ENABLE   : 0=禁用脚本, 1=启用(默认)

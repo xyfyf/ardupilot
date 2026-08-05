@@ -179,6 +179,10 @@ define AP_OPENDRONEID_ENABLED 1
 # Encrypt SD flight logs (.EFT ChaCha20-CTR). See Tools/eft_log/eft-log-decrypt-地面站开发说明.md
 define AP_LOGGER_EFT_ENCRYPT_ENABLED 1
 
+# Encrypt the MAVLink2 telemetry/USB link (ChaCha20, confidentiality only).
+# Enable per-port via SERIALx_OPTIONS bit 3 "Encrypt link".
+define AP_MAVLINK_LINK_CRYPTO_ENABLED 1
+
 # enable DFU reboot for installing bootloader
 ENABLE_DFU_BOOT 1
 
