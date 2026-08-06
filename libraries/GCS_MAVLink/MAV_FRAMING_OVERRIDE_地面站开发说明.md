@@ -91,11 +91,11 @@ crc   = 0      // 忽略
 
 飞控立即改发 FD，并掉电保存。下次上电仍是 FD，**无需再发**。
 
-### 3.2 恢复出厂 EF（USB/LINK）
+### 3.2 恢复 / 切到 EF（仅 USB/LINK；RID 仍为 FD）
 
-任选其一：
+任选其一（效果相同：只改 `HAL_MAVLINK_EF_MAGIC_SERIAL_MASK` 口，**不会**把 RID 改成 EF）：
 
-**方式 A（推荐）**
+**方式 A**
 
 ```
 cmd   = 2
@@ -103,13 +103,15 @@ magic = 0xEF
 crc   = 0
 ```
 
-**方式 B（恢复板级默认，含 EF 口掩码）**
+**方式 B（恢复板级默认）**
 
 ```
 cmd   = 2
 magic = 0
 crc   = 0
 ```
+
+> 注意：旧固件把 `magic=0xEF` 当成「全通道强制 EF」。新固件起 `0` / `0xEF` 都是 mask 模式。
 
 ### 3.3 伪代码
 
@@ -159,7 +161,7 @@ mavlink_msg_mav_framing_override_cmd_send(chan, /*cmd*/2, /*magic*/0xEF, /*crc*/
 
 | 参数名 | 含义 |
 |--------|------|
-| `MAV_TX_MAGIC` | `0` = 板级默认（EF 口发 EF）；`253` = 强制全通道 FD；其它非 0 = 强制该字节 |
+| `MAV_TX_MAGIC` | `0` 或 `239(0xEF)` = 板级 EF 掩码（USB/LINK 发 EF，RID 仍 FD）；`253` = 强制全通道 FD；其它非 0 = 强制该字节 |
 
 UI 建议：
 
@@ -194,7 +196,8 @@ UI 建议：
 - [ ] 发 `cmd=0`：立刻变成 **`FD`**，并收到 `FrameOverride ... saved`  
 - [ ] 读 `MAV_TX_MAGIC` == **253**  
 - [ ] 断电再上电：仍是 **`FD`**，且地面站**不用再发 516** 也能连上  
-- [ ] 发 `cmd=2, magic=0xEF`：恢复 **`EF`**，`MAV_TX_MAGIC` 变为 **239** 或按实现保存；再断电仍为 EF  
+- [ ] 发 `cmd=2, magic=0xEF`：USB/LINK 为 **EF**，RID 仍为 **FD**；`MAV_TX_MAGIC` 为 **239**；再断电仍如此
+- [ ] 发 `cmd=2, magic=0`：同上（板级掩码）  
 - [ ] CRC_EXTRA 错误时：无 STATUSTEXT、帧头不变（丢包）
 
 ---
