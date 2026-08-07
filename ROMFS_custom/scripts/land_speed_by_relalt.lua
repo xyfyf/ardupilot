@@ -197,38 +197,10 @@ end
 local function validate_baseline_vs_slow(slow_ms)
     local slow_cms = ms_to_cms(slow_ms)
     local pilot_cms, land_cms, wp_cms = baseline_descent_cms()
-    local bad = {}
-
-    if pilot_cms > 0 and pilot_cms <= slow_cms then
-        bad[#bad + 1] = string.format("PILOT_SPEED_DN=%d", pilot_cms)
-    end
-    if land_cms > 0 and land_cms <= slow_cms then
-        if base.use_new_land then
-            bad[#bad + 1] = string.format("LAND_SPD_MS=%.2f", base.land_spd_ms)
-        else
-            bad[#bad + 1] = string.format("LAND_SPEED=%d", land_cms)
-        end
-    end
-    if wp_cms > 0 and wp_cms <= slow_cms then
-        if base.use_new_wp then
-            bad[#bad + 1] = string.format("WP_SPD_DN=%.2f", base.wp_dn_ms)
-        else
-            bad[#bad + 1] = string.format("WPNAV_SPEED_DN=%d", wp_cms)
-        end
-    end
 
     -- 只要有一项基准 > 缓降目标，缓降就有可见效果（如 PILOT_SPEED_DN=200），即启用。
     -- 仅当三项全部 <= 缓降目标、写入毫无变化时才禁用，避免因单项（如 LAND_SPEED=50）误关整套。
     local any_effective = (pilot_cms > slow_cms) or (land_cms > slow_cms) or (wp_cms > slow_cms)
-
-    if #bad > 0 then
-        gcs:send_text(
-            MAV_SEVERITY.NOTICE,
-            string.format(
-                "LNDS: stay(<=%dcm/s): %s", slow_cms, table.concat(bad, ",")
-            )
-        )
-    end
 
     if any_effective then
         return true
@@ -295,17 +267,8 @@ local function capture_baseline()
     end
     baseline_ok_for_slow = validate_baseline_vs_slow(slow_ms)
 
-    local pilot_cms, land_cms, wp_cms = baseline_descent_cms()
     local slow_cms = ms_to_cms(slow_ms)
-    if baseline_ok_for_slow then
-        gcs:send_text(
-            MAV_SEVERITY.INFO,
-            string.format(
-                "LNDS: base saved PDN=%d LND=%d WP=%d slow=%d",
-                pilot_cms, land_cms, wp_cms, slow_cms
-            )
-        )
-    else
+    if not baseline_ok_for_slow then
         baseline_margin_warned = true
         gcs:send_text(
             MAV_SEVERITY.WARNING,

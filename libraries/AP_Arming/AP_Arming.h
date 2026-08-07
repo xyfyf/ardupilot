@@ -308,7 +308,7 @@ private:
 
 #if AP_ARMING_AUX_AUTH_ENABLED
     // auxiliary authorisation
-    static const uint8_t aux_auth_count_max = 5;    // maximum number of auxiliary authorisers
+    static const uint8_t aux_auth_count_max = 8;    // maximum number of auxiliary authorisers
     static const uint8_t aux_auth_str_len = 42;     // maximum length of failure message (50-8 for "PreArm: ")
     enum class AuxAuthStates : uint8_t {
         NO_RESPONSE = 0,

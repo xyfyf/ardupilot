@@ -274,8 +274,6 @@ void AP_OpenDroneID::set_uas_id(const char *uas_id, uint8_t id_type_v, uint8_t u
     pkt_basic_id.ua_type = ua_type_v;
     memset(pkt_basic_id.uas_id, 0, sizeof(pkt_basic_id.uas_id));
     memcpy(pkt_basic_id.uas_id, id_str, id_len);
-
-    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "OpenDroneID: UAS_ID from FrameSN: %s", id_str);
 }
 
 void AP_OpenDroneID::set_basic_id() {

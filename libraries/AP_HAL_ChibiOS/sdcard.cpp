@@ -192,6 +192,8 @@ bool sdcard_retry(void)
 #if AP_FILESYSTEM_FILE_WRITING_ENABLED
             // create EFT directory
             AP::FS().mkdir("/EFT");
+            // default NFZ pack seed target (Lua copies from @ROMFS/nfz/ if missing)
+            AP::FS().mkdir("/EFT/nfz");
 #endif
         }
     }
