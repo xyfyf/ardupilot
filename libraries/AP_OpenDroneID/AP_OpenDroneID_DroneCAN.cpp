@@ -222,7 +222,7 @@ static void handle_arm_status(AP_DroneCAN *ap_dronecan, const CanardRxTransfer& 
     // Push DroneCAN Arm Message to GCS
     mavlink_open_drone_id_arm_status_t to_gcs = status;
     if (!AP::opendroneid().rid_heartbeat_enabled()) {
-        // RIDHB_ENABLE=0: send as no-error
+        // RIDHB_ENABLE=0: any RID error (106/107/GB46750/...) -> no-error
         to_gcs.status = MAV_ODID_ARM_STATUS_GOOD_TO_ARM;
         memset(to_gcs.error, 0, sizeof(to_gcs.error));
     }

@@ -307,7 +307,7 @@ void AP_OpenDroneID::get_persistent_params(ExpandingString &str) const
 // Except in the case of an in-flight reboot
 bool AP_OpenDroneID::pre_arm_check_nolock(char* failmsg, uint8_t failmsg_len) const
 {
-    // RIDHB_ENABLE=0: ignore RID ARM_STATUS errors, do not block arming
+    // RIDHB_ENABLE=0: ignore any RID ARM_STATUS errors (106/107/GB46750/...), do not block arming
     if (!rid_heartbeat_enabled()) {
         return true;
     }
@@ -949,7 +949,8 @@ uint32_t AP_OpenDroneID::compute_rid_status_flags(uint32_t now_ms) const
     if (last_arm_status_ms != 0 && now_ms - last_arm_status_ms < 5000) {
         flags |= (1U << 7);
     }
-    if (arm_status.status == MAV_ODID_ARM_STATUS_GOOD_TO_ARM) {
+    // RIDHB_ENABLE=0: report ARM_GOOD so GCS (518) does not show raw RID errors (106/107/GB46750/...)
+    if (arm_status.status == MAV_ODID_ARM_STATUS_GOOD_TO_ARM || !rid_heartbeat_enabled()) {
         flags |= (1U << 8);
     }
     char failmsg[50] {};
@@ -1056,14 +1057,15 @@ void AP_OpenDroneID::handle_rid_config_request(mavlink_channel_t chan, const mav
     reply.operator_latitude = pkt_system.operator_latitude;
     reply.operator_longitude = pkt_system.operator_longitude;
     reply.operator_altitude_geo = pkt_system.operator_altitude_geo;
-    reply.arm_status = arm_status.status;
-    strncpy(reply.arm_error, arm_status.error, sizeof(reply.arm_error) - 1);
+    // RIDHB_ENABLE=0: any RID ARM_STATUS error (106/107/GB46750/...) -> no-error to GCS
     if (!rid_heartbeat_enabled()) {
-        // RIDHB_ENABLE=0: report as no-error to GCS
         reply.arm_status = MAV_ODID_ARM_STATUS_GOOD_TO_ARM;
         memset(reply.arm_error, 0, sizeof(reply.arm_error));
+    } else {
+        reply.arm_status = arm_status.status;
+        strncpy(reply.arm_error, arm_status.error, sizeof(reply.arm_error) - 1);
+        reply.arm_error[sizeof(reply.arm_error) - 1] = '\0';
     }
-    reply.arm_error[sizeof(reply.arm_error) - 1] = '\0';
 
     if (last_arm_status_ms != 0) {
         reply.arm_status_age_ms = uint16_t(MIN(now_ms - last_arm_status_ms, 0xFFFFU));
@@ -1093,7 +1095,7 @@ void AP_OpenDroneID::handle_msg(mavlink_channel_t chan, const mavlink_message_t 
         if (chan == _chan) {
             mavlink_msg_open_drone_id_arm_status_decode(&msg, &arm_status);
             last_arm_status_ms = AP_HAL::millis();
-            // RIDHB_ENABLE=0: still notify GCS with 12918, but as no-error
+            // RIDHB_ENABLE=0: notify GCS with 12918 as no-error (raw 106/107/GB46750/... not forwarded)
             if (!rid_heartbeat_enabled()) {
                 mavlink_open_drone_id_arm_status_t clean {};
                 clean.status = MAV_ODID_ARM_STATUS_GOOD_TO_ARM;

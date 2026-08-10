@@ -7,7 +7,7 @@
     超过 HB_TIMEOUT_MS 未收到 → 地面站报警并禁止解锁。
 
   参数 (地面站搜索 RIDHB_):
-    RIDHB_ENABLE : 0=关闭(12918 转发给地面站时改为无错误、不拦解锁), 1=开启(默认)
+    RIDHB_ENABLE : 0=关闭(任意 RID 错误含 106/107/GB46750 等：不转发原始原因、518/12918 报无错误、不拦解锁), 1=开启(默认)
 
   相关飞控参数:
     DID_ENABLE=1, DID_MAVPORT=2（RID 接在 SERIAL2 / UART4）

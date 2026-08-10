@@ -146,7 +146,7 @@ bool MAVLink_routing::check_and_forward(GCS_MAVLINK &in_link, const mavlink_mess
 
 #if AP_OPENDRONEID_ENABLED
     if (msg.msgid == MAVLINK_MSG_ID_OPEN_DRONE_ID_ARM_STATUS) {
-        // RIDHB_ENABLE=0: do not forward raw RID error; OpenDroneID will push a no-error copy
+        // RIDHB_ENABLE=0: do not forward raw RID error (106/107/GB46750/...); OpenDroneID pushes no-error copy
         enum ap_var_type ptype;
         const AP_Param *vp = AP_Param::find("RIDHB_ENABLE", &ptype);
         const bool ridhb_on = (vp == nullptr || ptype != AP_PARAM_FLOAT) ? true

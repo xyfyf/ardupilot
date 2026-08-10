@@ -1,5 +1,5 @@
 --[[
-  WS2812 串联LED 状态灯 v7.3
+  WS2812 串联LED 状态灯 v7.4
 
   灯语优先级 (高→低):
   A  指南针校准进行中:
@@ -11,7 +11,7 @@
   2  故障: 红灯常亮
   3  RC丢失: 黄灯快闪
   4  低电压: 一级/二级红灯闪烁
-  D  解锁前-GPS1无数据 → 红灯常亮 (不可起飞)
+  D  解锁前-GPS1无数据 → 红灯常亮 (不可起飞；LED_GPSARM=0 可关)
   E  解锁前-RTK航向与磁罗盘偏差>45° → 红灯常亮 (提示校准磁罗盘)
   5  指南针异常: 红黄交替闪烁
   6  RTK模式: 绿灯双闪
@@ -40,6 +40,9 @@
     旧逻辑 active_compass_count()==0 一律判为指南针异常 → 红黄交替闪 (误报)。
   - 现识别 "EK3_SRC1_YAW=2 且 COMPASS_USE=0" 为 RTK/GPS 航向下有意关罗盘,
     不再触发指南针异常灯语, 改按飞行模式/GPS 状态显示正常灯语。
+  v7.4 变更:
+  - 新增 LED_GPSARM：1=GPS1无数据禁止解锁(默认)，0=关闭该检查(可无GPS1解锁)；
+    RTK/罗盘航向偏差>45° 仍照常拦解锁。地面站搜索 LED_ 即可。
 --]]
 
 ---@diagnostic disable: need-check-nil
@@ -52,6 +55,28 @@ local UPDATE_MS = 50           -- 刷新率 (50ms = 20Hz)
 local ARM_HOLD_MS = 3000       -- 解锁成功后常亮保持时间 (毫秒)
 local HDG_MISMATCH_DEG = 45.0  -- RTK/磁罗盘航向偏差告警阈值 (度)
 local WARN_INTERVAL_MS = 5000  -- GCS告警重复间隔 (毫秒)
+
+-- LED_GPSARM: 1=开启GPS1解锁检查(默认)，0=关闭(GPS1没接也能解锁)
+-- 参数表 key=99；占用: 91=UOM, 96=LNDS, 97=RIDHB, 98=NFZ, 200=GPSYS
+local LED_PARAM_KEY = 99
+local led_gpsarm_param = nil
+do
+    local ok_t = param:add_table(LED_PARAM_KEY, "LED_", 1)
+    local ok_p = ok_t and param:add_param(LED_PARAM_KEY, 1, "GPSARM", 1)
+    if ok_p then
+        led_gpsarm_param = Parameter("LED_GPSARM")
+    else
+        gcs:send_text(4, "LED: LED_GPSARM param init failed, GPS1 arm check stays on")
+    end
+end
+
+local function gps1_arm_check_enabled()
+    if led_gpsarm_param == nil then
+        return true
+    end
+    local v = led_gpsarm_param:get()
+    return (v == nil) or (v >= 1)
+end
 -- ========================= ArduCopter 模式号 =========================
 local MODE_STABILIZE   = 0
 local MODE_ACRO        = 1
@@ -381,7 +406,8 @@ local function pick_pattern()
 
     -- ── D. 解锁前: GPS1 无数据 → 红灯常亮 ────────────────────────────────────
     -- GPS1 (ublox) 必须在线, 即使 RTK 正常也要求 GPS1 有数据才允许解锁
-    if not arming:is_armed() then
+    -- LED_GPSARM=0 时跳过此检查（灯语与拦截同步关闭）
+    if gps1_arm_check_enabled() and not arming:is_armed() then
         if safe_gps_status(0) < 1 then
             local now = millis()
             if (now - last_gps_warn_ms) >= WARN_INTERVAL_MS then
@@ -508,8 +534,8 @@ end
 
 
 -- ========================= 解锁授权 (prearm 真正拦截) =========================
--- 真正禁止解锁的两个条件 (与红灯灯语一致):
---   1. GPS1 (ublox) 无数据 → 即使 RTK 正常也禁止解锁
+-- 真正禁止解锁的条件 (与红灯灯语一致):
+--   1. GPS1 (ublox) 无数据 → 即使 RTK 正常也禁止解锁 (LED_GPSARM=0 可关)
 --   2. RTK 航向与磁罗盘偏差 > 45° → 禁止解锁, 提示校准磁罗盘
 local function update_arming_auth()
     -- 懒加载授权 ID: 脚本加载瞬间 arming 可能未就绪, 这里反复重试直到拿到。
@@ -533,8 +559,8 @@ local function update_arming_auth()
         return
     end
 
-    -- 条件 1: GPS1 无数据
-    if safe_gps_status(0) < 1 then
+    -- 条件 1: GPS1 无数据 (LED_GPSARM=0 时跳过)
+    if gps1_arm_check_enabled() and safe_gps_status(0) < 1 then
         arming:set_aux_auth_failed(arm_auth_id, "GPS1 no data, fix GPS1")
         return
     end
