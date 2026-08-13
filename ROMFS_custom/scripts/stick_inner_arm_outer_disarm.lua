@@ -21,7 +21,7 @@
 -- 安全：空中强制上锁需固件/参数允许空中 DISARM（见机型文档）；组合键仅在本脚本内解析。
 -- 原生摇杆解锁：脚本启动时尝试 ARMING_RUDDER=0。
 -- UOM 解锁鉴权：收到 GCS 下发的 UOM_ARM_STATUS (msg 519) 后判断是否允许解锁，
---   1107=允许；1101/1102/1103/1104/1106=禁止并在地面站显示原因。
+--   1101/1102/1103/1104/1106=禁止；1107 及 UOM_STATUS_MSG 以外的状态码均允许解锁。
 
 local SCRIPT_NAME = "InOutArm5"
 
@@ -50,6 +50,15 @@ local UOM_STATUS_MSG = {
     [1106] = "UOM: 设备未激活，请先激活",
     [1107] = "UOM: 设备已激活",
 }
+
+-- 仅以下已知状态码禁止解锁；1107 及表外任意状态码（如手动写入 401）均放行
+local function uom_code_allows_arm(code)
+    local msg = UOM_STATUS_MSG[code]
+    if msg == nil then
+        return true
+    end
+    return code == 1107
+end
 
 local uom_status_code  = 0      -- 当前状态码（持久化恢复 or 最后收到）
 local uom_allow_arm    = false  -- 当前是否允许解锁
@@ -82,7 +91,7 @@ do
         local saved = uom_param:get()
         if saved ~= nil then
             uom_status_code = math.floor(saved + 0.5)
-            uom_allow_arm   = (uom_status_code == 1107)
+            uom_allow_arm   = uom_code_allows_arm(uom_status_code)
         end
     else
         gcs:send_text(4, SCRIPT_NAME .. ": UOM_STATUS param init failed, status not persistent")
@@ -144,7 +153,7 @@ local function uom_update(now)
             if parsed.msgid == UOM_MAVMSG_ID then
                 -- ---- 519: 激活状态码 ----
                 local new_code  = parsed.status_code
-                local new_allow = (new_code == 1107)
+                local new_allow = uom_code_allows_arm(new_code)
                 uom_last_msg_ms = now
 
                 if currently_armed and not new_allow then
@@ -191,13 +200,8 @@ local function uom_update(now)
     if uom_allow_arm then
         arming:set_aux_auth_passed(uom_auth_id)
     else
-        local fail_msg
-        if uom_status_code == 0 then
-            fail_msg = "UOM: 等待激活状态，请检查网络连接"
-        else
-            fail_msg = UOM_STATUS_MSG[uom_status_code]
-                       or ("UOM: 未知状态 " .. tostring(uom_status_code) .. "，禁止解锁")
-        end
+        local fail_msg = UOM_STATUS_MSG[uom_status_code]
+                         or ("UOM: 状态 " .. tostring(uom_status_code) .. "，禁止解锁")
         arming:set_aux_auth_failed(uom_auth_id, fail_msg)
         if (now - uom_last_warn_ms) >= UOM_WARN_INTERVAL_MS then
             gcs:send_text(3, fail_msg)
