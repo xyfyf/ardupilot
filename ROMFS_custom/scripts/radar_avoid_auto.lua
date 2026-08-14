@@ -1,11 +1,16 @@
 --[[
-  CAN 雷达自动检测 + Scripting1 飞行中避障切换 一体脚本 v6.4
+  CAN 雷达自动检测 + Scripting1 飞行中避障切换 一体脚本 v6.5
   =====================================================================
   合并自：
     - 1auto_detect_radar5.1.lua  （DroneCAN 雷达识别 + 参数自适应 + ARMING_CHECK 管理）
     - 0radar_avoid_rc7_toggle3.0.lua（RC 飞行中切换 AVOID_ENABLE）
 
-  v6.4 任意 Scripting1 通道 PWM>1500 即开避障
+  v6.5 仅 Loiter 模式下避障
+  -------------------------
+    扫描 RC1~RC16，任一 RCx_OPTION=300 且 PWM>1500，且当前为 Loiter 模式
+    → AVOID_ENABLE=7；否则 AVOID_ENABLE=1。非 Loiter 时开关打开也不避障。
+  -------------------------
+  v6.4 任意 Scripting1 通道 PWM>1500 即开避障（已废弃）
   --------------------------------------------
     扫描 RC1~RC16，任一 RCx_OPTION=300 且 PWM>1500 → AVOID_ENABLE=7；
     否则 AVOID_ENABLE=1。不限飞行模式，不限具体通道号（RC7/RC8 等均可）。
@@ -37,9 +42,9 @@
     全程无任何雷达迹象（无节点、无 Good）:
       保持 RNGFND1_TYPE=24, 修改 PRX1_TYPE=0, AVOID_ENABLE=1（屏蔽报错）
 
-  Phase 2 - 飞行中 Scripting1 切换（radar_ok 后启用）
-    任一 RCx_OPTION=300 的通道 PWM > 1500 → AVOID_ENABLE=7
-    全部 Scripting1 通道 PWM ≤ 1500 → AVOID_ENABLE=1
+  Phase 2 - 飞行中 Scripting1 切换（radar_ok 后启用，仅 Loiter）
+    Loiter 且任一 RCx_OPTION=300 通道 PWM > 1500 → AVOID_ENABLE=7
+    非 Loiter，或全部 Scripting1 通道 PWM ≤ 1500 → AVOID_ENABLE=1
 
   依赖
   ----
@@ -58,6 +63,7 @@ local INIT_DELAY_MS      = 1000    -- 脚本启动后首次检测延迟
 
 local SCRIPTING1_FN      = 300     -- RC 切换功能：SCRIPTING_1（RCx_OPTION=300）
 local AVOID_PWM_ON       = 1500    -- 任一 Scripting1 通道 PWM 超过此值即开避障
+local MODE_LOITER        = 5       -- ArduCopter Loiter 模式号
 
 ------------------------------------------------------------------
 -- 常量
@@ -325,7 +331,7 @@ end
 ------------------------------------------------------------------
 -- Phase 2：Scripting1(300) 切换 AVOID_ENABLE
 ------------------------------------------------------------------
--- 任一 RCx_OPTION=300 的通道 PWM > AVOID_PWM_ON 即开避障
+-- 任一 RCx_OPTION=300 的通道 PWM > AVOID_PWM_ON
 local function is_radar_rc_on()
     if not rc:has_valid_input() then
         return false
@@ -352,7 +358,8 @@ local function apply_avoid(want_on)
 end
 
 local function rc_toggle_step()
-    local want_on = is_radar_rc_on()
+    -- 仅 Loiter + RC 开关打开时才启用近距避障
+    local want_on = is_radar_rc_on() and vehicle:get_mode() == MODE_LOITER
 
     if want_on ~= last_avoid_on then
         if apply_avoid(want_on) then

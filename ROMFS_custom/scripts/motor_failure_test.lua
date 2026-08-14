@@ -1,4 +1,11 @@
 -- This is a script that stops motors in flight, for use testing motor failure handling
+-- Requires RCx_OPTION=301 (Scripting2); if none configured, script exits silently.
+
+-- find rc switch with option 301 (Scripting2)
+local switch = rc:find_channel_for_option(301)
+if not switch then
+  return
+end
 
 -- add new param MOT_STOP_BITMASK
 local PARAM_TABLE_KEY = 75
@@ -7,9 +14,6 @@ assert(param:add_param(PARAM_TABLE_KEY, 1, "STOP_BITMASK", 0), "could not add pa
 
 local stop_motor_bitmask = Parameter()
 assert(stop_motor_bitmask:init("MOT_STOP_BITMASK"), "could not find param")
-
--- find rc switch with option 300
-local switch = assert(rc:find_channel_for_option(300),"Lua: Could not find switch")
 
 -- read spin min param, we set motors to this PWM to stop them
 local pwm_min
