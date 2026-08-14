@@ -1180,6 +1180,8 @@ void NavEKF3_core::FuseVelPosNED()
 // select the height measurement to be fused from the available baro, range finder and GPS sources
 void NavEKF3_core::selectHeightForFusion()
 {
+    baro_fused_this_frame = false;
+    update_baro_fusion_gate();
 #if AP_RANGEFINDER_ENABLED
     // Read range finder data and check for new data in the buffer
     // This data is used by both height and optical flow fusion processing
@@ -1289,7 +1291,16 @@ void NavEKF3_core::selectHeightForFusion()
     fallback_to_baro |= lostExtNavHgt;
 #endif
     if (fallback_to_baro) {
-        activeHgtSource = AP_NavEKF_Source::SourceZ::BARO;
+        if (!baro_suppressed_by_gps) {
+            activeHgtSource = AP_NavEKF_Source::SourceZ::BARO;
+        }
+    }
+
+    // when GPS quality is good, use GPS height instead of baro
+    if (baro_suppressed_by_gps && activeHgtSource == AP_NavEKF_Source::SourceZ::BARO) {
+        if (((imuSampleTime_ms - lastTimeGpsReceived_ms) < 500) && validOrigin) {
+            activeHgtSource = AP_NavEKF_Source::SourceZ::GPS;
+        }
     }
 
     // if there is new baro data to fuse, calculate filtered baro data required by other processes
@@ -1363,7 +1374,7 @@ void NavEKF3_core::selectHeightForFusion()
         } else {
             posDownObsNoise = sq(constrain_ftype(1.5f * frontend->_gpsHorizPosNoise, 0.1f, 10.0f));
         }
-    } else if (baroDataToFuse && (activeHgtSource == AP_NavEKF_Source::SourceZ::BARO)) {
+    } else if (baroDataToFuse && (activeHgtSource == AP_NavEKF_Source::SourceZ::BARO) && !baro_suppressed_by_gps) {
         // using Baro data
         hgtMea = baroDataDelayed.hgt - baroHgtOffset;
         // correct sensor so that local position height adjusts to match GPS
@@ -1379,6 +1390,7 @@ void NavEKF3_core::selectHeightForFusion()
             posDownObsNoise *= frontend->gndEffectBaroScaler;
         }
         velPosObs[5] = -hgtMea;
+        baro_fused_this_frame = true;
     } else if ((activeHgtSource == AP_NavEKF_Source::SourceZ::NONE && imuSampleTime_ms - lastHgtPassTime_ms > 70)) {
         // fuse a constant height of 0 at 14 Hz
         hgtMea = 0.0f;
@@ -1395,6 +1407,8 @@ void NavEKF3_core::selectHeightForFusion()
         fuseHgtData = false;
     }
 
+    update_baro_cmp_shadow();
+
     // detect changes in source and reset height
     if ((activeHgtSource != prevHgtSource) && fuseHgtData) {
         prevHgtSource = activeHgtSource;
@@ -1410,6 +1424,95 @@ void NavEKF3_core::selectHeightForFusion()
         hgtTimeout = true;
     } else {
         hgtTimeout = false;
+    }
+}
+
+/*
+  Return true when GPS HDOP quality is good enough to suppress barometer fusion.
+  Any configured 3D GPS with valid HDOP below threshold will suppress baro fusion.
+  UM982 and other receivers that do not report RTK fix type are supported.
+ */
+bool NavEKF3_core::gps_suppresses_baro_fusion() const
+{
+    const float threshold = frontend->_baroGpsHdopGate;
+    if (!is_positive(threshold)) {
+        return false;
+    }
+
+    // do not leave EKF without a height observation before GPS height is usable
+    if (!validOrigin || (imuSampleTime_ms - lastTimeGpsReceived_ms) > 2000) {
+        return false;
+    }
+
+    const auto &gps = dal.gps();
+    const uint8_t num_gps = MIN(gps.num_sensors(), GPS_MAX_INSTANCES);
+
+    for (uint8_t i = 0; i < num_gps; i++) {
+        const AP_DAL_GPS::GPS_Status status = gps.status(i);
+        if (status < AP_DAL_GPS::GPS_OK_FIX_3D) {
+            continue;
+        }
+
+        const uint16_t hdop = gps.get_hdop(i);
+        if (hdop == 0) {
+            continue;
+        }
+
+        if (hdop * 0.01f <= threshold) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/*
+  Track baro fusion gate transitions and notify GCS after takeoff.
+ */
+void NavEKF3_core::update_baro_fusion_gate()
+{
+    const bool suppressed = gps_suppresses_baro_fusion();
+
+    if (inFlight && suppressed != prev_baro_suppressed_by_gps) {
+        if (suppressed) {
+            GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:停用气压计,改用GPS", (unsigned)imu_index);
+        } else {
+            GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:恢复气压计融合", (unsigned)imu_index);
+        }
+    }
+
+    prev_baro_suppressed_by_gps = suppressed;
+    baro_suppressed_by_gps = suppressed;
+}
+
+/*
+  Maintain shadow height estimates for comparison logging.
+ */
+void NavEKF3_core::update_baro_cmp_shadow()
+{
+    if (!cmp_hgt_initialised) {
+        cmp_hgt_with_baro = stateStruct.position.z;
+        cmp_hgt_without_baro = stateStruct.position.z;
+        cmp_hgt_initialised = true;
+    }
+
+    const ftype dt_hgt = constrain_ftype(imuDataDelayed.delVelDT, 0.0f, 0.1f);
+    if (is_positive(dt_hgt)) {
+        const ftype velD = stateStruct.velocity.z;
+        cmp_hgt_with_baro += velD * dt_hgt;
+        cmp_hgt_without_baro += velD * dt_hgt;
+    }
+
+    const ftype cmp_gain = constrain_ftype(dt_hgt / (dt_hgt + 0.5f), 0.0f, 1.0f);
+
+    if (baroDataToFuse) {
+        last_cmp_baro_hgt = -(baroDataDelayed.hgt - baroHgtOffset);
+        cmp_hgt_with_baro += (last_cmp_baro_hgt - cmp_hgt_with_baro) * cmp_gain;
+    }
+
+    if (gpsDataToFuse) {
+        last_cmp_gps_hgt = -gpsDataDelayed.hgt;
+        cmp_hgt_without_baro += (last_cmp_gps_hgt - cmp_hgt_without_baro) * cmp_gain;
     }
 }
 

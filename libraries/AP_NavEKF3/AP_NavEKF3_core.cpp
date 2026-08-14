@@ -284,6 +284,14 @@ void NavEKF3_core::InitialiseVariables()
     gpsPosAccuracy = 0.0f;
     gpsHgtAccuracy = 0.0f;
     baroHgtOffset = 0.0f;
+    baro_fused_this_frame = false;
+    baro_suppressed_by_gps = false;
+    prev_baro_suppressed_by_gps = false;
+    cmp_hgt_initialised = false;
+    cmp_hgt_with_baro = 0.0f;
+    cmp_hgt_without_baro = 0.0f;
+    last_cmp_baro_hgt = 0.0f;
+    last_cmp_gps_hgt = 0.0f;
     rngOnGnd = 0.05f;
     yawResetAngle = 0.0f;
     lastYawReset_ms = 0;

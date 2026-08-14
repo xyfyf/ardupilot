@@ -19,7 +19,8 @@
     LOG_XKV1_MSG, \
     LOG_XKV2_MSG, \
     LOG_XKY0_MSG, \
-    LOG_XKY1_MSG
+    LOG_XKY1_MSG, \
+    LOG_EBFH_MSG
 
 // @LoggerMessage: XKF0
 // @Description: EKF3 beacon sensor diagnostics
@@ -377,6 +378,34 @@ struct PACKED log_XKTV {
     float tvd;
 };
 
+// @LoggerMessage: EBFH
+// @Description: EKF3 baro fusion comparison for GPS HDOP gating test
+// @Field: TimeUS: Time since system startup
+// @Field: C: EKF3 core this data is for
+// @Field: Roll: Estimated roll (actual filter)
+// @Field: Pitch: Estimated pitch (actual filter)
+// @Field: Yaw: Estimated yaw (actual filter)
+// @Field: PD: Actual EKF height (down, m)
+// @Field: PDnb: Shadow height without baro fusion (down, m)
+// @Field: PDwb: Shadow height with baro fusion (down, m)
+// @Field: BH: Baro height measurement adjusted for offset (down, m)
+// @Field: GH: GPS height (down, m)
+// @Field: Flg: bit0=baro fused this frame, bit1=baro suppressed by GPS gate
+struct PACKED log_EBFH {
+    LOG_PACKET_HEADER;
+    uint64_t time_us;
+    uint8_t core;
+    int16_t roll;
+    int16_t pitch;
+    uint16_t yaw;
+    float posD;
+    float posD_no_baro;
+    float posD_with_baro;
+    float baro_hgt;
+    float gps_hgt;
+    uint8_t flags;
+};
+
 // @LoggerMessage: XKV1
 // @Description: EKF3 State variances (primary core)
 // @Field: TimeUS: Time since system startup
@@ -456,7 +485,9 @@ struct PACKED log_XKV {
     { LOG_XKV1_MSG, sizeof(log_XKV), \
       "XKV1","QBffffffffffff","TimeUS,C,V00,V01,V02,V03,V04,V05,V06,V07,V08,V09,V10,V11", "s#------------", "F-------------" , true }, \
     { LOG_XKV2_MSG, sizeof(log_XKV), \
-      "XKV2","QBffffffffffff","TimeUS,C,V12,V13,V14,V15,V16,V17,V18,V19,V20,V21,V22,V23", "s#------------", "F-------------" , true },
+      "XKV2","QBffffffffffff","TimeUS,C,V12,V13,V14,V15,V16,V17,V18,V19,V20,V21,V22,V23", "s#------------", "F-------------" , true }, \
+    { LOG_EBFH_MSG, sizeof(log_EBFH), \
+      "EBFH","QBccCfffffB","TimeUS,C,Roll,Pitch,Yaw,PD,PDnb,PDwb,BH,GH,Flg", "s#ddhmmmmm-", "F-BBB0000000" , true },
 #else
   #define LOG_STRUCTURE_FROM_NAVEKF3
 #endif

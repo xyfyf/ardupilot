@@ -416,6 +416,9 @@ void NavEKF3_core::Log_Write(uint64_t time_us)
     Log_Write_State_Variances(time_us);
 
     Log_Write_Timing(time_us);
+    if (is_positive(frontend->_baroGpsHdopGate)) {
+        Log_Write_EBFH(time_us);
+    }
 }
 
 void NavEKF3_core::Log_Write_Timing(uint64_t time_us)
@@ -451,6 +454,38 @@ void NavEKF3_core::Log_Write_GSF(uint64_t time_us)
         return;
     }
     yawEstimator->Log_Write(time_us, LOG_XKY0_MSG, LOG_XKY1_MSG, DAL_CORE(core_index));
+}
+
+void NavEKF3_core::Log_Write_EBFH(uint64_t time_us) const
+{
+    Vector3f euler;
+    postype_t posD;
+    getEulerAngles(euler);
+    getPosD(posD);
+
+    uint8_t flags = 0;
+    if (baro_fused_this_frame) {
+        flags |= 1U;
+    }
+    if (baro_suppressed_by_gps) {
+        flags |= 2U;
+    }
+
+    const struct log_EBFH pkt {
+        LOG_PACKET_HEADER_INIT(LOG_EBFH_MSG),
+        time_us : time_us,
+        core : DAL_CORE(core_index),
+        roll : (int16_t)(100 * degrees(euler.x)),
+        pitch : (int16_t)(100 * degrees(euler.y)),
+        yaw : (uint16_t)wrap_360_cd(100 * degrees(euler.z)),
+        posD : (float)posD,
+        posD_no_baro : cmp_hgt_without_baro,
+        posD_with_baro : cmp_hgt_with_baro,
+        baro_hgt : last_cmp_baro_hgt,
+        gps_hgt : last_cmp_gps_hgt,
+        flags : flags,
+    };
+    AP::logger().WriteBlock(&pkt, sizeof(pkt));
 }
 
 #endif  // HAL_LOGGING_ENABLED

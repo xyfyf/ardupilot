@@ -992,6 +992,15 @@ private:
     // Select height data to be fused from the available baro, range finder and GPS sources
     void selectHeightForFusion();
 
+    // true when GPS HDOP quality suppresses barometer height fusion
+    bool gps_suppresses_baro_fusion() const;
+
+    // update baro fusion gate state and notify GCS after takeoff
+    void update_baro_fusion_gate();
+
+    // update shadow height estimates for baro fusion comparison logging
+    void update_baro_cmp_shadow();
+
     // zero attitude state covariances, but preserve variances
     void zeroAttCovOnly();
 
@@ -1322,6 +1331,14 @@ private:
     Vector2F flowGyroBias;          // bias error of optical flow sensor gyro output
     bool rangeDataToFuse;           // true when valid range finder height data has arrived at the fusion time horizon.
     bool baroDataToFuse;            // true when valid baro height finder data has arrived at the fusion time horizon.
+    bool baro_fused_this_frame;     // true when baro height was fused this frame
+    bool baro_suppressed_by_gps;    // true when baro fusion was blocked by GPS HDOP gate
+    bool prev_baro_suppressed_by_gps; // previous baro fusion gate state
+    bool cmp_hgt_initialised;       // true after shadow heights are seeded from EKF
+    ftype cmp_hgt_with_baro;        // shadow height estimate always corrected by baro (m, down)
+    ftype cmp_hgt_without_baro;     // shadow height estimate corrected by GPS only (m, down)
+    ftype last_cmp_baro_hgt;        // last baro height used by comparison log (m, down)
+    ftype last_cmp_gps_hgt;         // last GPS height used by comparison log (m, down)
     bool gpsDataToFuse;             // true when valid GPS data has arrived at the fusion time horizon.
     bool magDataToFuse;             // true when valid magnetometer data has arrived at the fusion time horizon
     enum AidingMode {
@@ -1660,4 +1677,5 @@ private:
     void Log_Write_State_Variances(uint64_t time_us);
     void Log_Write_Timing(uint64_t time_us);
     void Log_Write_GSF(uint64_t time_us);
+    void Log_Write_EBFH(uint64_t time_us) const;
 };
