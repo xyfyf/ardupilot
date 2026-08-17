@@ -992,11 +992,25 @@ private:
     // Select height data to be fused from the available baro, range finder and GPS sources
     void selectHeightForFusion();
 
+    // true when a configured GPS instance has trustworthy 3D data and HDOP below threshold
+    bool gps_instance_usable_for_baro_suppression(uint8_t instance) const;
+
     // true when GPS HDOP quality suppresses barometer height fusion
     bool gps_suppresses_baro_fusion() const;
 
-    // update baro fusion gate state and notify GCS after takeoff
-    void update_baro_fusion_gate();
+    enum class BaroGateRestoreReason : uint8_t {
+        NONE,
+        NO_GPS,
+        GPS_INVALID,
+        GPS_HDOP_POOR,
+    };
+    BaroGateRestoreReason gps_baro_restore_reason() const;
+
+    // update baro fusion gate state and notify GCS on transition; returns true if notice sent
+    bool update_baro_fusion_gate();
+
+    // notify GCS when active height source switches between GPS and baro
+    void send_hgt_source_change_notice(AP_NavEKF_Source::SourceZ prev_source, AP_NavEKF_Source::SourceZ new_source) const;
 
     // update shadow height estimates for baro fusion comparison logging
     void update_baro_cmp_shadow();
@@ -1334,6 +1348,8 @@ private:
     bool baro_fused_this_frame;     // true when baro height was fused this frame
     bool baro_suppressed_by_gps;    // true when baro fusion was blocked by GPS HDOP gate
     bool prev_baro_suppressed_by_gps; // previous baro fusion gate state
+    uint32_t last_baro_gate_notice_ms; // last time a baro fusion gate change was reported to the GCS
+    static const uint32_t BARO_GATE_NOTICE_INTERVAL_MS = 10000; // minimum interval between baro gate GCS notices
     bool cmp_hgt_initialised;       // true after shadow heights are seeded from EKF
     ftype cmp_hgt_with_baro;        // shadow height estimate always corrected by baro (m, down)
     ftype cmp_hgt_without_baro;     // shadow height estimate corrected by GPS only (m, down)

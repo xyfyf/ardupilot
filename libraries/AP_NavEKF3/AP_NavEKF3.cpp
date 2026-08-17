@@ -746,7 +746,7 @@ const AP_Param::GroupInfo NavEKF3::var_info2[] = {
 
     // @Param: BARO_HDOP
     // @DisplayName: GPS HDOP threshold for baro fusion
-    // @Description: When any 3D GPS has a valid HDOP below this threshold, EKF3 will not fuse barometer height. Baro fusion resumes when all 3D GPS have invalid HDOP or HDOP above this value. Does not require RTK fix type. Set to 0 to disable.
+    // @Description: When any configured 3D GPS has trustworthy data and HDOP below this threshold, EKF3 will not fuse barometer height. Baro fusion resumes when all GPS are disconnected, have no 3D/RTK fix, stale messages, zero HDOP/sats/position (typical indoor), or HDOP above this value. Does not require RTK fix type. Set to 0 to disable.
     // @Range: 0 10
     // @Increment: 0.1
     // @User: Advanced

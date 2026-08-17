@@ -1181,7 +1181,7 @@ void NavEKF3_core::FuseVelPosNED()
 void NavEKF3_core::selectHeightForFusion()
 {
     baro_fused_this_frame = false;
-    update_baro_fusion_gate();
+    const bool baro_gate_changed = update_baro_fusion_gate();
 #if AP_RANGEFINDER_ENABLED
     // Read range finder data and check for new data in the buffer
     // This data is used by both height and optical flow fusion processing
@@ -1411,6 +1411,9 @@ void NavEKF3_core::selectHeightForFusion()
 
     // detect changes in source and reset height
     if ((activeHgtSource != prevHgtSource) && fuseHgtData) {
+        if (!baro_gate_changed) {
+            send_hgt_source_change_notice(prevHgtSource, activeHgtSource);
+        }
         prevHgtSource = activeHgtSource;
         ResetPositionD(-hgtMea);
     }
@@ -1428,8 +1431,46 @@ void NavEKF3_core::selectHeightForFusion()
 }
 
 /*
+  Return true when a GPS instance has trustworthy 3D data suitable for baro suppression.
+  Indoor/disconnected states (no fix, stale messages, zero HDOP/sats/position) return false.
+ */
+bool NavEKF3_core::gps_instance_usable_for_baro_suppression(uint8_t instance) const
+{
+    const auto &gps = dal.gps();
+
+    if (gps.status(instance) == AP_DAL_GPS::NO_GPS) {
+        return false;
+    }
+
+    if (gps.status(instance) < AP_DAL_GPS::GPS_OK_FIX_3D) {
+        return false;
+    }
+
+    if ((imuSampleTime_ms - gps.last_message_time_ms(instance)) > 2000) {
+        return false;
+    }
+
+    const uint16_t hdop = gps.get_hdop(instance);
+    if (hdop == 0 || hdop == GPS_UNKNOWN_DOP) {
+        return false;
+    }
+
+    if (gps.num_sats(instance) == 0) {
+        return false;
+    }
+
+    const Location &loc = gps.location(instance);
+    if (loc.lat == 0 && loc.lng == 0) {
+        return false;
+    }
+
+    return true;
+}
+
+/*
   Return true when GPS HDOP quality is good enough to suppress barometer fusion.
   Any configured 3D GPS with valid HDOP below threshold will suppress baro fusion.
+  When all GPS/RTK links are down or report invalid indoor-style data, baro is fused.
   UM982 and other receivers that do not report RTK fix type are supported.
  */
 bool NavEKF3_core::gps_suppresses_baro_fusion() const
@@ -1439,7 +1480,8 @@ bool NavEKF3_core::gps_suppresses_baro_fusion() const
         return false;
     }
 
-    // do not leave EKF without a height observation before GPS height is usable
+    // the GPS used for height fusion must be delivering data, otherwise suppressing
+    // baro would leave the filter without any height observation
     if (!validOrigin || (imuSampleTime_ms - lastTimeGpsReceived_ms) > 2000) {
         return false;
     }
@@ -1448,16 +1490,11 @@ bool NavEKF3_core::gps_suppresses_baro_fusion() const
     const uint8_t num_gps = MIN(gps.num_sensors(), GPS_MAX_INSTANCES);
 
     for (uint8_t i = 0; i < num_gps; i++) {
-        const AP_DAL_GPS::GPS_Status status = gps.status(i);
-        if (status < AP_DAL_GPS::GPS_OK_FIX_3D) {
+        if (!gps_instance_usable_for_baro_suppression(i)) {
             continue;
         }
 
         const uint16_t hdop = gps.get_hdop(i);
-        if (hdop == 0) {
-            continue;
-        }
-
         if (hdop * 0.01f <= threshold) {
             return true;
         }
@@ -1467,22 +1504,85 @@ bool NavEKF3_core::gps_suppresses_baro_fusion() const
 }
 
 /*
-  Track baro fusion gate transitions and notify GCS after takeoff.
+  Classify why baro fusion is being restored after GPS suppression ends.
  */
-void NavEKF3_core::update_baro_fusion_gate()
+NavEKF3_core::BaroGateRestoreReason NavEKF3_core::gps_baro_restore_reason() const
+{
+    const auto &gps = dal.gps();
+    const uint8_t num_gps = MIN(gps.num_sensors(), GPS_MAX_INSTANCES);
+    bool any_configured = false;
+    bool any_usable = false;
+
+    for (uint8_t i = 0; i < num_gps; i++) {
+        if (gps.status(i) == AP_DAL_GPS::NO_GPS) {
+            continue;
+        }
+        any_configured = true;
+        if (gps_instance_usable_for_baro_suppression(i)) {
+            any_usable = true;
+            break;
+        }
+    }
+
+    if (!any_configured) {
+        return BaroGateRestoreReason::NO_GPS;
+    }
+    if (!any_usable) {
+        return BaroGateRestoreReason::GPS_INVALID;
+    }
+    return BaroGateRestoreReason::GPS_HDOP_POOR;
+}
+
+/*
+  Track baro fusion gate transitions and notify GCS.
+  Notices are rate limited, but a transition always suppresses the height source
+  change notice so the two messages cannot double up.
+  Returns true when the gate state changed this frame.
+ */
+bool NavEKF3_core::update_baro_fusion_gate()
 {
     const bool suppressed = gps_suppresses_baro_fusion();
+    const bool state_changed = (suppressed != prev_baro_suppressed_by_gps);
+    const bool notice_allowed = (last_baro_gate_notice_ms == 0) ||
+                                ((imuSampleTime_ms - last_baro_gate_notice_ms) >= BARO_GATE_NOTICE_INTERVAL_MS);
 
-    if (inFlight && suppressed != prev_baro_suppressed_by_gps) {
+    if (state_changed && notice_allowed) {
+        last_baro_gate_notice_ms = imuSampleTime_ms;
         if (suppressed) {
-            GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:停用气压计,改用GPS", (unsigned)imu_index);
+            GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS良好,停用气压计", (unsigned)imu_index);
         } else {
-            GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:恢复气压计融合", (unsigned)imu_index);
+            switch (gps_baro_restore_reason()) {
+            case BaroGateRestoreReason::NO_GPS:
+                GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS断开,恢复气压计", (unsigned)imu_index);
+                break;
+            case BaroGateRestoreReason::GPS_INVALID:
+                GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS无效(室内),恢复气压计", (unsigned)imu_index);
+                break;
+            case BaroGateRestoreReason::GPS_HDOP_POOR:
+                GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS精度差,恢复气压计", (unsigned)imu_index);
+                break;
+            default:
+                GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:恢复气压计融合", (unsigned)imu_index);
+                break;
+            }
         }
     }
 
     prev_baro_suppressed_by_gps = suppressed;
     baro_suppressed_by_gps = suppressed;
+    return state_changed;
+}
+
+/*
+  Notify GCS when active height source switches between GPS and baro.
+ */
+void NavEKF3_core::send_hgt_source_change_notice(AP_NavEKF_Source::SourceZ prev_source, AP_NavEKF_Source::SourceZ new_source) const
+{
+    if (prev_source == AP_NavEKF_Source::SourceZ::GPS && new_source == AP_NavEKF_Source::SourceZ::BARO) {
+        GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS不可用,改用气压计", (unsigned)imu_index);
+    } else if (prev_source == AP_NavEKF_Source::SourceZ::BARO && new_source == AP_NavEKF_Source::SourceZ::GPS) {
+        GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS可用,改用GPS", (unsigned)imu_index);
+    }
 }
 
 /*

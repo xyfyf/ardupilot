@@ -287,6 +287,7 @@ void NavEKF3_core::InitialiseVariables()
     baro_fused_this_frame = false;
     baro_suppressed_by_gps = false;
     prev_baro_suppressed_by_gps = false;
+    last_baro_gate_notice_ms = 0;
     cmp_hgt_initialised = false;
     cmp_hgt_with_baro = 0.0f;
     cmp_hgt_without_baro = 0.0f;
