@@ -1181,7 +1181,7 @@ void NavEKF3_core::FuseVelPosNED()
 void NavEKF3_core::selectHeightForFusion()
 {
     baro_fused_this_frame = false;
-    const bool baro_gate_changed = update_baro_fusion_gate();
+    update_baro_fusion_gate();
 #if AP_RANGEFINDER_ENABLED
     // Read range finder data and check for new data in the buffer
     // This data is used by both height and optical flow fusion processing
@@ -1261,7 +1261,9 @@ void NavEKF3_core::selectHeightForFusion()
 #endif
     } else if (frontend->sources.getPosZSource(core_index) == AP_NavEKF_Source::SourceZ::BARO) {
         activeHgtSource = AP_NavEKF_Source::SourceZ::BARO;
-    } else if ((frontend->sources.getPosZSource(core_index) == AP_NavEKF_Source::SourceZ::GPS) && ((imuSampleTime_ms - lastTimeGpsReceived_ms) < 500) && validOrigin && gpsAccuracyGood) {
+    } else if ((frontend->sources.getPosZSource(core_index) == AP_NavEKF_Source::SourceZ::GPS) && ((imuSampleTime_ms - lastTimeGpsReceived_ms) < 500) && validOrigin && gpsAccuracyGood
+               && (!is_positive(frontend->_baroGpsHdopGate) || baro_suppressed_by_gps) && !baro_hgt_locked) {
+        // with the baro gate enabled, GPS height is only used while the gate keeps baro off
         activeHgtSource = AP_NavEKF_Source::SourceZ::GPS;
 #if EK3_FEATURE_BEACON_FUSION
     } else if ((frontend->sources.getPosZSource(core_index) == AP_NavEKF_Source::SourceZ::BEACON) && validOrigin && rngBcn.goodToAlign) {
@@ -1290,17 +1292,20 @@ void NavEKF3_core::selectHeightForFusion()
     bool lostExtNavHgt = ((activeHgtSource == AP_NavEKF_Source::SourceZ::EXTNAV) && !extNavDataIsFresh);
     fallback_to_baro |= lostExtNavHgt;
 #endif
-    if (fallback_to_baro) {
-        if (!baro_suppressed_by_gps) {
-            activeHgtSource = AP_NavEKF_Source::SourceZ::BARO;
-        }
+    if (fallback_to_baro && !baro_suppressed_by_gps) {
+        activeHgtSource = AP_NavEKF_Source::SourceZ::BARO;
     }
 
-    // when GPS quality is good, use GPS height instead of baro
-    if (baro_suppressed_by_gps && activeHgtSource == AP_NavEKF_Source::SourceZ::BARO) {
-        if (((imuSampleTime_ms - lastTimeGpsReceived_ms) < 500) && validOrigin) {
-            activeHgtSource = AP_NavEKF_Source::SourceZ::GPS;
-        }
+    // the gate blocks baro fusion, so switch to GPS height to keep a height observation
+    if (baro_suppressed_by_gps && !baro_hgt_locked && (activeHgtSource == AP_NavEKF_Source::SourceZ::BARO) &&
+        ((imuSampleTime_ms - lastTimeGpsReceived_ms) < 500) &&
+        (!is_positive(frontend->_baroGpsHdopGate) || !gps_height_disagrees_with_ekf())) {
+        activeHgtSource = AP_NavEKF_Source::SourceZ::GPS;
+    }
+
+    // once locked onto baro height, never keep GPS selected as the active height source
+    if (baro_hgt_locked && activeHgtSource == AP_NavEKF_Source::SourceZ::GPS) {
+        activeHgtSource = AP_NavEKF_Source::SourceZ::BARO;
     }
 
     // if there is new baro data to fuse, calculate filtered baro data required by other processes
@@ -1362,7 +1367,8 @@ void NavEKF3_core::selectHeightForFusion()
             // disable fusion if tilted too far
             fuseHgtData = false;
         }
-    } else if (gpsDataToFuse && (activeHgtSource == AP_NavEKF_Source::SourceZ::GPS)) {
+    } else if (gpsDataToFuse && (activeHgtSource == AP_NavEKF_Source::SourceZ::GPS) && !baro_hgt_locked &&
+               !gps_height_disagrees_with_ekf()) {
         // using GPS data
         hgtMea = gpsDataDelayed.hgt;
         velPosObs[5] = -hgtMea;
@@ -1411,11 +1417,14 @@ void NavEKF3_core::selectHeightForFusion()
 
     // detect changes in source and reset height
     if ((activeHgtSource != prevHgtSource) && fuseHgtData) {
-        if (!baro_gate_changed) {
+        if (!is_positive(frontend->_baroGpsHdopGate)) {
+            // with the gate enabled its own notice already explains the switch
             send_hgt_source_change_notice(prevHgtSource, activeHgtSource);
         }
         prevHgtSource = activeHgtSource;
-        ResetPositionD(-hgtMea);
+        if (activeHgtSource != AP_NavEKF_Source::SourceZ::GPS || !gps_height_disagrees_with_ekf()) {
+            ResetPositionD(-hgtMea);
+        }
     }
 
     // If we haven't fused height data for a while or have bad IMU data, then declare the height data as being timed out
@@ -1431,146 +1440,150 @@ void NavEKF3_core::selectHeightForFusion()
 }
 
 /*
-  Return true when a GPS instance has trustworthy 3D data suitable for baro suppression.
-  Indoor/disconnected states (no fix, stale messages, zero HDOP/sats/position) return false.
+  Scan all GPS instances for height quality.
+  data_fresh is true if any instance has a recent 3D fix, hdop_good is true if any
+  instance also reports a valid HDOP at or below hdop_limit.
  */
-bool NavEKF3_core::gps_instance_usable_for_baro_suppression(uint8_t instance) const
+void NavEKF3_core::check_gps_hdop(float hdop_limit, bool &data_fresh, bool &hdop_good) const
 {
-    const auto &gps = dal.gps();
-
-    if (gps.status(instance) == AP_DAL_GPS::NO_GPS) {
-        return false;
-    }
-
-    if (gps.status(instance) < AP_DAL_GPS::GPS_OK_FIX_3D) {
-        return false;
-    }
-
-    if ((imuSampleTime_ms - gps.last_message_time_ms(instance)) > 2000) {
-        return false;
-    }
-
-    const uint16_t hdop = gps.get_hdop(instance);
-    if (hdop == 0 || hdop == GPS_UNKNOWN_DOP) {
-        return false;
-    }
-
-    if (gps.num_sats(instance) == 0) {
-        return false;
-    }
-
-    const Location &loc = gps.location(instance);
-    if (loc.lat == 0 && loc.lng == 0) {
-        return false;
-    }
-
-    return true;
-}
-
-/*
-  Return true when GPS HDOP quality is good enough to suppress barometer fusion.
-  Any configured 3D GPS with valid HDOP below threshold will suppress baro fusion.
-  When all GPS/RTK links are down or report invalid indoor-style data, baro is fused.
-  UM982 and other receivers that do not report RTK fix type are supported.
- */
-bool NavEKF3_core::gps_suppresses_baro_fusion() const
-{
-    const float threshold = frontend->_baroGpsHdopGate;
-    if (!is_positive(threshold)) {
-        return false;
-    }
-
-    // the GPS used for height fusion must be delivering data, otherwise suppressing
-    // baro would leave the filter without any height observation
-    if (!validOrigin || (imuSampleTime_ms - lastTimeGpsReceived_ms) > 2000) {
-        return false;
-    }
+    data_fresh = false;
+    hdop_good = false;
 
     const auto &gps = dal.gps();
     const uint8_t num_gps = MIN(gps.num_sensors(), GPS_MAX_INSTANCES);
 
     for (uint8_t i = 0; i < num_gps; i++) {
-        if (!gps_instance_usable_for_baro_suppression(i)) {
+        if (gps.status(i) < AP_DAL_GPS::GPS_OK_FIX_3D) {
             continue;
         }
+        if ((imuSampleTime_ms - gps.last_message_time_ms(i)) > BARO_GATE_GPS_TIMEOUT_MS) {
+            continue;
+        }
+        data_fresh = true;
 
         const uint16_t hdop = gps.get_hdop(i);
-        if (hdop * 0.01f <= threshold) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-/*
-  Classify why baro fusion is being restored after GPS suppression ends.
- */
-NavEKF3_core::BaroGateRestoreReason NavEKF3_core::gps_baro_restore_reason() const
-{
-    const auto &gps = dal.gps();
-    const uint8_t num_gps = MIN(gps.num_sensors(), GPS_MAX_INSTANCES);
-    bool any_configured = false;
-    bool any_usable = false;
-
-    for (uint8_t i = 0; i < num_gps; i++) {
-        if (gps.status(i) == AP_DAL_GPS::NO_GPS) {
+        if (hdop == 0 || hdop == GPS_UNKNOWN_DOP) {
+            // receiver is not reporting HDOP, so its quality cannot be trusted
             continue;
         }
-        any_configured = true;
-        if (gps_instance_usable_for_baro_suppression(i)) {
-            any_usable = true;
-            break;
+        if (0.01f * (float)hdop <= hdop_limit) {
+            hdop_good = true;
+            return;
         }
     }
-
-    if (!any_configured) {
-        return BaroGateRestoreReason::NO_GPS;
-    }
-    if (!any_usable) {
-        return BaroGateRestoreReason::GPS_INVALID;
-    }
-    return BaroGateRestoreReason::GPS_HDOP_POOR;
 }
 
 /*
-  Track baro fusion gate transitions and notify GCS.
-  Notices are rate limited, but a transition always suppresses the height source
-  change notice so the two messages cannot double up.
-  Returns true when the gate state changed this frame.
+  Return true when GPS height disagrees with the current EKF height by more than
+  BARO_GATE_GPS_HGT_REJECT_M (same sign convention as the GPS height innovation).
  */
-bool NavEKF3_core::update_baro_fusion_gate()
+bool NavEKF3_core::gps_height_disagrees_with_ekf() const
 {
-    const bool suppressed = gps_suppresses_baro_fusion();
-    const bool state_changed = (suppressed != prev_baro_suppressed_by_gps);
-    const bool notice_allowed = (last_baro_gate_notice_ms == 0) ||
-                                ((imuSampleTime_ms - last_baro_gate_notice_ms) >= BARO_GATE_NOTICE_INTERVAL_MS);
-
-    if (state_changed && notice_allowed) {
-        last_baro_gate_notice_ms = imuSampleTime_ms;
-        if (suppressed) {
-            GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS良好,停用气压计", (unsigned)imu_index);
-        } else {
-            switch (gps_baro_restore_reason()) {
-            case BaroGateRestoreReason::NO_GPS:
-                GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS断开,恢复气压计", (unsigned)imu_index);
-                break;
-            case BaroGateRestoreReason::GPS_INVALID:
-                GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS无效(室内),恢复气压计", (unsigned)imu_index);
-                break;
-            case BaroGateRestoreReason::GPS_HDOP_POOR:
-                GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS精度差,恢复气压计", (unsigned)imu_index);
-                break;
-            default:
-                GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:恢复气压计融合", (unsigned)imu_index);
-                break;
-            }
-        }
+    if (!gpsDataToFuse) {
+        return false;
     }
+    return fabsF(-stateStruct.position.z - gpsDataDelayed.hgt) > BARO_GATE_GPS_HGT_REJECT_M;
+}
+
+/*
+  Decide whether raw baro height may be fused this frame.
+  Baro is blocked from boot until GPS has a 3D fix and the EKF origin is set, while HDOP
+  is good, or after GPS data loss / excessive GPS height disagreement (baro_hgt_locked until reboot).
+ */
+void NavEKF3_core::update_baro_fusion_gate()
+{
+    const float hdop_gate = frontend->_baroGpsHdopGate;
+    if (!is_positive(hdop_gate)) {
+        baro_suppressed_by_gps = false;
+        prev_baro_suppressed_by_gps = false;
+        return;
+    }
+
+    // widen the gate once baro is off so marginal HDOP does not chatter the height source
+    bool gps_data_fresh, gps_hdop_good;
+    check_gps_hdop(baro_suppressed_by_gps ? 1.5f * hdop_gate : hdop_gate, gps_data_fresh, gps_hdop_good);
+
+    if (!gps_data_fresh && validOrigin) {
+        baro_hgt_locked = true;
+    } else if (gps_data_fresh && validOrigin && gpsDataToFuse && !baro_hgt_locked &&
+               gps_height_disagrees_with_ekf()) {
+        baro_hgt_locked = true;
+    }
+
+    bool suppressed;
+    if (baro_hgt_locked) {
+        suppressed = false;
+    } else if (!validOrigin || !gps_data_fresh) {
+        // no GPS origin yet, or still waiting for a 3D fix: do not fuse baro
+        suppressed = true;
+    } else {
+        suppressed = gps_hdop_good;
+    }
+
+    const bool gate_changed = (suppressed != prev_baro_suppressed_by_gps);
+    const bool gps_lost = prev_gps_data_fresh_baro_gate && !gps_data_fresh;
+    const bool gps_restored = !prev_gps_data_fresh_baro_gate && gps_data_fresh;
+    const bool just_locked = baro_hgt_locked && !prev_baro_hgt_locked;
+    const bool locked_from_excessive_gps = just_locked && gps_data_fresh && gpsDataToFuse;
+    const bool origin_just_set = validOrigin && !prev_validOrigin_baro_gate;
 
     prev_baro_suppressed_by_gps = suppressed;
     baro_suppressed_by_gps = suppressed;
-    return state_changed;
+    prev_gps_data_fresh_baro_gate = gps_data_fresh;
+    prev_baro_hgt_locked = baro_hgt_locked;
+
+    const bool notice_allowed = (last_baro_gate_notice_ms == 0) ||
+                                ((imuSampleTime_ms - last_baro_gate_notice_ms) >= BARO_GATE_NOTICE_INTERVAL_MS);
+    if (notice_allowed) {
+        if (just_locked) {
+            last_baro_gate_notice_ms = imuSampleTime_ms;
+            if (locked_from_excessive_gps) {
+                GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS偏差过大,拒绝GPS高度", (unsigned)imu_index);
+            } else {
+                GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS丢失,气压计锁定", (unsigned)imu_index);
+            }
+        } else if (origin_just_set && !baro_hgt_locked) {
+            last_baro_gate_notice_ms = imuSampleTime_ms;
+            if (suppressed && gps_hdop_good) {
+                GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS原点就绪,使用GPS高度", (unsigned)imu_index);
+            } else if (!suppressed && gps_data_fresh) {
+                GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS原点就绪,精度差暂用气压计", (unsigned)imu_index);
+            } else {
+                GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS原点就绪,等待GPS数据", (unsigned)imu_index);
+            }
+        } else if (gate_changed) {
+            last_baro_gate_notice_ms = imuSampleTime_ms;
+            if (suppressed) {
+                GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS精度良好,停用气压计", (unsigned)imu_index);
+            } else {
+                GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS精度差,改用气压计", (unsigned)imu_index);
+            }
+        } else if (gps_restored && baro_hgt_locked) {
+            last_baro_gate_notice_ms = imuSampleTime_ms;
+            GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS已恢复,仍用气压计(已锁定)", (unsigned)imu_index);
+        } else if (gps_restored && validOrigin && !baro_hgt_locked && gps_hdop_good) {
+            last_baro_gate_notice_ms = imuSampleTime_ms;
+            GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS恢复,使用GPS高度", (unsigned)imu_index);
+        } else if (gps_restored && validOrigin && !baro_hgt_locked && !gps_hdop_good) {
+            last_baro_gate_notice_ms = imuSampleTime_ms;
+            GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS恢复但精度差,暂用气压计", (unsigned)imu_index);
+        } else if (gps_restored && !validOrigin) {
+            last_baro_gate_notice_ms = imuSampleTime_ms;
+            GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS有定位,等待原点", (unsigned)imu_index);
+        } else if (gps_lost && validOrigin && !baro_hgt_locked && !dal.get_armed()) {
+            last_baro_gate_notice_ms = imuSampleTime_ms;
+            GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS无数据,等待GPS恢复", (unsigned)imu_index);
+        } else if (gps_lost && !validOrigin) {
+            last_baro_gate_notice_ms = imuSampleTime_ms;
+            GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:GPS丢失,等待GPS恢复", (unsigned)imu_index);
+        } else if (!validOrigin && !gps_data_fresh && !baro_gate_wait_gps_notified) {
+            last_baro_gate_notice_ms = imuSampleTime_ms;
+            baro_gate_wait_gps_notified = true;
+            GCS_SEND_TEXT(MAV_SEVERITY_NOTICE, "EKF3 IMU%u 高度:等待GPS就绪", (unsigned)imu_index);
+        }
+    }
+
+    prev_validOrigin_baro_gate = validOrigin;
 }
 
 /*

@@ -20,6 +20,9 @@ NavEKF3_core::NavEKF3_core(NavEKF3 *_frontend, AP_DAL &_dal) :
 // setup this core backend
 bool NavEKF3_core::setup_core(uint8_t _imu_index, uint8_t _core_index)
 {
+    // cleared here and not in InitialiseVariables() so it survives an in-flight filter restart
+    baro_hgt_locked = false;
+
     imu_index = _imu_index;
     gyro_index_active = imu_index;
     accel_index_active = imu_index;
@@ -285,8 +288,12 @@ void NavEKF3_core::InitialiseVariables()
     gpsHgtAccuracy = 0.0f;
     baroHgtOffset = 0.0f;
     baro_fused_this_frame = false;
-    baro_suppressed_by_gps = false;
-    prev_baro_suppressed_by_gps = false;
+    baro_suppressed_by_gps = is_positive(frontend->_baroGpsHdopGate);
+    prev_baro_suppressed_by_gps = baro_suppressed_by_gps;
+    prev_gps_data_fresh_baro_gate = false;
+    prev_baro_hgt_locked = false;
+    prev_validOrigin_baro_gate = false;
+    baro_gate_wait_gps_notified = false;
     last_baro_gate_notice_ms = 0;
     cmp_hgt_initialised = false;
     cmp_hgt_with_baro = 0.0f;

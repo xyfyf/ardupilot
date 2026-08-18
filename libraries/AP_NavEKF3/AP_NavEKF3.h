@@ -460,7 +460,7 @@ private:
     AP_Enum<LogLevel> _log_level;   // log verbosity level
     AP_Float _gpsVAccThreshold;     // vertical accuracy threshold to use GPS as an altitude source
     AP_Int32 _options;              // bit mask of processing options
-    AP_Float _baroGpsHdopGate;      // suppress baro fusion when any 3D GPS HDOP is below this (0=disable)
+    AP_Float _baroGpsHdopGate;      // GPS HDOP at or below which baro height is not fused (0=disable)
 
     // enum for processing options
     enum class Option {

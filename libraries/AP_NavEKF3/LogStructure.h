@@ -390,7 +390,7 @@ struct PACKED log_XKTV {
 // @Field: PDwb: Shadow height with baro fusion (down, m)
 // @Field: BH: Baro height measurement adjusted for offset (down, m)
 // @Field: GH: GPS height (down, m)
-// @Field: Flg: bit0=baro fused this frame, bit1=baro suppressed by GPS gate
+// @Field: Flg: bit0=baro fused this frame, bit1=baro blocked by GPS HDOP gate, bit2=baro latched on until reboot
 struct PACKED log_EBFH {
     LOG_PACKET_HEADER;
     uint64_t time_us;

@@ -745,8 +745,8 @@ const AP_Param::GroupInfo NavEKF3::var_info2[] = {
     AP_GROUPINFO("OPTIONS",  11, NavEKF3, _options, 0),
 
     // @Param: BARO_HDOP
-    // @DisplayName: GPS HDOP threshold for baro fusion
-    // @Description: When any configured 3D GPS has trustworthy data and HDOP below this threshold, EKF3 will not fuse barometer height. Baro fusion resumes when all GPS are disconnected, have no 3D/RTK fix, stale messages, zero HDOP/sats/position (typical indoor), or HDOP above this value. Does not require RTK fix type. Set to 0 to disable.
+    // @DisplayName: GPS HDOP threshold for baro height fusion
+    // @Description: Baro is not fused from boot until GPS has a 3D fix and the EKF origin is set. While any GPS reports HDOP at or below this value, EKF3 uses GPS height and does not fuse raw barometer height. Barometer height is fused again when every GPS HDOP is above this value (1.5x hysteresis to switch back). If GPS data is lost after the EKF origin is set, or GPS height disagrees with the EKF by more than 2m, barometer height fusion stays latched on until reboot. Set to 0 to use the stock EKF3 height selection.
     // @Range: 0 10
     // @Increment: 0.1
     // @User: Advanced

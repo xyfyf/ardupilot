@@ -470,6 +470,9 @@ void NavEKF3_core::Log_Write_EBFH(uint64_t time_us) const
     if (baro_suppressed_by_gps) {
         flags |= 2U;
     }
+    if (baro_hgt_locked) {
+        flags |= 4U;
+    }
 
     const struct log_EBFH pkt {
         LOG_PACKET_HEADER_INIT(LOG_EBFH_MSG),
