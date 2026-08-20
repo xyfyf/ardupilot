@@ -5,9 +5,9 @@
 
 
 typedef struct __mavlink_mav_framing_override_cmd_t {
- uint16_t crc; /*<  CRC value (little-endian) to force into the 2-byte checksum field when bit0 of cmd is set. Ignored when bit0 is clear.*/
+ uint16_t crc; /*<  CRC value (little-endian) to force into the 2-byte checksum field when bit0 of cmd is set. Ignored when bit0 is clear. Not persisted.*/
  uint8_t cmd; /*<  Override command (0-3): bit0=force CRC to the crc field, bit1=use the magic field byte instead of 0xFD.*/
- uint8_t magic; /*<  Start-of-frame magic byte to use when bit1 of cmd is set (e.g. 0xEF). Ignored when bit1 is clear.*/
+ uint8_t magic; /*<  Start-of-frame magic byte to use when bit1 of cmd is set (e.g. 0xEF). magic=0 restores board default. Ignored when bit1 is clear.*/
 } mavlink_mav_framing_override_cmd_t;
 
 #define MAVLINK_MSG_ID_MAV_FRAMING_OVERRIDE_CMD_LEN 4
@@ -48,8 +48,8 @@ typedef struct __mavlink_mav_framing_override_cmd_t {
  * @param msg The MAVLink message to compress the data into
  *
  * @param cmd  Override command (0-3): bit0=force CRC to the crc field, bit1=use the magic field byte instead of 0xFD.
- * @param magic  Start-of-frame magic byte to use when bit1 of cmd is set (e.g. 0xEF). Ignored when bit1 is clear.
- * @param crc  CRC value (little-endian) to force into the 2-byte checksum field when bit0 of cmd is set. Ignored when bit0 is clear.
+ * @param magic  Start-of-frame magic byte to use when bit1 of cmd is set (e.g. 0xEF). magic=0 restores board default. Ignored when bit1 is clear.
+ * @param crc  CRC value (little-endian) to force into the 2-byte checksum field when bit0 of cmd is set. Ignored when bit0 is clear. Not persisted.
  * @return length of the message in bytes (excluding serial stream start sign)
  */
 static inline uint16_t mavlink_msg_mav_framing_override_cmd_pack(uint8_t system_id, uint8_t component_id, mavlink_message_t* msg,
@@ -83,8 +83,8 @@ static inline uint16_t mavlink_msg_mav_framing_override_cmd_pack(uint8_t system_
  * @param msg The MAVLink message to compress the data into
  *
  * @param cmd  Override command (0-3): bit0=force CRC to the crc field, bit1=use the magic field byte instead of 0xFD.
- * @param magic  Start-of-frame magic byte to use when bit1 of cmd is set (e.g. 0xEF). Ignored when bit1 is clear.
- * @param crc  CRC value (little-endian) to force into the 2-byte checksum field when bit0 of cmd is set. Ignored when bit0 is clear.
+ * @param magic  Start-of-frame magic byte to use when bit1 of cmd is set (e.g. 0xEF). magic=0 restores board default. Ignored when bit1 is clear.
+ * @param crc  CRC value (little-endian) to force into the 2-byte checksum field when bit0 of cmd is set. Ignored when bit0 is clear. Not persisted.
  * @return length of the message in bytes (excluding serial stream start sign)
  */
 static inline uint16_t mavlink_msg_mav_framing_override_cmd_pack_status(uint8_t system_id, uint8_t component_id, mavlink_status_t *_status, mavlink_message_t* msg,
@@ -121,8 +121,8 @@ static inline uint16_t mavlink_msg_mav_framing_override_cmd_pack_status(uint8_t 
  * @param chan The MAVLink channel this message will be sent over
  * @param msg The MAVLink message to compress the data into
  * @param cmd  Override command (0-3): bit0=force CRC to the crc field, bit1=use the magic field byte instead of 0xFD.
- * @param magic  Start-of-frame magic byte to use when bit1 of cmd is set (e.g. 0xEF). Ignored when bit1 is clear.
- * @param crc  CRC value (little-endian) to force into the 2-byte checksum field when bit0 of cmd is set. Ignored when bit0 is clear.
+ * @param magic  Start-of-frame magic byte to use when bit1 of cmd is set (e.g. 0xEF). magic=0 restores board default. Ignored when bit1 is clear.
+ * @param crc  CRC value (little-endian) to force into the 2-byte checksum field when bit0 of cmd is set. Ignored when bit0 is clear. Not persisted.
  * @return length of the message in bytes (excluding serial stream start sign)
  */
 static inline uint16_t mavlink_msg_mav_framing_override_cmd_pack_chan(uint8_t system_id, uint8_t component_id, uint8_t chan,
@@ -195,8 +195,8 @@ static inline uint16_t mavlink_msg_mav_framing_override_cmd_encode_status(uint8_
  * @param chan MAVLink channel to send the message
  *
  * @param cmd  Override command (0-3): bit0=force CRC to the crc field, bit1=use the magic field byte instead of 0xFD.
- * @param magic  Start-of-frame magic byte to use when bit1 of cmd is set (e.g. 0xEF). Ignored when bit1 is clear.
- * @param crc  CRC value (little-endian) to force into the 2-byte checksum field when bit0 of cmd is set. Ignored when bit0 is clear.
+ * @param magic  Start-of-frame magic byte to use when bit1 of cmd is set (e.g. 0xEF). magic=0 restores board default. Ignored when bit1 is clear.
+ * @param crc  CRC value (little-endian) to force into the 2-byte checksum field when bit0 of cmd is set. Ignored when bit0 is clear. Not persisted.
  */
 #ifdef MAVLINK_USE_CONVENIENCE_FUNCTIONS
 
@@ -279,7 +279,7 @@ static inline uint8_t mavlink_msg_mav_framing_override_cmd_get_cmd(const mavlink
 /**
  * @brief Get field magic from mav_framing_override_cmd message
  *
- * @return  Start-of-frame magic byte to use when bit1 of cmd is set (e.g. 0xEF). Ignored when bit1 is clear.
+ * @return  Start-of-frame magic byte to use when bit1 of cmd is set (e.g. 0xEF). magic=0 restores board default. Ignored when bit1 is clear.
  */
 static inline uint8_t mavlink_msg_mav_framing_override_cmd_get_magic(const mavlink_message_t* msg)
 {
@@ -289,7 +289,7 @@ static inline uint8_t mavlink_msg_mav_framing_override_cmd_get_magic(const mavli
 /**
  * @brief Get field crc from mav_framing_override_cmd message
  *
- * @return  CRC value (little-endian) to force into the 2-byte checksum field when bit0 of cmd is set. Ignored when bit0 is clear.
+ * @return  CRC value (little-endian) to force into the 2-byte checksum field when bit0 of cmd is set. Ignored when bit0 is clear. Not persisted.
  */
 static inline uint16_t mavlink_msg_mav_framing_override_cmd_get_crc(const mavlink_message_t* msg)
 {

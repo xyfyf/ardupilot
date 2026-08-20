@@ -8,7 +8,7 @@ typedef struct __mavlink_eft_rid_config_request_t {
  uint8_t target_system; /*<  System ID.*/
  uint8_t target_component; /*<  Component ID.*/
  uint8_t seq; /*<  Request sequence number echoed in the reply.*/
- uint8_t type; /*<  0: query current status; 1: clear RID config/status data then reply.*/
+ uint8_t type; /*<  0: query current status; 1: clear RID config/status data then reply; 2: clear FactorySN (four SN groups) then reply.*/
 } mavlink_eft_rid_config_request_t;
 
 #define MAVLINK_MSG_ID_EFT_RID_CONFIG_REQUEST_LEN 4
@@ -53,7 +53,7 @@ typedef struct __mavlink_eft_rid_config_request_t {
  * @param target_system  System ID.
  * @param target_component  Component ID.
  * @param seq  Request sequence number echoed in the reply.
- * @param type  0: query current status; 1: clear RID config/status data then reply.
+ * @param type  0: query current status; 1: clear RID config/status data then reply; 2: clear FactorySN (four SN groups) then reply.
  * @return length of the message in bytes (excluding serial stream start sign)
  */
 static inline uint16_t mavlink_msg_eft_rid_config_request_pack(uint8_t system_id, uint8_t component_id, mavlink_message_t* msg,
@@ -91,7 +91,7 @@ static inline uint16_t mavlink_msg_eft_rid_config_request_pack(uint8_t system_id
  * @param target_system  System ID.
  * @param target_component  Component ID.
  * @param seq  Request sequence number echoed in the reply.
- * @param type  0: query current status; 1: clear RID config/status data then reply.
+ * @param type  0: query current status; 1: clear RID config/status data then reply; 2: clear FactorySN (four SN groups) then reply.
  * @return length of the message in bytes (excluding serial stream start sign)
  */
 static inline uint16_t mavlink_msg_eft_rid_config_request_pack_status(uint8_t system_id, uint8_t component_id, mavlink_status_t *_status, mavlink_message_t* msg,
@@ -132,7 +132,7 @@ static inline uint16_t mavlink_msg_eft_rid_config_request_pack_status(uint8_t sy
  * @param target_system  System ID.
  * @param target_component  Component ID.
  * @param seq  Request sequence number echoed in the reply.
- * @param type  0: query current status; 1: clear RID config/status data then reply.
+ * @param type  0: query current status; 1: clear RID config/status data then reply; 2: clear FactorySN (four SN groups) then reply.
  * @return length of the message in bytes (excluding serial stream start sign)
  */
 static inline uint16_t mavlink_msg_eft_rid_config_request_pack_chan(uint8_t system_id, uint8_t component_id, uint8_t chan,
@@ -209,7 +209,7 @@ static inline uint16_t mavlink_msg_eft_rid_config_request_encode_status(uint8_t 
  * @param target_system  System ID.
  * @param target_component  Component ID.
  * @param seq  Request sequence number echoed in the reply.
- * @param type  0: query current status; 1: clear RID config/status data then reply.
+ * @param type  0: query current status; 1: clear RID config/status data then reply; 2: clear FactorySN (four SN groups) then reply.
  */
 #ifdef MAVLINK_USE_CONVENIENCE_FUNCTIONS
 
@@ -316,7 +316,7 @@ static inline uint8_t mavlink_msg_eft_rid_config_request_get_seq(const mavlink_m
 /**
  * @brief Get field type from eft_rid_config_request message
  *
- * @return  0: query current status; 1: clear RID config/status data then reply.
+ * @return  0: query current status; 1: clear RID config/status data then reply; 2: clear FactorySN (four SN groups) then reply.
  */
 static inline uint8_t mavlink_msg_eft_rid_config_request_get_type(const mavlink_message_t* msg)
 {
