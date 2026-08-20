@@ -995,14 +995,11 @@ private:
     // scan all GPS instances: data_fresh = any recent 3D fix, hdop_good = any HDOP within hdop_limit
     void check_gps_hdop(float hdop_limit, bool &data_fresh, bool &hdop_good) const;
 
-    // update baro fusion gate state and notify GCS on transition
+    // update baro fusion gate state
     void update_baro_fusion_gate();
 
     // true when GPS height disagrees with the EKF by more than BARO_GATE_GPS_HGT_REJECT_M
     bool gps_height_disagrees_with_ekf() const;
-
-    // notify GCS when active height source switches between GPS and baro
-    void send_hgt_source_change_notice(AP_NavEKF_Source::SourceZ prev_source, AP_NavEKF_Source::SourceZ new_source) const;
 
     // update shadow height estimates for baro fusion comparison logging
     void update_baro_cmp_shadow();
@@ -1339,14 +1336,7 @@ private:
     bool baroDataToFuse;            // true when valid baro height finder data has arrived at the fusion time horizon.
     bool baro_fused_this_frame;     // true when baro height was fused this frame
     bool baro_suppressed_by_gps;    // true when baro fusion is blocked because GPS HDOP is good
-    bool prev_baro_suppressed_by_gps; // previous baro fusion gate state
-    bool prev_gps_data_fresh_baro_gate; // previous GPS 3D fix freshness for GCS notices
-    bool prev_baro_hgt_locked;      // previous baro height lock state
-    bool prev_validOrigin_baro_gate; // previous EKF origin state for GCS notices
-    bool baro_gate_wait_gps_notified; // true after boot "waiting for GPS" notice was sent
-    uint32_t last_baro_gate_notice_ms; // last time a baro fusion gate change was reported to the GCS
     bool baro_hgt_locked;           // true after GPS data loss or excessive GPS/EKF height disagreement; stay on baro until reboot
-    static const uint32_t BARO_GATE_NOTICE_INTERVAL_MS = 10000; // minimum interval between baro gate GCS notices
     static const uint32_t BARO_GATE_GPS_TIMEOUT_MS = 2000; // GPS considered lost after this long without a 3D fix message
     static constexpr ftype BARO_GATE_GPS_HGT_REJECT_M = 2.0f; // reject GPS height when innovation exceeds this (m)
     bool cmp_hgt_initialised;       // true after shadow heights are seeded from EKF

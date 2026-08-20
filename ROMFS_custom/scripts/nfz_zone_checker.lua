@@ -196,7 +196,6 @@ seed.step = function()
                             local dst = io.open(item.sd, "wb")
                             if dst == nil then
                                 src:close()
-                                gcs:send_text(4, CFG.SCRIPT .. ": 无法写入 " .. item.sd)
                                 seed.i = seed.i + 1
                                 seed.part = 1
                             else

@@ -289,12 +289,6 @@ void NavEKF3_core::InitialiseVariables()
     baroHgtOffset = 0.0f;
     baro_fused_this_frame = false;
     baro_suppressed_by_gps = is_positive(frontend->_baroGpsHdopGate);
-    prev_baro_suppressed_by_gps = baro_suppressed_by_gps;
-    prev_gps_data_fresh_baro_gate = false;
-    prev_baro_hgt_locked = false;
-    prev_validOrigin_baro_gate = false;
-    baro_gate_wait_gps_notified = false;
-    last_baro_gate_notice_ms = 0;
     cmp_hgt_initialised = false;
     cmp_hgt_with_baro = 0.0f;
     cmp_hgt_without_baro = 0.0f;
