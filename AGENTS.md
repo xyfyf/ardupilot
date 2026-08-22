@@ -7,11 +7,13 @@
 ## 1. 编译
 
 ```bash
-python3 ./waf configure --board EFT_CAAC
-python3 ./waf copter
+./waf configure --board EFT_CAAC
+./waf copter
 ```
 
-`waf` 文件没有执行位，`./waf` 会报"权限不够"，必须用 `python3 ./waf`。
+只能在**仓库根目录**跑，`build/` 是产物目录，里面没有 `waf`。
+
+如果报"权限不够"，说明你在的分支上 `waf` 的执行位是丢的——它自 `b008e59941`（2026-05-09 加 EFT_CAAC hwdef 那次）起被记成 `100644`，上游一直是 `100755`。`dev-algo` 已由 `45a30e73ad` 修复，`ardupilot-ubuntu` 尚未。临时绕过用 `python3 ./waf`，根治是 `chmod +x waf` 并提交。
 
 Flash 余量很紧，目前只剩约 **16.8 KB**（1687107 / 1703923 已用）。加代码前先看一眼 BUILD SUMMARY 的 `Free Flash`。
 
@@ -29,21 +31,21 @@ Flash 余量很紧，目前只剩约 **16.8 KB**（1687107 / 1703923 已用）�
 
 ```bash
 # 1. 改完 XML，重新生成
-python3 ./waf clean && python3 ./waf copter
+./waf clean && ./waf copter
 
 # 2. 把产物同步回源码树
 cp -r build/EFT_CAAC/libraries/GCS_MAVLink/include/mavlink/v2.0/. \
       libraries/GCS_MAVLink/include/mavlink/v2.0/
 
 # 3. 必须再 clean 一次，见下
-python3 ./waf clean && python3 ./waf copter
+./waf clean && ./waf copter
 
 # 4. 校验，必须输出 0
 diff -rq build/EFT_CAAC/libraries/GCS_MAVLink/include/mavlink/v2.0 \
          libraries/GCS_MAVLink/include/mavlink/v2.0 | wc -l
 ```
 
-**第 3 步的 clean 不能省。** 增量编译不会重新编译依赖这些入库头文件的 TU——实测同步完头文件直接 `waf copter`，产出的固件与同步前**逐字节相同**，会让人误以为改动生效了。只有 clean 之后才真正吃进去。
+**第 3 步的 clean 不能省。** 增量编译不会重新编译依赖这些入库头文件的 TU——实测同步完头文件直接 `./waf copter`，产出的固件与同步前**逐字节相同**，会让人误以为改动生效了。只有 clean 之后才真正吃进去。
 
 同步会顺带改掉所有 dialect 的 `MAVLINK_BUILD_DATE` 和 `MAVLINK_*_XML_HASH`，几十个文件的 diff 是重新生成的固有噪声，不是异常。
 
@@ -74,4 +76,8 @@ diff -rq build/EFT_CAAC/libraries/GCS_MAVLink/include/mavlink/v2.0 \
 
 `git submodule update --init --recursive` 可以正常跑通（`8bf9f2e035` 清掉了 `mcp-servers/` 下三个没有 `.gitmodules` 条目的 gitlink，那是 `00c9d6c88b` 的误提交，之前会让这条命令直接 fatal）。
 
+**注意 `ardupilot-ubuntu` 上尚未修复**，那三个 gitlink 还在，在该分支上这条命令依然会 fatal，需要加 `-- modules` 限定路径绕过。
+
 如果以后再遇到"某子模块路径在 .gitmodules 中未找到 url"，检查是不是又有内嵌 git 仓库被 `git add .` 扫进索引了。
+
+另：`mcp-servers/ros-mcp/` 不是子模块，是整份第三方源码树入库（207 个文件、91 MB），与固件编译无关，`waf` 不碰它。
