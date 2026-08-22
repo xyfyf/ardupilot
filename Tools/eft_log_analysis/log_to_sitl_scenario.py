@@ -39,6 +39,9 @@ HW_PREFIXES = (
     "CAN_", "SERIAL", "BRD_", "INS_", "COMPASS_", "BARO_", "GPS_", "BATT",
     "RNGFND", "ESC_", "SERVO_BLH", "NET_", "MSP", "EFI", "OSD", "CAM_",
     "LOG_", "SCR_", "RC_PROTOCOLS", "SPRAY", "RELAY", "NTF_", "SIM_",
+    # 合规与外设：SITL 里没有对应硬件，带过去只会一直拦着不让解锁。
+    # DID_ENABLE=1 会让 OpenDroneID 报 "lost transmitter" 并拒绝 arm。
+    "DID_", "PRX_", "ADSB_", "AVD_", "FOLL_", "OA_",
 )
 
 # 主要的驾驶通道，其余通道多为开关，采样一次即可
@@ -55,11 +58,13 @@ def extract(path):
     rc = []
     pos0 = None
     yaw0 = None
+    bat = []
+    baro = []
     t_first = t_last = None
 
     while True:
         m = log.recv_match(type=["PARM", "ORGN", "MODE", "CMD", "RCIN",
-                                 "POS", "ATT"])
+                                 "POS", "ATT", "BAT", "BARO"])
         if m is None:
             break
         t = m.TimeUS
@@ -86,6 +91,10 @@ def extract(path):
             }
         elif typ == "RCIN":
             rc.append([t] + [int(getattr(m, c, 0)) for c in STICK_CH])
+        elif typ == "BAT" and int(getattr(m, "Inst", 0)) == 0:
+            bat.append((m.Volt, m.Curr, getattr(m, "Res", 0.0)))
+        elif typ == "BARO" and int(getattr(m, "I", 0)) == 0:
+            baro.append((getattr(m, "AltAMSL", 0.0), getattr(m, "Temp", 25.0)))
 
     return {
         "path": path,
@@ -95,6 +104,8 @@ def extract(path):
         "modes": modes,
         "mission": [mission[k] for k in sorted(mission)],
         "rc": rc,
+        "bat": bat,
+        "baro": baro,
         "t_first": t_first,
         "t_last": t_last,
     }
@@ -156,6 +167,90 @@ def write_mission(d, out):
     return p
 
 
+# 从实机搬过来后在 SITL 里必定拦路的几项，逐条注明原因。
+# 这些不是"调参"，是补偿仿真环境缺少的硬件。
+SITL_OVERRIDES = [
+    ("EK3_SRC1_YAW", 1,
+     "实机 EK3_SRC1_YAW=2 用双 GPS 移动基线测向；SITL 默认单 GPS 提供不了 "
+     "GPS yaw，EKF 永远拿不到航向、不给位置估计。改用罗盘。"),
+    ("DISARM_DELAY", 0,
+     "关掉无油门自动上锁。--speedup N 会让固件里所有超时按 N 倍速流逝，"
+     "默认 10 s 的自动上锁在 speedup=10 时只有 1 s 墙钟，来不及发起飞指令。"),
+    ("SIM_BATT_VOLTAGE", None,
+     "按 MOT_BAT_VOLT_MAX 设置仿真电池电压。实机是 12S(50.4V)，SITL 默认 "
+     "12.6V 远低于 MOT_BAT_VOLT_MIN，推力补偿会把可用推力压到几乎为零，"
+     "电机爬到 1400+ 也拉不起来。"),
+]
+
+
+def _median(xs):
+    xs = sorted(xs)
+    return xs[len(xs) // 2] if xs else 0.0
+
+
+def write_overrides(d, out):
+    p = os.path.join(out, "sitl_overrides.parm")
+    vmax = d["params"].get("MOT_BAT_VOLT_MAX", 0.0)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("# 在 params.parm 之后加载，覆盖仿真环境里跑不通的几项。\n")
+        f.write("# 用法: --defaults params.parm,sitl_overrides.parm\n\n")
+        for name, val, why in SITL_OVERRIDES:
+            if name == "SIM_BATT_VOLTAGE":
+                val = vmax if vmax > 0 else 12.6
+            for line in why.split("；"):
+                f.write("# %s\n" % line.strip("。") if line else "")
+            f.write("%-18s %s\n\n" % (name, val))
+    return p
+
+
+def write_model(d, out):
+    """按 Tools/autotest/models/Callisto.json 的格式播种一个机型模型。
+
+    能从日志取的都取了；质量、轴距、桨盘面积取决于实机，日志里没有，
+    留 TODO 由人填。不填也能跑，只是保真度差。
+    """
+    P = d["params"]
+    volts = [b[0] for b in d["bat"] if b[0] > 1]
+    currs = [b[1] for b in d["bat"] if b[1] > 0]
+    res = [b[2] for b in d["bat"] if b[2] > 0]
+    alts = [b[0] for b in d["baro"]]
+    temps = [b[1] for b in d["baro"] if b[1] > -50]
+    nmot = {2: 6, 3: 8, 1: 4}.get(int(P.get("FRAME_CLASS", 1)), 4)
+
+    p = os.path.join(out, "model.json")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("# 由 log_to_sitl_scenario.py 从 %s 播种\n"
+                % os.path.basename(d["path"]))
+        f.write("# 格式见 Tools/autotest/models/Callisto.json\n")
+        f.write("# 用法: sim_vehicle.py -f hexa:$PWD/model.json\n\n{\n")
+        f.write("    # TODO 实机总重(kg)，日志里没有，必须填，否则推重比不对\n")
+        f.write('    "mass" : 0.0,\n\n')
+        f.write("    # TODO 对角轴距(m)\n")
+        f.write('    "diagonal_size" : 0.0,\n\n')
+        f.write("    # TODO 桨盘总面积(m^2) = 桨数 x pi x (桨直径/2)^2\n")
+        f.write('    "disc_area" : 0.0,\n\n')
+        f.write("    # 以下取自日志\n")
+        f.write('    "refVoltage" : %.2f,\n' % _median(volts))
+        f.write('    "refCurrent" : %.2f,\n' % _median(currs))
+        f.write('    "refBatRes" : %.4f,\n' % _median(res))
+        f.write('    "refAlt" : %.0f,\n' % _median(alts))
+        f.write('    "refTempC" : %.0f,\n' % _median(temps))
+        f.write('    "maxVoltage" : %.1f,\n' % P.get("MOT_BAT_VOLT_MAX", 0.0))
+        f.write('    "battCapacityAh" : %.1f,\n' % (P.get("BATT_CAPACITY", 0.0) / 1000.0))
+        f.write('    "hoverThrOut" : %.4f,\n' % P.get("MOT_THST_HOVER", 0.35))
+        f.write('    "propExpo" : %.2f,\n' % P.get("MOT_THST_EXPO", 0.65))
+        f.write('    "pwmMin" : %d,\n' % int(P.get("MOT_PWM_MIN", 1000)))
+        f.write('    "pwmMax" : %d,\n' % int(P.get("MOT_PWM_MAX", 2000)))
+        f.write('    "spin_min" : %.3f,\n' % P.get("MOT_SPIN_MIN", 0.15))
+        f.write('    "spin_max" : %.3f,\n' % P.get("MOT_SPIN_MAX", 0.95))
+        f.write('    "refRotRate" : %.0f,\n' % (P.get("ATC_RATE_Y_MAX", 90.0) or 90.0))
+        f.write('    "num_motors" : %d,\n' % nmot)
+        f.write("\n    # 需要一段无风匀速平飞来估阻力，日志里不好自动判定\n")
+        f.write('    "refSpd" : 10.0,\n    "refAngle" : 15.0,\n')
+        f.write('    "mdrag_coef" : 0.10,\n    "slew_max" : 0\n}\n')
+    return p
+
+
 def write_runner(d, out, param_file, home_file):
     p = os.path.join(out, "run_sitl.sh")
     home = open(home_file, encoding="utf-8").read().strip() if home_file else ""
@@ -174,6 +269,7 @@ def write_runner(d, out, param_file, home_file):
         if home:
             f.write("    --custom-location=%s \\\n" % home)
         f.write("    --add-param-file=\"$PWD/params.parm\" \\\n")
+        f.write("    --add-param-file=\"$PWD/sitl_overrides.parm\" \\\n")
         f.write("    --console --map\n")
     os.chmod(p, 0o755)
     return p
@@ -198,6 +294,8 @@ def main(argv):
     hf = write_home(d, out)
     tf = write_timeline(d, out)
     mf = write_mission(d, out)
+    of = write_overrides(d, out)
+    mo = write_model(d, out)
     rf = write_runner(d, out, pf, hf)
 
     with open(os.path.join(out, "scenario.json"), "w", encoding="utf-8") as f:
@@ -218,6 +316,9 @@ def main(argv):
     print("时间线    %s   %d 次模式切换 + %d 组杆量"
           % (tf, len(d["modes"]), len(d["rc"])))
     print("任务      %s" % (mf or "(日志中无航点)"))
+    print("SITL覆盖  %s   %d 项（EKF 航向源 / 自动上锁 / 仿真电池电压）"
+          % (of, len(SITL_OVERRIDES)))
+    print("机型模型  %s   质量/轴距/桨盘面积需人工填写" % mo)
     print("启动脚本  %s" % rf)
 
     print("\n模式序列:")
