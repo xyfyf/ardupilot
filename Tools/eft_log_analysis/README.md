@@ -16,6 +16,37 @@ python3 Tools/eft_log_analysis/check_replay_ready.py <log.bin> [...]
 
 判定按**实际记录条数**，不是搜字符串。日志开头的 FMT 表会声明固件认识的全部消息类型，所以 `grep RFRH` 在任何一份日志上都能命中，看起来像有其实没有——这是个很容易踩的坑。
 
+## replay_ab.py
+
+同一份日志用两组参数各重放一遍 EKF，逐点对比。
+
+```bash
+python3 Tools/eft_log_analysis/replay_ab.py <log.bin> \
+        --a EK3_BARO_HDOP=3.0 --b EK3_BARO_HDOP=0
+```
+
+这是**真正的反事实**：输入完全相同（同一份录下来的传感器时序），只有参数不同，差异百分之百来自那个参数。机上跑影子滤波器做不到——影子与主滤波器共享状态，也改不了"当时实际融合了什么"。`05dc8de718` 删掉的 EBFH 就是那种做法。
+
+改了 EKF 代码想验证时同样适用：分别用改前/改后的固件编译 `Replay`，两次跑同一份日志。
+
+需要先编译 Replay，注意它会覆盖当前板子配置：
+
+```bash
+./waf configure --board sitl && ./waf replay
+./waf configure --board EFT_CAAC     # 记得切回来
+```
+
+## log_to_sitl_scenario.py
+
+把日志拆成 SITL 可复现的场景，让整个固件（EKF + 控制器 + 混控）闭环重跑。
+
+```bash
+python3 Tools/eft_log_analysis/log_to_sitl_scenario.py <log.bin>
+cd <场景目录> && ./run_sitl.sh
+```
+
+产出参数、起点、模式与杆量时间线、任务航点、SITL 覆盖参数、以及一份待填的机型模型。**仿真轨迹会和真实飞行发散**，那是物理模型与实机的差异；`model.json` 里的 `mass` / `diagonal_size` / `disc_area` 日志里没有，必须人工填，否则推重比不对。
+
 ## log_control_metrics.py
 
 从真实飞行数据量化控制器表现：姿态环/角速率环跟踪误差（RMS、P95、最大、偏置）、高度环、PID 积分限幅比例、振动与加速度计削顶，并检查各消息的实际记录频率是否够用。
