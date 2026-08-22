@@ -130,3 +130,15 @@ LOG_BITMASK = 145375
 2026-08-20 那批日志里有一架次 `ATT`/`RATE` 实际只有 **4.9 Hz**（标称 10 Hz），说明 SD 卡写入已经跟不上、在丢帧。开 `ATTITUDE_FAST` 或 `LOG_REPLAY` 之前先换高速卡，否则数据量上去只会丢得更多。
 
 两套配置日志都很大，建议**分架次飞**：一架次带 `LOG_REPLAY` 调估计器，一架次带 `ATTITUDE_FAST` 调控制器。
+
+### 现成的检查与分析工具
+
+```bash
+# 判定一份日志能否跑 Replay，通过就直接给出重放命令
+python3 Tools/eft_log_analysis/check_replay_ready.py <log.bin>
+
+# 从真实飞行数据算控制器性能指标，多份日志可横向对比
+python3 Tools/eft_log_analysis/log_control_metrics.py <log.bin> [...] --csv out.csv
+```
+
+细节见 `Tools/eft_log_analysis/README.md`。
