@@ -1413,7 +1413,6 @@ void NavEKF3_core::selectHeightForFusion()
         fuseHgtData = false;
     }
 
-    update_baro_cmp_shadow();
 
     // detect changes in source and reset height
     if ((activeHgtSource != prevHgtSource) && fuseHgtData) {
@@ -1512,37 +1511,6 @@ void NavEKF3_core::update_baro_fusion_gate()
         baro_suppressed_by_gps = true;
     } else {
         baro_suppressed_by_gps = gps_hdop_good;
-    }
-}
-
-/*
-  Maintain shadow height estimates for comparison logging.
- */
-void NavEKF3_core::update_baro_cmp_shadow()
-{
-    if (!cmp_hgt_initialised) {
-        cmp_hgt_with_baro = stateStruct.position.z;
-        cmp_hgt_without_baro = stateStruct.position.z;
-        cmp_hgt_initialised = true;
-    }
-
-    const ftype dt_hgt = constrain_ftype(imuDataDelayed.delVelDT, 0.0f, 0.1f);
-    if (is_positive(dt_hgt)) {
-        const ftype velD = stateStruct.velocity.z;
-        cmp_hgt_with_baro += velD * dt_hgt;
-        cmp_hgt_without_baro += velD * dt_hgt;
-    }
-
-    const ftype cmp_gain = constrain_ftype(dt_hgt / (dt_hgt + 0.5f), 0.0f, 1.0f);
-
-    if (baroDataToFuse) {
-        last_cmp_baro_hgt = -(baroDataDelayed.hgt - baroHgtOffset);
-        cmp_hgt_with_baro += (last_cmp_baro_hgt - cmp_hgt_with_baro) * cmp_gain;
-    }
-
-    if (gpsDataToFuse) {
-        last_cmp_gps_hgt = -gpsDataDelayed.hgt;
-        cmp_hgt_without_baro += (last_cmp_gps_hgt - cmp_hgt_without_baro) * cmp_gain;
     }
 }
 

@@ -1002,7 +1002,6 @@ private:
     bool gps_height_disagrees_with_ekf() const;
 
     // update shadow height estimates for baro fusion comparison logging
-    void update_baro_cmp_shadow();
 
     // zero attitude state covariances, but preserve variances
     void zeroAttCovOnly();
@@ -1339,11 +1338,6 @@ private:
     bool baro_hgt_locked;           // true after GPS data loss or excessive GPS/EKF height disagreement; stay on baro until reboot
     static const uint32_t BARO_GATE_GPS_TIMEOUT_MS = 2000; // GPS considered lost after this long without a 3D fix message
     static constexpr ftype BARO_GATE_GPS_HGT_REJECT_M = 2.0f; // reject GPS height when innovation exceeds this (m)
-    bool cmp_hgt_initialised;       // true after shadow heights are seeded from EKF
-    ftype cmp_hgt_with_baro;        // shadow height estimate always corrected by baro (m, down)
-    ftype cmp_hgt_without_baro;     // shadow height estimate corrected by GPS only (m, down)
-    ftype last_cmp_baro_hgt;        // last baro height used by comparison log (m, down)
-    ftype last_cmp_gps_hgt;         // last GPS height used by comparison log (m, down)
     bool gpsDataToFuse;             // true when valid GPS data has arrived at the fusion time horizon.
     bool magDataToFuse;             // true when valid magnetometer data has arrived at the fusion time horizon
     enum AidingMode {
@@ -1682,5 +1676,4 @@ private:
     void Log_Write_State_Variances(uint64_t time_us);
     void Log_Write_Timing(uint64_t time_us);
     void Log_Write_GSF(uint64_t time_us);
-    void Log_Write_EBFH(uint64_t time_us) const;
 };
