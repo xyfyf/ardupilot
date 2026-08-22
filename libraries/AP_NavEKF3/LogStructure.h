@@ -487,7 +487,7 @@ struct PACKED log_XKV {
     { LOG_XKV2_MSG, sizeof(log_XKV), \
       "XKV2","QBffffffffffff","TimeUS,C,V12,V13,V14,V15,V16,V17,V18,V19,V20,V21,V22,V23", "s#------------", "F-------------" , true }, \
     { LOG_EBFH_MSG, sizeof(log_EBFH), \
-      "EBFH","QBccCfffffB","TimeUS,C,Roll,Pitch,Yaw,PD,PDnb,PDwb,BH,GH,Flg", "s#ddhmmmmm-", "F-BBB0000000" , true },
+      "EBFH","QBccCfffffB","TimeUS,C,Roll,Pitch,Yaw,PD,PDnb,PDwb,BH,GH,Flg", "s#ddhmmmmm-", "F-BBB000000" , true },
 #else
   #define LOG_STRUCTURE_FROM_NAVEKF3
 #endif
