@@ -346,6 +346,16 @@ bool AP_Logger_Backend::Write_Message(const char *message)
 void AP_Logger::Write_Power(void)
 {
 #if CONFIG_HAL_BOARD == HAL_BOARD_CHIBIOS
+#if AP_LOGGER_LOW_RATE_HZ > 0
+    static uint32_t last_log_ms;
+    const uint32_t now_ms = AP_HAL::millis();
+    constexpr uint32_t log_interval_ms = 1000U / AP_LOGGER_LOW_RATE_HZ;
+    if ((last_log_ms != 0) && (now_ms - last_log_ms < log_interval_ms)) {
+        return;
+    }
+    last_log_ms = now_ms;
+#endif
+
     uint8_t safety_and_armed = uint8_t(hal.util->safety_switch_state());
     if (hal.util->get_soft_armed()) {
         // encode armed state in bit 3
@@ -431,6 +441,16 @@ void AP_Logger::Write_Compass_instance(const uint64_t time_us, const uint8_t mag
 // Write a Compass packet
 void AP_Logger::Write_Compass()
 {
+#if AP_LOGGER_LOW_RATE_HZ > 0
+    static uint32_t last_log_ms;
+    const uint32_t now_ms = AP_HAL::millis();
+    constexpr uint32_t log_interval_ms = 1000U / AP_LOGGER_LOW_RATE_HZ;
+    if ((last_log_ms != 0) && (now_ms - last_log_ms < log_interval_ms)) {
+        return;
+    }
+    last_log_ms = now_ms;
+#endif
+
     const uint64_t time_us = AP_HAL::micros64();
     const Compass &compass = AP::compass();
     for (uint8_t i=0; i<compass.get_count(); i++) {

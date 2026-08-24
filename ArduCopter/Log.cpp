@@ -26,6 +26,16 @@ struct PACKED log_Control_Tuning {
 // Write a control tuning packet
 void Copter::Log_Write_Control_Tuning()
 {
+#if AP_LOGGER_LOW_RATE_HZ > 0
+    static uint32_t last_log_ms;
+    const uint32_t now_ms = AP_HAL::millis();
+    constexpr uint32_t log_interval_ms = 1000U / AP_LOGGER_LOW_RATE_HZ;
+    if ((last_log_ms != 0) && (now_ms - last_log_ms < log_interval_ms)) {
+        return;
+    }
+    last_log_ms = now_ms;
+#endif
+
     // get terrain altitude
     float terr_alt = 0.0f;
 #if AP_TERRAIN_AVAILABLE
@@ -76,7 +86,9 @@ void Copter::Log_Write_Control_Tuning()
 // Write an attitude packet
 void Copter::Log_Write_Attitude()
 {
+#if COPTER_ANG_LOG_ENABLED
     attitude_control->Write_ANG();
+#endif
 }
 
 void Copter::Log_Write_Rate()
@@ -87,6 +99,16 @@ void Copter::Log_Write_Rate()
 // Write PIDS packets
 void Copter::Log_Write_PIDS()
 {
+#if AP_LOGGER_LOW_RATE_HZ > 0
+    static uint32_t last_log_ms;
+    const uint32_t now_ms = AP_HAL::millis();
+    constexpr uint32_t log_interval_ms = 1000U / AP_LOGGER_LOW_RATE_HZ;
+    if ((last_log_ms != 0) && (now_ms - last_log_ms < log_interval_ms)) {
+        return;
+    }
+    last_log_ms = now_ms;
+#endif
+
    if (should_log(MASK_LOG_PID)) {
         logger.Write_PID(LOG_PIDR_MSG, attitude_control->get_rate_roll_pid().get_pid_info());
         logger.Write_PID(LOG_PIDP_MSG, attitude_control->get_rate_pitch_pid().get_pid_info());

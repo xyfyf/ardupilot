@@ -520,6 +520,10 @@
 // Logging control
 //
 
+#ifndef COPTER_ANG_LOG_ENABLED
+#define COPTER_ANG_LOG_ENABLED 1
+#endif
+
 // Default logging bitmask
 #ifndef DEFAULT_LOG_BITMASK
  # define DEFAULT_LOG_BITMASK \

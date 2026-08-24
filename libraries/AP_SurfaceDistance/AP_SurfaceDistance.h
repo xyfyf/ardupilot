@@ -3,6 +3,7 @@
 #include <AP_Math/AP_Math.h>
 #include <Filter/LowPassFilter.h>
 #include <AP_HAL/Semaphores.h>
+#include <AP_Logger/AP_Logger_config.h>
 
 class AP_SurfaceDistance {
 public:
@@ -43,6 +44,9 @@ private:
     const uint8_t instance;
     uint8_t status;
     uint32_t last_healthy_ms;
+#if AP_LOGGER_LOW_RATE_HZ > 0
+    mutable uint32_t last_log_ms{};
+#endif
 
     const Rotation rotation;
 };

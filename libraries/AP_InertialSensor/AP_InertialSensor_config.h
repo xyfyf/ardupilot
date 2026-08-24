@@ -12,6 +12,10 @@
 #define AP_INERTIALSENSOR_ENABLED 1
 #endif
 
+#ifndef AP_INS_LOG_RATE_HZ
+#define AP_INS_LOG_RATE_HZ 0
+#endif
+
 #ifndef INS_AUX_INSTANCES
 #define INS_AUX_INSTANCES 0
 #endif

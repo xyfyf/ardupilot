@@ -1261,10 +1261,16 @@ void NavEKF3_core::selectHeightForFusion()
 #endif
     } else if (frontend->sources.getPosZSource(core_index) == AP_NavEKF_Source::SourceZ::BARO) {
         activeHgtSource = AP_NavEKF_Source::SourceZ::BARO;
-    } else if ((frontend->sources.getPosZSource(core_index) == AP_NavEKF_Source::SourceZ::GPS) && ((imuSampleTime_ms - lastTimeGpsReceived_ms) < 500) && validOrigin && gpsAccuracyGood
-               && (!is_positive(frontend->_baroGpsHdopGate) || baro_suppressed_by_gps) && !baro_hgt_locked) {
-        // with the baro gate enabled, GPS height is only used while the gate keeps baro off
-        activeHgtSource = AP_NavEKF_Source::SourceZ::GPS;
+    } else if (frontend->sources.getPosZSource(core_index) == AP_NavEKF_Source::SourceZ::GPS) {
+        if (((imuSampleTime_ms - lastTimeGpsReceived_ms) < 500) && validOrigin && gpsAccuracyGoodForAltitude
+            && (!is_positive(frontend->_baroGpsHdopGate) || baro_suppressed_by_gps) && !baro_hgt_locked) {
+            // with the baro gate enabled, GPS height is only used while the gate keeps baro off
+            activeHgtSource = AP_NavEKF_Source::SourceZ::GPS;
+        } else {
+            // When EK3_SRC1_POSZ = GPS (3) and the signal degrades (like VAcc > 0.5), we force
+            // the height source to fallback to Baro instantly.
+            activeHgtSource = AP_NavEKF_Source::SourceZ::BARO;
+        }
 #if EK3_FEATURE_BEACON_FUSION
     } else if ((frontend->sources.getPosZSource(core_index) == AP_NavEKF_Source::SourceZ::BEACON) && validOrigin && rngBcn.goodToAlign) {
         activeHgtSource = AP_NavEKF_Source::SourceZ::BEACON;
@@ -1292,7 +1298,13 @@ void NavEKF3_core::selectHeightForFusion()
     bool lostExtNavHgt = ((activeHgtSource == AP_NavEKF_Source::SourceZ::EXTNAV) && !extNavDataIsFresh);
     fallback_to_baro |= lostExtNavHgt;
 #endif
-    if (fallback_to_baro && !baro_suppressed_by_gps) {
+    
+    // When using GPS as the primary height source and GPS accuracy degrades (e.g. lost RTK), 
+    // force active height source to BARO immediately (even if the gate would otherwise block it),
+    // to prevent sudden height jumps caused by standard GPS vertical drift.
+    if (fallback_to_baro && lostGpsHgt) {
+        activeHgtSource = AP_NavEKF_Source::SourceZ::BARO;
+    } else if (fallback_to_baro && !baro_suppressed_by_gps) {
         activeHgtSource = AP_NavEKF_Source::SourceZ::BARO;
     }
 

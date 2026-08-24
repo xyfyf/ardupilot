@@ -3519,7 +3519,9 @@ void AP_AHRS::Log_Write()
     EKF3.Log_Write();
 #endif
 
+#if AP_AHRS_AHR2_LOG_ENABLED
     Write_AHRS2();
+#endif
     Write_POS();
 
 #if AP_AHRS_SIM_ENABLED

@@ -515,6 +515,12 @@ private:
 
     // Logging function
     void Write_IMU_instance(const uint64_t time_us, const uint8_t imu_instance) const;
+#if AP_INS_LOG_RATE_HZ > 0
+    mutable uint32_t _last_imu_log_ms{};
+#endif
+#if AP_LOGGER_LOW_RATE_HZ > 0
+    mutable uint32_t _last_vibe_log_ms{};
+#endif
     
     // backend objects
     AP_InertialSensor_Backend *_backends[INS_MAX_BACKENDS];

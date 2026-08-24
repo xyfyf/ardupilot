@@ -732,6 +732,16 @@ bool Util::get_true_random_vals(uint8_t* data, size_t size, uint32_t timeout_us)
 void Util::log_stack_info(void)
 {
 #if HAL_LOGGING_ENABLED
+#if AP_LOGGER_LOW_RATE_HZ > 0
+    static uint32_t last_log_ms;
+    const uint32_t now_ms = AP_HAL::millis();
+    constexpr uint32_t log_interval_ms = 1000U / AP_LOGGER_LOW_RATE_HZ;
+    if ((last_log_ms != 0) && (now_ms - last_log_ms < log_interval_ms)) {
+        return;
+    }
+    last_log_ms = now_ms;
+#endif
+
     static thread_t *last_tp;
     static uint8_t thread_id;
     thread_t *tp = last_tp;

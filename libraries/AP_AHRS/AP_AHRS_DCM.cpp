@@ -102,7 +102,7 @@ AP_AHRS_DCM::update()
     // remember the last origin for fallback support
     IGNORE_RETURN(AP::ahrs().get_origin(last_origin));
 
-#if HAL_LOGGING_ENABLED
+#if HAL_LOGGING_ENABLED && AP_AHRS_DCM_LOG_ENABLED
     const uint32_t now_ms = AP_HAL::millis();
     if (now_ms - last_log_ms >= 100) {
         // log DCM at 10Hz
@@ -136,7 +136,7 @@ AP_AHRS_DCM::update()
             _wind.z
        );
     }
-#endif // HAL_LOGGING_ENABLED
+#endif // HAL_LOGGING_ENABLED && AP_AHRS_DCM_LOG_ENABLED
 }
 
 void AP_AHRS_DCM::get_results(AP_AHRS_Backend::Estimates &results)

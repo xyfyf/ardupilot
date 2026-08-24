@@ -8,6 +8,14 @@
 #define AP_AHRS_ENABLED 1
 #endif
 
+#ifndef AP_AHRS_AHR2_LOG_ENABLED
+#define AP_AHRS_AHR2_LOG_ENABLED 1
+#endif
+
+#ifndef AP_AHRS_DCM_LOG_ENABLED
+#define AP_AHRS_DCM_LOG_ENABLED 1
+#endif
+
 #ifndef AP_HOME_ENABLED
 #define AP_HOME_ENABLED AP_AHRS_ENABLED
 #endif

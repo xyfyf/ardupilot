@@ -150,6 +150,9 @@ private:
 
     uint32_t _last_telem_log_ms[ESC_TELEM_MAX_ESCS];
     uint32_t _last_rpm_log_us[ESC_TELEM_MAX_ESCS];
+#if AP_ESC_TELEM_LOG_RATE_HZ > 0
+    uint32_t _last_log_ms[ESC_TELEM_MAX_ESCS]{};
+#endif
     uint8_t next_idx;
 
 #if AP_SCRIPTING_ENABLED

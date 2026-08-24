@@ -69,6 +69,15 @@ void AP_InertialSensor::Write_IMU_instance(const uint64_t time_us, const uint8_t
 // Write IMU data packet for all instances
 void AP_InertialSensor::Write_IMU() const
 {
+#if AP_INS_LOG_RATE_HZ > 0
+    const uint32_t now_ms = AP_HAL::millis();
+    constexpr uint32_t log_interval_ms = 1000U / AP_INS_LOG_RATE_HZ;
+    if ((_last_imu_log_ms != 0) && (now_ms - _last_imu_log_ms < log_interval_ms)) {
+        return;
+    }
+    _last_imu_log_ms = now_ms;
+#endif
+
     const uint64_t time_us = AP_HAL::micros64();
 
     uint8_t n = MAX(get_accel_count(), get_gyro_count());
@@ -80,6 +89,15 @@ void AP_InertialSensor::Write_IMU() const
 // Write VIBE data packet for all instances
 void AP_InertialSensor::Write_Vibration() const
 {
+#if AP_LOGGER_LOW_RATE_HZ > 0
+    const uint32_t now_ms = AP_HAL::millis();
+    constexpr uint32_t log_interval_ms = 1000U / AP_LOGGER_LOW_RATE_HZ;
+    if ((_last_vibe_log_ms != 0) && (now_ms - _last_vibe_log_ms < log_interval_ms)) {
+        return;
+    }
+    _last_vibe_log_ms = now_ms;
+#endif
+
     const uint64_t time_us = AP_HAL::micros64();
     for (uint8_t i = 0; i < INS_MAX_INSTANCES; i++) {
         if (!use_accel(i)) {

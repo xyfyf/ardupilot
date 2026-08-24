@@ -672,6 +672,10 @@ void AP_ESC_Telem::update()
 #if HAL_LOGGING_ENABLED
     AP_Logger *logger = AP_Logger::get_singleton();
     const uint64_t now_us64 = AP_HAL::micros64();
+#if AP_ESC_TELEM_LOG_RATE_HZ > 0
+    const uint32_t esc_log_now_ms = AP_HAL::millis();
+    constexpr uint32_t log_interval_ms = 1000U / AP_ESC_TELEM_LOG_RATE_HZ;
+#endif
 
     for (uint8_t i = 0; i < ESC_TELEM_MAX_ESCS; i++) {
         const volatile AP_ESC_Telem_Backend::RpmData &rpmdata = _rpm_data[i];
@@ -680,6 +684,13 @@ void AP_ESC_Telem::update()
         if (logger && logger->logging_enabled()) {
             if (telemdata.last_update_ms != _last_telem_log_ms[i]
                 || rpmdata.last_update_us != _last_rpm_log_us[i]) {
+
+#if AP_ESC_TELEM_LOG_RATE_HZ > 0
+                if ((_last_log_ms[i] != 0) && (esc_log_now_ms - _last_log_ms[i] < log_interval_ms)) {
+                    continue;
+                }
+                _last_log_ms[i] = esc_log_now_ms;
+#endif
 
                 // Update last log timestamps
                 _last_telem_log_ms[i] = telemdata.last_update_ms;

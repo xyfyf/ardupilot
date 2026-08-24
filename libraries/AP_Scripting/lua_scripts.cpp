@@ -264,11 +264,7 @@ void lua_scripts::load_all_scripts_in_dir(lua_State *L, const char *dirname) {
     }
     auto *d = AP::FS().opendir(dirname);
     if (d == nullptr) {
-        // this disk_space check will return 0 if we don't have a real
-        // filesystem (ie. no Posix or FatFs).  Do not warn in this case.
-        if (AP::FS().disk_space(dirname) != 0) {
-            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "Lua: open directory (%s) failed", dirname);
-        }
+        // directory missing is normal when no scripts are installed
         return;
     }
 
