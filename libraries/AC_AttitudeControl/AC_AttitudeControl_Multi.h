@@ -5,6 +5,14 @@
 
 #include "AC_AttitudeControl.h"
 #include <AP_Motors/AP_MotorsMulticopter.h>
+#include <Filter/LowPassFilter.h>
+
+// cutoff for the body-velocity input to the airflow torque feedforward.  The effect
+// tracks vehicle velocity, which is slow; anything faster than this is estimator noise
+// that would be injected straight into the rate loop.
+#ifndef AC_ATC_MULTI_VEL_FF_FILT_HZ
+  # define AC_ATC_MULTI_VEL_FF_FILT_HZ      2.0f
+#endif
 
 // default rate controller PID gains
 #ifndef AC_ATC_MULTI_RATE_RP_P
@@ -86,10 +94,24 @@ public:
     // set the PID notch sample rates
     void set_notch_sample_rate(float sample_rate) override;
 
+    // Normalised roll/pitch torque currently being fed forward to cancel the
+    // airflow-induced moment.  Exposed for logging and for offline A/B analysis.
+    const Vector2f& get_vel_ff() const { return _vel_ff; }
+
+    // Filtered body-frame velocity (x forward, y right, m/s) driving the above.
+    const Vector2f& get_vel_ff_input() const { return _vel_ff_input; }
+
     // user settable parameters
     static const struct AP_Param::GroupInfo var_info[];
 
 protected:
+
+    // Translational airflow across a large rotor disc produces a moment roughly
+    // proportional to airspeed.  Without a feedforward the rate-loop integrator is
+    // the only thing that trims it, and it converges far slower than a velocity
+    // reversal takes - which is what makes the aircraft "stick, then snap across".
+    // Computes the normalised torque that cancels it.  Zero unless ATC_VFF_* are set.
+    void update_velocity_feedforward(float dt);
 
     // Boosts angle controller gains during rapid throttle changes to improve responsiveness
     // boost angle_p/pd each cycle on high throttle slew
@@ -155,4 +177,20 @@ protected:
 
     // angle_p/pd boost multiplier
     AP_Float              _throttle_gain_boost;
+
+    // Airflow torque feedforward.  Gains are normalised torque per m/s of body-frame
+    // velocity and carry their own sign, so they can be read straight off a regression
+    // of the logged rate-loop integrator against body velocity.
+    AP_Float              _vel_ff_rll;      // roll torque per m/s of body-right velocity
+    AP_Float              _vel_ff_pit;      // pitch torque per m/s of body-forward velocity
+    AP_Float              _vel_ff_max;      // magnitude limit on each axis
+    AP_Int8               _vel_ff_opt;      // see VelFFOption
+
+    Vector2f              _vel_ff;          // normalised torque applied this cycle (x roll, y pitch)
+    Vector2f              _vel_ff_input;    // filtered body velocity behind it (x fwd, y right)
+    LowPassFilterVector2f _vel_ff_filter;   // keeps velocity noise out of the rate loop
+
+    enum class VelFFOption : uint8_t {
+        USE_WIND_ESTIMATE = (1U << 0),      // subtract the EKF wind estimate to use airspeed, not groundspeed
+    };
 };

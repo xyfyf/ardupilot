@@ -317,6 +317,37 @@ const AP_Param::GroupInfo AC_AttitudeControl_Multi::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("THR_G_BOOST", 7, AC_AttitudeControl_Multi, _throttle_gain_boost, 0.0f),
 
+    // @Param: VFF_RLL
+    // @DisplayName: Roll airflow torque feedforward
+    // @Description: Normalised roll torque fed forward per m/s of body-right velocity, cancelling the moment that translational airflow across the rotor discs produces. Large-diameter props on heavy multirotors generate a moment roughly proportional to airspeed; with this at zero only the rate-loop integrator trims it, and on a velocity reversal the integrator is still trimmed for the old direction, giving a lasting attitude error. Set it to the slope of a regression of the logged PIDR.I against body-right velocity - the sign is part of the gain. Zero disables.
+    // @Range: -0.05 0.05
+    // @Increment: 0.001
+    // @User: Advanced
+    AP_GROUPINFO("VFF_RLL", 8, AC_AttitudeControl_Multi, _vel_ff_rll, 0.0f),
+
+    // @Param: VFF_PIT
+    // @DisplayName: Pitch airflow torque feedforward
+    // @Description: Normalised pitch torque fed forward per m/s of body-forward velocity. See ATC_VFF_RLL. Obtain it from a regression of the logged PIDP.I against body-forward velocity; it is typically opposite in sign to ATC_VFF_RLL. Zero disables.
+    // @Range: -0.05 0.05
+    // @Increment: 0.001
+    // @User: Advanced
+    AP_GROUPINFO("VFF_PIT", 9, AC_AttitudeControl_Multi, _vel_ff_pit, 0.0f),
+
+    // @Param: VFF_MAX
+    // @DisplayName: Airflow torque feedforward limit
+    // @Description: Maximum magnitude of the airflow torque feedforward on each of roll and pitch, in normalised torque. Bounds the command if the velocity estimate misbehaves. Keep it comfortably below the rate controller IMAX.
+    // @Range: 0 0.5
+    // @Increment: 0.01
+    // @User: Advanced
+    AP_GROUPINFO("VFF_MAX", 10, AC_AttitudeControl_Multi, _vel_ff_max, 0.15f),
+
+    // @Param: VFF_OPT
+    // @DisplayName: Airflow torque feedforward options
+    // @Description: Options for the airflow torque feedforward. The moment is produced by airspeed, not groundspeed, so in wind the two differ; enabling bit 0 subtracts the EKF wind estimate. Leave it off until the wind estimate has been shown to be trustworthy on this airframe, because a bad estimate feeds straight into the rate loop.
+    // @Bitmask: 0:Use wind-corrected airspeed
+    // @User: Advanced
+    AP_GROUPINFO("VFF_OPT", 11, AC_AttitudeControl_Multi, _vel_ff_opt, 0),
+
     AP_GROUPEND
 };
 
@@ -325,6 +356,8 @@ AC_AttitudeControl_Multi::AC_AttitudeControl_Multi(AP_AHRS_View &ahrs, const AP_
     _motors_multi(motors)
 {
     AP_Param::setup_object_defaults(this, var_info);
+
+    _vel_ff_filter.set_cutoff_frequency(AC_ATC_MULTI_VEL_FF_FILT_HZ);
 
 #if AP_FILTER_ENABLED
     set_notch_sample_rate(AP::scheduler().get_loop_rate_hz());
@@ -455,16 +488,54 @@ void AC_AttitudeControl_Multi::rate_controller_run_dt(const Vector3f& gyro_rads,
     _rate_gyro_rads = gyro_rads;
     _rate_gyro_time_us = AP_HAL::micros64();
 
-    _motors.set_roll(get_rate_roll_pid().update_all(ang_vel_body.x, gyro_rads.x,  dt, _motors.limit.roll, _pd_scale.x) + _actuator_sysid.x);
+    update_velocity_feedforward(dt);
+
+    _motors.set_roll(get_rate_roll_pid().update_all(ang_vel_body.x, gyro_rads.x,  dt, _motors.limit.roll, _pd_scale.x) + _actuator_sysid.x + _vel_ff.x);
     _motors.set_roll_ff(get_rate_roll_pid().get_ff());
 
-    _motors.set_pitch(get_rate_pitch_pid().update_all(ang_vel_body.y, gyro_rads.y,  dt, _motors.limit.pitch, _pd_scale.y) + _actuator_sysid.y);
+    _motors.set_pitch(get_rate_pitch_pid().update_all(ang_vel_body.y, gyro_rads.y,  dt, _motors.limit.pitch, _pd_scale.y) + _actuator_sysid.y + _vel_ff.y);
     _motors.set_pitch_ff(get_rate_pitch_pid().get_ff());
 
     _motors.set_yaw(get_rate_yaw_pid().update_all(ang_vel_body.z, gyro_rads.z,  dt, _motors.limit.yaw, _pd_scale.z) + _actuator_sysid.z);
     _motors.set_yaw_ff(get_rate_yaw_pid().get_ff()*_feedforward_scalar);
 
     _pd_scale_used = _pd_scale;
+}
+
+// Compute the normalised roll/pitch torque that cancels the moment produced by
+// translational airflow across the rotor discs.  See the header for why this is a
+// feedforward rather than something the integrator should be left to handle.
+void AC_AttitudeControl_Multi::update_velocity_feedforward(float dt)
+{
+    // Disabled, or no velocity estimate: contribute nothing and drop the filter
+    // history so re-enabling cannot dump a stale value into the rate loop.
+    Vector3f vel_ned;
+    if ((is_zero(_vel_ff_rll) && is_zero(_vel_ff_pit)) ||
+        !_ahrs.get_velocity_NED(vel_ned)) {
+        _vel_ff.zero();
+        _vel_ff_input.zero();
+        _vel_ff_filter.reset();
+        return;
+    }
+
+    // The moment comes from airspeed.  Groundspeed is the default because it needs no
+    // extra estimator trust; subtracting wind is opt-in via ATC_VFF_OPT.
+    if ((uint8_t(_vel_ff_opt.get()) & uint8_t(VelFFOption::USE_WIND_ESTIMATE)) != 0) {
+        Vector3f wind;
+        if (_ahrs.wind_estimate(wind)) {
+            vel_ned -= wind;
+        }
+    }
+
+    // Body frame of the control view: x forward, y right.
+    const Vector3f vel_body = _ahrs.get_rotation_body_to_ned().mul_transpose(vel_ned);
+    _vel_ff_input = _vel_ff_filter.apply(Vector2f{vel_body.x, vel_body.y}, dt);
+
+    // Roll responds to sideways airflow, pitch to forward airflow.  Each gain carries
+    // its own sign so it can be lifted straight from a log regression.
+    const float lim = MAX(_vel_ff_max.get(), 0.0f);
+    _vel_ff.x = constrain_float(_vel_ff_rll * _vel_ff_input.y, -lim, lim);
+    _vel_ff.y = constrain_float(_vel_ff_pit * _vel_ff_input.x, -lim, lim);
 }
 
 // reset the rate controller target loop updates

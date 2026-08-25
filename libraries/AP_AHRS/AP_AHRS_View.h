@@ -93,7 +93,7 @@ public:
         return ahrs.get_location(loc);
     }
 
-    bool wind_estimate(Vector3f &wind) {
+    bool wind_estimate(Vector3f &wind) const {
         return ahrs.wind_estimate(wind);
     }
 

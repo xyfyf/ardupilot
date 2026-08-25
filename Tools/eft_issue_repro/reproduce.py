@@ -142,9 +142,9 @@ def set_message_interval(mav, msg_id, hz):
         msg_id, 1e6 / hz, 0, 0, 0, 0, 0)
 
 
-def prepare_run(case, baseline, output):
+def prepare_run(case, baseline, output, overrides=None, variant_name=None):
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    variant = "baseline" if baseline else "coupled"
+    variant = variant_name or ("baseline" if baseline else "coupled")
     out = os.path.abspath(output or os.path.join(HERE, "runs", "%s-%s-%s" % (stamp, case, variant)))
     os.makedirs(out, exist_ok=True)
     model = json.load(open(MODEL, encoding="utf-8"))
@@ -159,14 +159,23 @@ def prepare_run(case, baseline, output):
         json.dump(model, f, indent=2)
         f.write("\n")
     shutil.copyfile(PARAMS, os.path.join(out, "params.parm"))
-    return out, model_path, variant
+    # 算法侧的参数覆盖单独成档，使「物理项变体」与「算法变体」在结果目录里一眼分得开
+    algo_path = os.path.join(out, "algo.parm")
+    with open(algo_path, "w", encoding="utf-8") as f:
+        for k, v in sorted((overrides or {}).items()):
+            f.write("%s %g\n" % (k, v))
+    return out, model_path, variant, algo_path
 
 
-def start_sitl(out, model_path, speedup):
+def start_sitl(out, model_path, speedup, algo_path=None):
     runtime = os.path.join(out, "runtime.parm")
     with open(runtime, "w", encoding="utf-8") as f:
         f.write("SIM_SPEEDUP %g\n" % speedup)
-    defaults = ",".join((DEFAULTS, PARAMS, runtime))
+    # 顺序即优先级：算法覆盖放最后，压过机型参数
+    chain = [DEFAULTS, PARAMS, runtime]
+    if algo_path and os.path.getsize(algo_path) > 0:
+        chain.append(algo_path)
+    defaults = ",".join(chain)
     home = ",".join(str(x) for x in HOME)
     # AP_Filesystem's JSON loader is reliable with a path relative to the
     # process cwd; some SITL builds reject an otherwise valid absolute /tmp path.
@@ -408,6 +417,45 @@ def run_reverse(mon):
     return {"reversals": events}
 
 
+def summarise_log(path):
+    """从日志算 P02 的验收量。
+
+    峰值姿态误差由转动瞬态主导，测不出这个问题——真机现象是「卡住 1.4 s 而角速率≈0」，
+    即持续误差。所以这里给的是 I 项摆动幅度与姿态误差的均值/P95，
+    前者衡量「速率环还要自己配平多少」，后者衡量「卡住得有多久多深」。
+    """
+    if not path or not os.path.exists(path):
+        return {}
+    from pymavlink import DFReader
+    axes = {"roll": ("PIDR", "DesRoll", "Roll"), "pitch": ("PIDP", "DesPitch", "Pitch")}
+    i_terms = {k: [] for k in axes}
+    errors = {k: [] for k in axes}
+    m = DFReader.DFReader_binary(path)
+    while True:
+        msg = m.recv_match(type=["PIDR", "PIDP", "ATT"])
+        if msg is None:
+            break
+        mt = msg.get_type()
+        if mt == "ATT":
+            for axis, (_, des, act) in axes.items():
+                errors[axis].append(abs(getattr(msg, des) - getattr(msg, act)))
+        else:
+            for axis, (pid, _, _) in axes.items():
+                if mt == pid:
+                    i_terms[axis].append(msg.I)
+    out = {}
+    for axis in axes:
+        vals, errs = i_terms[axis], sorted(errors[axis])
+        if vals:
+            out["%s_i_span" % axis] = max(vals) - min(vals)
+            out["%s_i_rms" % axis] = math.sqrt(sum(v * v for v in vals) / len(vals))
+        if errs:
+            out["%s_att_err_mean_deg" % axis] = sum(errs) / len(errs)
+            out["%s_att_err_p95_deg" % axis] = errs[int(len(errs) * 0.95)]
+            out["%s_att_err_max_deg" % axis] = errs[-1]
+    return out
+
+
 def latest_log(out):
     candidates = []
     logdir = os.path.join(out, "logs")
@@ -426,14 +474,31 @@ def main(argv=None):
                         help="关闭新增物理项，跑默认物理模型对照")
     parser.add_argument("--speedup", type=float, default=2.0)
     parser.add_argument("--output", help="结果目录（默认写入本目录 runs/）")
+    parser.add_argument("--set", dest="overrides", action="append", default=[],
+                        metavar="PARAM=VALUE",
+                        help="覆盖飞控参数，可重复。用于算法 A/B（物理项保持不变，只切算法）")
+    parser.add_argument("--variant", help="结果里记录的变体名，例如 baseline-algo / candidate-algo")
     args = parser.parse_args(argv)
+
+    overrides = {}
+    for item in args.overrides:
+        if "=" not in item:
+            raise SystemExit("--set 需要 PARAM=VALUE 形式，收到 %r" % item)
+        k, v = item.split("=", 1)
+        try:
+            overrides[k.strip().upper()] = float(v)
+        except ValueError:
+            raise SystemExit("--set 的值必须是数字，收到 %r" % item)
 
     if not os.path.exists(SITL_BIN):
         raise SystemExit("缺少 %s；先在仓库根目录执行 ./waf configure --board sitl && ./waf copter" % SITL_BIN)
-    out, model_path, variant = prepare_run(args.case, args.baseline, args.output)
-    proc, stdout = start_sitl(out, model_path, args.speedup)
+    out, model_path, variant, algo_path = prepare_run(
+        args.case, args.baseline, args.output, overrides, args.variant)
+    proc, stdout = start_sitl(out, model_path, args.speedup, algo_path)
     result = {"case": args.case, "variant": variant, "frame": "hexa-dji",
-              "motor_count": 6, "output": out}
+              "motor_count": 6, "output": out,
+              "physics": "nominal" if args.baseline else "problem",
+              "param_overrides": overrides}
     try:
         mon = connect(proc)
         if args.case == "landing":
@@ -450,6 +515,7 @@ def main(argv=None):
         stdout.close()
 
     result["dataflash_log"] = latest_log(out)
+    result["metrics"] = summarise_log(result["dataflash_log"])
     result["statustext"] = mon.messages
     result_path = os.path.join(out, "result.json")
     with open(result_path, "w", encoding="utf-8") as f:
