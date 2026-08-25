@@ -36,12 +36,12 @@ from pymavlink import DFReader  # noqa: E402
 
 # 这些参数描述的是这块飞控的硬件，搬进 SITL 只会让它去找不存在的设备
 HW_PREFIXES = (
-    "CAN_", "SERIAL", "BRD_", "INS_", "COMPASS_", "BARO_", "GPS_", "BATT",
+    "CAN_", "SERIAL", "BRD_", "INS_", "COMPASS_", "BARO", "GPS", "BATT",
     "RNGFND", "ESC_", "SERVO_BLH", "NET_", "MSP", "EFI", "OSD", "CAM_",
     "LOG_", "SCR_", "RC_PROTOCOLS", "SPRAY", "RELAY", "NTF_", "SIM_",
     # 合规与外设：SITL 里没有对应硬件，带过去只会一直拦着不让解锁。
     # DID_ENABLE=1 会让 OpenDroneID 报 "lost transmitter" 并拒绝 arm。
-    "DID_", "PRX_", "ADSB_", "AVD_", "FOLL_", "OA_",
+    "DID_", "PRX", "ADSB_", "AVD_", "FOLL_", "OA_",
 )
 
 # 主要的驾驶通道，其余通道多为开关，采样一次即可
@@ -176,10 +176,17 @@ SITL_OVERRIDES = [
     ("DISARM_DELAY", 0,
      "关掉无油门自动上锁。--speedup N 会让固件里所有超时按 N 倍速流逝，"
      "默认 10 s 的自动上锁在 speedup=10 时只有 1 s 墙钟，来不及发起飞指令。"),
-    ("SIM_BATT_VOLTAGE", None,
-     "按 MOT_BAT_VOLT_MAX 设置仿真电池电压。实机是 12S(50.4V)，SITL 默认 "
-     "12.6V 远低于 MOT_BAT_VOLT_MIN，推力补偿会把可用推力压到几乎为零，"
-     "电机爬到 1400+ 也拉不起来。"),
+    ("MOT_BAT_VOLT_MAX", 0,
+     "关掉电压推力补偿。实机 12S 的 MOT_BAT_VOLT_MIN=42 远高于 SITL 电池的 12.6V，"
+     "补偿会把可用推力压到几乎为零；而把 SIM_BATT_VOLTAGE 抬到 50.4V 也不行——"
+     "SITL 电机推力按 voltage/voltage_max 线性放大（SIM_Motor.cpp），"
+     "机架模型 voltage_max 仍是 12.6V，推力会放大 4 倍，起飞 12 s 冲到 70 m。"),
+    ("MOT_BAT_VOLT_MIN", 0, "同上。"),
+    ("AHRS_ORIENTATION", 0,
+     "实机飞控板按安装方向旋转（本机 4 = Yaw180），SITL 的 IMU 不旋转，"
+     "带过去姿态整体转 180°，解锁即翻。"),
+    ("AHRS_TRIM_X", 0, "实机水平校准的机体微倾，仿真里没有。"),
+    ("AHRS_TRIM_Y", 0, "同上。"),
 ]
 
 
@@ -190,13 +197,10 @@ def _median(xs):
 
 def write_overrides(d, out):
     p = os.path.join(out, "sitl_overrides.parm")
-    vmax = d["params"].get("MOT_BAT_VOLT_MAX", 0.0)
     with open(p, "w", encoding="utf-8") as f:
         f.write("# 在 params.parm 之后加载，覆盖仿真环境里跑不通的几项。\n")
         f.write("# 用法: --defaults params.parm,sitl_overrides.parm\n\n")
         for name, val, why in SITL_OVERRIDES:
-            if name == "SIM_BATT_VOLTAGE":
-                val = vmax if vmax > 0 else 12.6
             for line in why.split("；"):
                 f.write("# %s\n" % line.strip("。") if line else "")
             f.write("%-18s %s\n\n" % (name, val))
@@ -254,12 +258,18 @@ def write_model(d, out):
 def write_runner(d, out, param_file, home_file):
     p = os.path.join(out, "run_sitl.sh")
     home = open(home_file, encoding="utf-8").read().strip() if home_file else ""
-    frame = "hexa" if int(d["params"].get("FRAME_CLASS", 0)) == 2 else "quad"
+    fclass = int(d["params"].get("FRAME_CLASS", 0))
+    ftype = int(d["params"].get("FRAME_TYPE", 1))
+    # SITL 物理模型的电机编号必须与混控一致；X/DJI_X/CW_X 各有对应的 SIM frame
+    if fclass == 2:
+        frame = {0: "hexa", 1: "hexax", 11: "hexa-cwx", 13: "hexa-dji"}.get(ftype, "hexax")
+    else:
+        frame = {0: "quad", 1: "x", 11: "cwx", 13: "djix"}.get(ftype, "x")
     with open(p, "w", encoding="utf-8") as f:
         f.write("#!/bin/bash\n")
         f.write("# 由 log_to_sitl_scenario.py 生成\n")
-        f.write("# 机架按 FRAME_CLASS=%s 推断为 %s\n"
-                % (int(d["params"].get("FRAME_CLASS", 0)), frame))
+        f.write("# 机架按 FRAME_CLASS=%d FRAME_TYPE=%d 选用 SITL 模型 %s\n"
+                % (fclass, ftype, frame))
         f.write("cd \"$(dirname \"$0\")\"\n")
         f.write("AP=%s\n" % os.path.normpath(
             os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -316,7 +326,7 @@ def main(argv):
     print("时间线    %s   %d 次模式切换 + %d 组杆量"
           % (tf, len(d["modes"]), len(d["rc"])))
     print("任务      %s" % (mf or "(日志中无航点)"))
-    print("SITL覆盖  %s   %d 项（EKF 航向源 / 自动上锁 / 仿真电池电压）"
+    print("SITL覆盖  %s   %d 项（EKF 航向源 / 自动上锁 / 电压补偿 / 板子朝向）"
           % (of, len(SITL_OVERRIDES)))
     print("机型模型  %s   质量/轴距/桨盘面积需人工填写" % mo)
     print("启动脚本  %s" % rf)

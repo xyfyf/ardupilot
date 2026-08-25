@@ -90,8 +90,9 @@ def series(path, fields):
         m = log.recv_match(type=list(want))
         if m is None:
             break
-        # 多核 EKF 只取 core 0，否则不同核会互相污染统计
-        if getattr(m, "C", 0) != 0:
+        # Replay 输出里 C=0/1 是机载原始记录的透传，重算结果在 C=100+。
+        # 只取重算的 core 0（C=100），否则比的是两份一样的原始数据，永远"无差异"。
+        if getattr(m, "C", 100) != 100:
             continue
         t = m.TimeUS
         for fld in want[m.get_type()]:

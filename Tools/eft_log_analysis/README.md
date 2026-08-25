@@ -47,6 +47,19 @@ cd <场景目录> && ./run_sitl.sh
 
 产出参数、起点、模式与杆量时间线、任务航点、SITL 覆盖参数、以及一份待填的机型模型。**仿真轨迹会和真实飞行发散**，那是物理模型与实机的差异；`model.json` 里的 `mass` / `diagonal_size` / `disc_area` 日志里没有，必须人工填，否则推重比不对。
 
+用 00000231 实测时踩过、现已写进脚本的三个坑：`FRAME_TYPE=13`（DJI_X）必须配 SITL 的 `hexa-dji` 模型而不是 `hexa`；`AHRS_ORIENTATION=4` 带进 SITL 姿态整体转 180°、解锁即翻（SITL 的 IMU 不旋转）；`SIM_BATT_VOLTAGE` 抬到 50.4 V 会让 SITL 电机推力按 `voltage/voltage_max` 放大 4 倍、起飞 12 s 冲到 70 m——正确做法是关掉 `MOT_BAT_VOLT_MAX/MIN` 电压补偿。
+
+## fly_scenario.py
+
+把上面的场景真的飞一遍：起 SITL（无 GCS）、等 EKF 就绪、LOITER 解锁、按仿真时钟回放 `timeline.csv` 的杆量、播完 LAND。
+
+```bash
+python3 Tools/eft_log_analysis/fly_scenario.py <场景目录> [--speedup 4] [--max-t 60]
+python3 Tools/eft_log_analysis/log_control_metrics.py <真机.bin> <场景目录>/logs/*.EFT   # 横向对比
+```
+
+00000231 全程 223 s 杆量回放的结果：SITL 里姿态环跟踪 RMS 0.6°（真机 1.1°），但真机的核心现象——横滚 I 项与侧向速度相关 r=+0.78——在 SITL 里是 r=0.00。默认物理模型没有大桨挥舞随来流速度产生的力矩，所以这个扭动问题**不能**靠默认模型复现，要么给 `model.json`/JSON 模型加速度相关力矩项，要么用 SysID 辨识。这就是"发散程度 = 模型保真度"的具体含义。
+
 ## log_control_metrics.py
 
 从真实飞行数据量化控制器表现：姿态环/角速率环跟踪误差（RMS、P95、最大、偏置）、高度环、PID 积分限幅比例、振动与加速度计削顶，并检查各消息的实际记录频率是否够用。
