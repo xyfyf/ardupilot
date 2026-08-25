@@ -3,7 +3,7 @@
 这套工具固定使用 `HEXA / DJI_X`（`FRAME_CLASS=2`、`FRAME_TYPE=13`、六路电机），复现两个场景：
 
 1. 地面站上传 AUTO 任务：起飞 → 两个航点 → `NAV_LAND`，观察恒速触地与落地检测延迟。
-2. LOITER 下打杆到 5 m/s，突然反向打满杆，观察姿态误差和速率环 I 项换向。
+2. 高速运动时突然反拉，观察姿态误差和速率环 I 项换向；本轮 LOITER 场景使用 5 m/s 作为代表测试点，不把问题限定为固定速度。
 
 ## 运行
 
@@ -36,7 +36,7 @@ ArduPilot 默认多旋翼模型没有大桨来流引起的速度相关力矩，�
 - `velocity_torque_gain`：横向速度→滚转力矩、前向速度→俯仰力矩；
 - `ground_effect_height`、`ground_effect_collapse_height`、`ground_effect_gain`、`ground_effect_vspeed_gain`：近地增升及接触前溃散。
 
-所有新字段默认值为零，已有 SITL 机型行为不变。`eft_hexa.json` 当前把速度力矩校准到 5 m/s 时 I 项约 ±0.05，与 00000231 真机日志同量级。
+所有新字段默认值为零，已有 SITL 机型行为不变。`eft_hexa.json` 当前把速度力矩校准到 5 m/s 代表工况下 I 项约 ±0.05，与 00000231 真机日志同量级。后续需要在多个速度、载荷、反拉幅度和方向上验证触发边界。
 
 ## 当前边界
 
