@@ -58,11 +58,22 @@ diff -rq build/EFT_CAAC/libraries/GCS_MAVLink/include/mavlink/v2.0 \
 | `f130827f` | 按通道支持 EF 包头发送与解析 |
 | `723581df` | msgid 516 帧格式覆盖的魔数和 CRC 字段 |
 
-而 `xyfyf/mavlink` 的 `.gitmodules` 把 pymavlink 指向官方 `ArduPilot/pymavlink.git`。这样能正常工作，是因为 GitHub 的 fork network 共享对象存储，官方 URL 可以取到 fork 里的 sha——**这是隐式依赖**。
+历史上 `xyfyf/mavlink` 的 `.gitmodules` 把 pymavlink 指向官方 `ArduPilot/pymavlink.git`。那样也能正常工作，是因为 GitHub 的 fork network 共享对象存储，官方 URL 可以取到 fork 里的 sha——**但那是隐式依赖**。
 
 一旦 `xyfyf/pymavlink` 被删除，对象可能被 GC，所有人的克隆会同时断链，而且报错完全看不出根因：`Tools/ardupilotwaf/git_submodule.py:69` 对状态为 `+` 的子模块跑 `git merge-base`，遇到不存在的对象 exit 128，异常穿透成 `WafError: Build failed`。
 
-想让依赖显式化，应把 `xyfyf/mavlink` 的 `.gitmodules` 改成 `url = ../pymavlink.git`（相对地址，自动跟随 owner）。
+**这一条已在 `xyfyf/mavlink` 的 `83de5360`（2026-08-20）修掉**，`.gitmodules` 改成显式指向 fork：
+
+```
+[submodule "pymavlink"]
+	path = pymavlink
+	url = https://github.com/xyfyf/pymavlink.git
+	branch = custom-messages
+```
+
+注意**修复要生效，本仓库记录的 `modules/mavlink` gitlink 必须 ≥ `83de5360`**。在此之前 gitlink 停在 `606cc585`，正好差这一个提交，于是修复躺在远程分支上而克隆出来的仍是旧版——加子模块引用时容易漏掉这半步。
+
+另：`.gitmodules` 用的是绝对 HTTPS 地址，而本机 `modules/mavlink/pymavlink` 的 origin 可能是 SSH。两者指向同一仓库，不影响使用；`git submodule sync` 会把本地 remote 覆盖成 HTTPS，如果你依赖 SSH key 推送就别跑它。
 
 ## 4. 帧格式覆盖默认是开启的
 
@@ -119,17 +130,24 @@ m = DFReader.DFReader_binary(path)
 
 `LOG_REPLAY` 完全不影响控制相关日志。`ATT`/`RATE`/`CTUN`/`PID*`/`RCOU`/`MOTB` 的频率由 `LOG_BITMASK` 对应位和各自的调度任务决定（`ten_hz_logging_loop` 10 Hz、`twentyfive_hz_logging` 25 Hz、`fast_loop` 400 Hz）。
 
-当前默认 `LOG_BITMASK = 145374` 开了 `ATTITUDE_MED`(bit1) 但**没开 `ATTITUDE_FAST`**(bit0)，所以 `ATT`/`RATE` 只有 10 Hz。姿态环跑在 400 Hz、带宽通常 10–30 Hz，10 Hz 记录的奈奎斯特只到 5 Hz，**高频振荡和超调全部混叠掉了**。做控制律优化要加上 bit0：
+当前默认 `LOG_BITMASK = 145374` 开了 `ATTITUDE_MED`(bit1) 但**没开 `ATTITUDE_FAST`**(bit0)，所以 `ATT`/`RATE` 只有 10 Hz。姿态环跑在 400 Hz、带宽通常 10–30 Hz，10 Hz 记录的奈奎斯特只到 5 Hz，**高频振荡和超调全部混叠掉了**。做控制律优化要加上 bit0，同时建议补上 bit5（`NTUN`，位置控制器内部量 `PSCN/PSCE/PSCD`）：
 
 ```
-LOG_BITMASK = 145375
+LOG_BITMASK  = 145407     # = 145374 + 1(bit0) + 32(bit5)
+LOG_REPLAY   = 1
+LOG_DISARMED = 1
 ```
 
-### 实测提醒
+### 一个架次就能兼顾，不需要分开飞
 
-2026-08-20 那批日志里有一架次 `ATT`/`RATE` 实际只有 **4.9 Hz**（标称 10 Hz），说明 SD 卡写入已经跟不上、在丢帧。开 `ATTITUDE_FAST` 或 `LOG_REPLAY` 之前先换高速卡，否则数据量上去只会丢得更多。
+早期版本的本节写过"两套配置日志都很大，建议分架次飞"，以及"2026-08-20 那批日志有一架次 `ATT`/`RATE` 只有 4.9 Hz，说明 SD 卡在丢帧，开 `ATTITUDE_FAST` 前先换高速卡"。**这两条都已被实测推翻，别再照着做。**
 
-两套配置日志都很大，建议**分架次飞**：一架次带 `LOG_REPLAY` 调估计器，一架次带 `ATTITUDE_FAST` 调控制器。
+- 4.9 Hz 是**统计口径造成的假象**：`LOG_DISARMED = 0` 时一份文件里有多个架次，架次间的空档被算进了分母。按 `RATE` 自身首末时间戳算，00000231 是 2232 条 / 223.1 s = **10.00 Hz**；三份日志的 `DSF.Dp` 全为 0，**一帧都没丢**。不需要换卡。
+- 带宽和缓冲也够：`LOG_BITMASK=145407` + `LOG_REPLAY=1` 约 196 KB/s，按实测线性外推缓冲峰值约占 200 KiB 的 34%。
+
+真正要盯的不是巡航段而是**开档头 2 秒**——FMT 表加千余条 `PARM` dump 的突发，在今天 28 KB/s 的配置下就已经吃掉 39% 的缓冲。
+
+完整的位定义、四种组合对比、余量核算和飞后必查项见 `~/UAV/flight-test/日志记录配置指南.md`。
 
 ### 现成的检查与分析工具
 
