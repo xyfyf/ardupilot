@@ -476,6 +476,11 @@ void Frame::load_frame_params(const char *model_json)
         FRAME_VAR(slew_max),
         FRAME_VAR(disc_area),
         FRAME_VAR(mdrag_coef),
+        FRAME_VAR(ground_effect_height),
+        FRAME_VAR(ground_effect_collapse_height),
+        FRAME_VAR(ground_effect_gain),
+        FRAME_VAR(ground_effect_vspeed_gain),
+        {"velocity_torque_gain", &model.velocity_torque_gain, VarType::VECTOR3F},
         {"moment_inertia", &model.moment_of_inertia, VarType::VECTOR3F},
         FRAME_VAR(num_motors),
     };
@@ -626,6 +631,7 @@ Frame *Frame::find_frame(const char *name)
             return &supported_frames[i];
         }
     }
+
     return nullptr;
 }
 
@@ -656,6 +662,14 @@ void Frame::calculate_forces(const Aircraft &aircraft,
             rpm[motor_offset+i] = motors[i].get_command() * AP::sitl()->vibe_motor * 60.0f;
         }
     }
+
+    // Translational airflow across a large rotor disc can create a moment
+    // which the rate-controller integrator must trim out.  Keep this as a
+    // model input (rather than a controller disturbance injection) so that
+    // it naturally changes sign during a velocity reversal.
+    torque.x += model.velocity_torque_gain.x * vel_air_bf.y;
+    torque.y += model.velocity_torque_gain.y * vel_air_bf.x;
+    torque.z += model.velocity_torque_gain.z * vel_air_bf.y;
 
     // calculate total rotational acceleration
     rot_accel.x = torque.x / model.moment_of_inertia.x;
@@ -688,6 +702,38 @@ void Frame::calculate_forces(const Aircraft &aircraft,
         }
 
         thrust -= drag_bf;
+    }
+
+    if (model.ground_effect_height > 0.0f) {
+        const float hagl = aircraft.get_hagl();
+        if (hagl < model.ground_effect_height) {
+            float height_scale;
+            if (model.ground_effect_collapse_height > 0.0f &&
+                hagl < model.ground_effect_collapse_height) {
+                // A descending rotor cushion can collapse immediately before
+                // contact.  The optional lower ramp models that transient
+                // without changing legacy models.
+                height_scale = constrain_float(
+                    MAX(hagl, 0.0f) / model.ground_effect_collapse_height,
+                    0.0f,
+                    1.0f);
+            } else {
+                const float lower_height = constrain_float(
+                    model.ground_effect_collapse_height,
+                    0.0f,
+                    model.ground_effect_height * 0.99f);
+                height_scale = constrain_float(
+                    1.0f - (MAX(hagl, lower_height) - lower_height) /
+                    (model.ground_effect_height - lower_height),
+                    0.0f,
+                    1.0f);
+            }
+            const float descent_speed = MAX(aircraft.get_velocity_ef().z, 0.0f);
+            const float gain = MAX(
+                model.ground_effect_gain + model.ground_effect_vspeed_gain * descent_speed,
+                0.0f) * height_scale;
+            thrust *= 1.0f + gain;
+        }
     }
 
     body_accel = thrust/aircraft.gross_mass();

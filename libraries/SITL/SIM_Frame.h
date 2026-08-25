@@ -133,6 +133,21 @@ private:
         // momentum drag coefficient
         float mdrag_coef = 0.2;
 
+        // Near-ground rotor thrust augmentation.  These default to zero so
+        // existing models retain their current behaviour.  The gain is
+        // linearly faded from full strength at ground level to zero at
+        // ground_effect_height.  Positive vertical speed is down in NED.
+        float ground_effect_height = 0.0;
+        float ground_effect_collapse_height = 0.0;
+        float ground_effect_gain = 0.0;
+        float ground_effect_vspeed_gain = 0.0;
+
+        // Aerodynamic moments caused by translational airflow, in Nm per
+        // m/s.  Components map lateral speed to roll, forward speed to
+        // pitch, and lateral speed to yaw respectively.  Large multirotor
+        // blade flapping can make the first two terms significant.
+        Vector3f velocity_torque_gain;
+
         // if zero value will be estimated from mass
         Vector3f moment_of_inertia;
 

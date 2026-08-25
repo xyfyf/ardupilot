@@ -1,0 +1,57 @@
+# EFT 植保六旋翼问题复现场景参数。
+# 控制参数来自 00000231；着陆参数来自 00000219/220/231。
+
+FRAME_CLASS          2
+FRAME_TYPE           13
+
+MOT_PWM_MIN          1050
+MOT_PWM_MAX          1950
+MOT_SPIN_MIN         0.10
+MOT_SPIN_MAX         0.95
+MOT_THST_EXPO        0.65
+MOT_THST_HOVER       0.161
+MOT_BAT_VOLT_MIN     42.0
+MOT_BAT_VOLT_MAX     50.4
+
+ATC_RAT_RLL_P        0.16
+ATC_RAT_RLL_I        0.12
+ATC_RAT_RLL_D        0.015
+ATC_RAT_RLL_FF       0.0
+ATC_RAT_RLL_IMAX     0.20
+ATC_RAT_PIT_P        0.16
+ATC_RAT_PIT_I        0.12
+ATC_RAT_PIT_D        0.015
+ATC_RAT_PIT_FF       0.0
+ATC_RAT_PIT_IMAX     0.20
+
+ANGLE_MAX            1500
+PSC_ANGLE_MAX        20
+LOIT_ANG_MAX         15
+LOIT_SPEED           500
+LOIT_ACC_MAX         263
+LOIT_BRK_ACCEL       150
+LOIT_BRK_JERK        300
+
+WPNAV_SPEED          200
+WPNAV_ACCEL          150
+WPNAV_JERK           1
+WPNAV_SPEED_DN       200
+LAND_ALT_LOW         500
+LAND_SPEED           50
+LAND_SPEED_HIGH      0
+
+ARMING_CHECK         0
+DISARM_DELAY         10
+AUTO_OPTIONS         3
+FS_THR_ENABLE        0
+SCR_ENABLE           0
+DID_ENABLE           0
+AHRS_ORIENTATION     0
+AHRS_TRIM_X          0
+AHRS_TRIM_Y          0
+EK3_SRC1_YAW         1
+
+# ATTITUDE_FAST + 当前固件原有记录位；供换向瞬态离线分析。
+LOG_BITMASK          145375
+LOG_DISARMED         0
+LOG_REPLAY           0
