@@ -578,6 +578,11 @@ class Board:
 
         # add files from ROMFS_custom
         custom_dir = 'ROMFS_custom'
+        # paths relative to ROMFS_custom/ included only on listed boards
+        romfs_custom_board_only = {
+            'scripts/batt_uavcan_adc.lua': ['EFT_CAAC'],
+        }
+        board_name = getattr(self, 'name', '')
         if os.path.exists(custom_dir):
             for root, subdirs, files in os.walk(custom_dir):
                 for f in files:
@@ -587,6 +592,10 @@ class Board:
                     fname = root[len(custom_dir)+1:]+"/"+f
                     if fname.startswith("/"):
                         fname = fname[1:]
+                    fname = fname.replace("\\", "/")
+                    if fname in romfs_custom_board_only:
+                        if board_name not in romfs_custom_board_only[fname]:
+                            continue
                     env.ROMFS_FILES += [(fname,root+"/"+f)]
 
     def pre_build(self, bld):

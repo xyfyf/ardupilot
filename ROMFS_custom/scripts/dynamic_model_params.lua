@@ -1,4 +1,5 @@
 -- 烧录后首次开机，根据 SN_PROD 产品型号一次性写入 E616 / X6100 差异参数
+-- 须先写入 SN_PROD 后才执行；无 SN 时 SCR_USER2/3 保持 0，不写参
 -- SCR_USER2：机型差异参数已写入；SCR_USER3：电池电压已写入（各自只写一次）
 -- 重刷固件且参数清零后会再执行一次
 
@@ -7,7 +8,6 @@ local DONE_FLAG_PARAM = "SCR_USER2"
 local DONE_FLAG_VALUE = 6166100
 local VOLT_DONE_PARAM = "SCR_USER3"
 local VOLT_DONE_VALUE = 6166101
-local SN_PROD_WAIT_LOOPS = 30  -- 最多等待 30 秒读取 SN_PROD
 
 -- 电池电压：首次开机按机型写入一次，之后不再改动
 local params_voltage = {
@@ -39,8 +39,6 @@ local params_diff = {
     PSC_VELXY_I      = {0.5, 1},
     PSC_VELXY_IMAX   = {500, 1000}
 }
-
-local wait_loops = 0
 
 local function get_product_model()
     local name = ""
@@ -104,10 +102,7 @@ local function apply_model_params(model_str)
 
     param:set_and_save(DONE_FLAG_PARAM, DONE_FLAG_VALUE)
 
-    local display_name = model_str
-    if display_name == "" then display_name = "None" end
-
-    gcs:send_text(6, "Product Model: " .. display_name)
+    gcs:send_text(6, "Product Model: " .. model_str)
     gcs:send_text(6, "Dynamic Params: First boot saved " .. (is_x6100 and "X6100" or "E616") .. " (" .. tostring(changed_count) .. " updated)")
 end
 
@@ -116,10 +111,8 @@ function update()
         return
     end
 
-    wait_loops = wait_loops + 1
     local current_model_str = get_product_model()
-
-    if string.len(current_model_str) == 0 and wait_loops < SN_PROD_WAIT_LOOPS then
+    if string.len(current_model_str) == 0 then
         return update, RUN_INTERVAL_MS
     end
 
