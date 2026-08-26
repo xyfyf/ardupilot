@@ -1,3 +1,11 @@
+# 轨迹/路径规划参数：以下为植保作业的**行业典型值**，作为仿真建模的占位设定，
+# 等拿到实机作业规划参数后替换（见 flight-test/数据需求清单 第 6.1 节）。
+#   WPNAV_SPEED 450   作业速度 4.5 m/s（常用 3-6）
+#   WPNAV_ACCEL 300   水平加速度 3.0 m/s²，须 ≤ g·tan(PSC_ANGLE_MAX)=3.57
+#   WPNAV_JERK    4   加加速度 4 m/s³
+#   LOIT_SPEED  600   手动飞行速度上限 6 m/s
+#   PSC_ANGLE_MAX 20  AUTO/GUIDED 的倾角上限（AC_PosControl 直接用它）
+#   ANGLE_MAX  2000   20°，LOITER 另受 LOIT_ANG_MAX 约束
 # EFT 植保六旋翼问题复现场景参数。
 # 控制参数来自 00000231；着陆参数来自 00000219/220/231。
 
@@ -24,17 +32,17 @@ ATC_RAT_PIT_D        0.015
 ATC_RAT_PIT_FF       0.0
 ATC_RAT_PIT_IMAX     0.20
 
-ANGLE_MAX            1500
+ANGLE_MAX            2000
 PSC_ANGLE_MAX        20
 LOIT_ANG_MAX         15
-LOIT_SPEED           500
+LOIT_SPEED           600
 LOIT_ACC_MAX         263
 LOIT_BRK_ACCEL       150
 LOIT_BRK_JERK        300
 
-WPNAV_SPEED          200
-WPNAV_ACCEL          150
-WPNAV_JERK           1
+WPNAV_SPEED          450
+WPNAV_ACCEL          300
+WPNAV_JERK           4
 WPNAV_SPEED_DN       200
 LAND_ALT_LOW         500
 LAND_SPEED           50

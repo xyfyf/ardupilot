@@ -18,6 +18,13 @@
 /// The arc is only flyable if the vehicle can produce the centripetal
 /// acceleration it needs, so set_arc() refuses a request it cannot fly rather
 /// than accepting it and quietly slowing down.
+///
+/// The reference advances at the rate the vehicle can actually keep up with,
+/// not on wall-clock time, using the same along-track error governor as
+/// AC_WPNav::advance_wp_target_along_track().  Advancing on time alone lets the
+/// reference run away from a lagging vehicle: the position error grows, the
+/// controller saturates, and the vehicle ends up flying the right circle at a
+/// fraction of the commanded speed.
 
 #include <AP_Common/AP_Common.h>
 #include <AP_Math/AP_Math.h>
@@ -64,6 +71,11 @@ public:
     /// True while an arc is set and has not finished.
     bool active() const { return _active; }
 
+    /// Along-track governor value in use, 0 to 1.  Exposed so callers can log
+    /// it: a value stuck near its 0.05 floor means the reference has stalled
+    /// and the vehicle is following it down rather than holding speed.
+    float dt_scalar() const { return _dt_scalar; }
+
     /// Fraction of the sweep already flown, 0 to 1.
     float progress() const { return _sweep_rad > 0 ? constrain_float(_travelled_rad / _sweep_rad, 0.0f, 1.0f) : 1.0f; }
 
@@ -82,6 +94,9 @@ public:
     /// Smallest radius that the given speed can be flown at within the budget.
     /// Use it to pick a turn radius, e.g. how many swath lines to skip.
     float min_radius_for_speed_m(const AC_PosControl& pos_control, float speed_ms) const;
+
+    /// Tangential speed the arc was set up to hold.
+    float commanded_speed_ms() const { return _speed_ms; }
 
     void stop() { _active = false; }
 
@@ -102,4 +117,5 @@ private:
     float    _alt_u_m = 0.0f;
     float    _travelled_rad = 0.0f;
     float    _required_lean_rad = 0.0f;
+    float    _dt_scalar = 1.0f;         // along-track governor, 0 to 1
 };

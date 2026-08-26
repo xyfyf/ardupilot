@@ -1203,7 +1203,8 @@ def run_uturn_arcnav(mon, swath=SWATH_M, speed=2.0, leg=SPRAY_LEG_M):
     set_mode_wait(mon, "LAND")
     wait_disarmed(mon, 120)
 
-    # 稳态段：掐掉进入与退出各 15%
+    # 稳态段由 ARCN 的 progress 界定，不要靠采样窗口猜圆弧起止——
+    # 窗口猜错会把圆弧结束后的悬停减速也算进来，量出来的「掉速」全是假的。
     n = len(samples)
     core = samples[int(n * 0.15):int(n * 0.85)] or samples
     sps = [s[0] for s in core]

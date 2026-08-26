@@ -61,6 +61,7 @@ bool AC_ArcNav::set_arc(const AC_PosControl& pos_control,
     _speed_ms = speed_ms;
     _alt_u_m = alt_u_m;
     _travelled_rad = 0.0f;
+    _dt_scalar = 1.0f;
     _active = true;
     return true;
 }
@@ -88,9 +89,32 @@ bool AC_ArcNav::update(AC_PosControl& pos_control, float dt)
         return false;
     }
 
+    // Advance the reference at the rate the vehicle is actually keeping up with,
+    // the same governor AC_WPNav uses.  track_error is the position error
+    // projected onto the direction of travel and track_velocity the vehicle's
+    // speed along it; when the vehicle falls behind, the scalar drops and the
+    // reference waits for it instead of running away.
+    float dt_scalar = 1.0f;
+    const Vector3f target_vel = pos_control.get_vel_desired_NEU_ms();
+    const float target_speed = target_vel.length();
+    if (is_positive(target_speed)) {
+        const Vector3f dir = target_vel / target_speed;
+        const float track_error_m = pos_control.get_pos_error_NEU_m().dot(dir);
+        const float track_vel_ms = pos_control.get_vel_estimate_NEU_ms().dot(dir);
+        dt_scalar = constrain_float(0.05f +
+                                    (track_vel_ms - pos_control.get_pos_NE_p().kP() * track_error_m) / target_speed,
+                                    0.0f, 1.0f);
+    }
+    // filter the scalar so the advance rate does not chatter; the time constant
+    // is the one the position controller would take to change acceleration
+    const float accel_arc = sq(_speed_ms) / _radius_m;
+    const float jerk = pos_control.get_shaping_jerk_NE_msss();
+    const float tc = is_positive(jerk) ? MAX(accel_arc / jerk, 0.05f) : 0.3f;
+    _dt_scalar += (dt_scalar - _dt_scalar) * constrain_float(dt / tc, 0.0f, 1.0f);
+
     // Angular rate follows from holding the tangential speed: omega = v / r.
     const float omega = _speed_ms / _radius_m;
-    _travelled_rad += omega * dt;
+    _travelled_rad += omega * dt * _dt_scalar;
 
     bool last_step = false;
     if (_travelled_rad >= _sweep_rad) {

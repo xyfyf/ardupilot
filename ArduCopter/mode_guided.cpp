@@ -293,6 +293,27 @@ void ModeGuided::arc_run()
     pos_control->update_NE_controller();
     pos_control->update_U_controller();
 
+#if HAL_LOGGING_ENABLED
+    // @LoggerMessage: ARCN
+    // @Description: Constant-speed arc navigation
+    // @Field: TimeUS: Time since system startup
+    // @Field: Prog: fraction of the sweep flown
+    // @Field: Gov: along-track governor, 1 follows the reference, 0.05 means stalled
+    // @Field: Spd: horizontal speed
+    // @Field: Tgt: commanded tangential speed
+    // @Field: PErr: horizontal position error
+    Vector3f arc_vel_ne;
+    IGNORE_RETURN(AP::ahrs().get_velocity_NED(arc_vel_ne));
+    AP::logger().WriteStreaming("ARCN", "TimeUS,Prog,Gov,Spd,Tgt,PErr",
+                                "s-----", "F-----", "Qfffff",
+                                AP_HAL::micros64(),
+                                guided_arc_nav.progress(),
+                                guided_arc_nav.dt_scalar(),
+                                arc_vel_ne.xy().length(),
+                                guided_arc_nav.commanded_speed_ms(),
+                                pos_control->get_pos_error_NE_m());
+#endif
+
     // point the nose along the track
     const Vector2f vel = guided_arc_nav.exit_velocity_ne_ms();
     attitude_control->input_thrust_vector_heading_rad(
