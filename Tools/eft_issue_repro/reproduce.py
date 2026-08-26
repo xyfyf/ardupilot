@@ -6,7 +6,8 @@
   reverse  LOITER 手动打杆：加速到 5 m/s -> 突然反向，重复三次
   circle   CIRCLE 模式 2 m 半径绕圈：1.0/1.5/2.0/2.5 m/s 逐档，每档 2 圈
   loiter-circle  LOITER 杆量画圈：同上四档，但无 AC_Circle 自限速，可打到饱和
-  fence    圆形围栏接近：2.0/3.5/5.0 m/s 逐档撞边界，量实际余量与冲出量
+  fence    圆形围栏接近：逐档撞边界，量实际余量与冲出量
+  route    AUTO 作业航线：直线段 + 180° 掉头 + 密集航点，量速度波动与回线误差
 
 默认启用自定义机型中的近地增升与速度相关气动力矩。加 --baseline 可把这
 两项归零，用同一场景做 A/B，确认现象来自物理项而不是脚本本身。
@@ -64,6 +65,7 @@ class Monitor:
         self.local = None
         self.global_pos = None
         self.landed_state = None
+        self.mission_seq = None
         self.ekf_flags = 0
         self.armed = False
         self.touch_ms = None
@@ -86,6 +88,8 @@ class Monitor:
             self.local = msg
         elif typ == "GLOBAL_POSITION_INT":
             self.global_pos = msg
+        elif typ == "MISSION_CURRENT":
+            self.mission_seq = int(msg.seq)
         elif typ == "EXTENDED_SYS_STATE":
             self.landed_state = msg.landed_state
         elif typ == "EKF_STATUS_REPORT":
@@ -735,6 +739,124 @@ def run_fence(mon):
     return {"fence_radius_m": FENCE_RADIUS_M, "steps": steps}
 
 
+# P06：作业航线骨架。优先覆盖两类最影响亩用量的场景——180° 掉头与密集航点切换。
+# 航线相对 Home（米，北/东）：
+#   起飞 → (60,0) → (60,12) → (0,12)        直线段 + 180° 掉头
+#   → (0,24) → 每 10 m 一个点到 (50,24)     密集航点切换
+# WPNAV_RADIUS=10 m 而点距 10 m，正是「间距小于制动距离」的应力工况。
+ROUTE_ALT_M = 15.0
+# 掉头连接段长度可调：它决定飞机在两个 90° 转角之间有没有距离重新加速。
+# 掉头掉速若随该长度变化，说明主因是几何而不是限幅参数。
+ROUTE_TURN_OFFSET_M = 12.0
+
+
+def route_waypoints(offset, turn_deg=90.0):
+    """turn_deg 是航段之间的转向角。SCurve 在转角处把前后两段混合，
+    混合中点的速度是两段贡献的矢量和，因此掉速应随 cos(turn_deg/2) 走。
+    用不同转角跑一遍就能把「几何必然」与「限幅不足」区分开。"""
+    o = offset
+    if abs(turn_deg - 90.0) < 1e-6:
+        return [(60, 0), (60, o), (0, o), (0, o + 12),
+                (10, o + 12), (20, o + 12), (30, o + 12), (40, o + 12), (50, o + 12)]
+    # 指定角度的转角：向北 60 m 后偏转 turn_deg 再走两段，
+    # 让转角落在航线内部——否则量到的是终点减速而不是转角掉速。
+    th = math.radians(turn_deg)
+    dn, de = 60 * math.cos(th), 60 * math.sin(th)
+    return [(60, 0), (60 + dn, de), (60 + 2 * dn, 2 * de)]
+TURN_SEQS = (2, 3)          # 掉头涉及的航点序号（1-based mission seq 见下）
+DENSE_FROM_SEQ = 5
+
+
+def ne_to_latlon(home_lat, home_lon, north_m, east_m):
+    dlat = north_m / 111320.0
+    dlon = east_m / (111320.0 * math.cos(math.radians(home_lat)))
+    return home_lat + dlat, home_lon + dlon
+
+
+def run_route(mon, turn_offset=ROUTE_TURN_OFFSET_M, turn_deg=90.0):
+    global ROUTE_WPS
+    ROUTE_WPS = route_waypoints(turn_offset, turn_deg)
+    home_lat, home_lon = HOME[0], HOME[1]
+    # seq=0 是 ArduPilot 不执行的 home 项，必须占位
+    items = [(mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, home_lat, home_lon, 0.0),
+             (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, home_lat, home_lon, ROUTE_ALT_M)]
+    for n, e in ROUTE_WPS:
+        lat, lon = ne_to_latlon(home_lat, home_lon, n, e)
+        items.append((mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, lat, lon, ROUTE_ALT_M))
+    items.append((mavutil.mavlink.MAV_CMD_NAV_LAND, home_lat, home_lon, 0.0))
+    upload_mission(mon, items)
+
+    # 顺序与 run_landing 一致：先进 AUTO，再解锁，靠 AUTO_OPTIONS=1 启动任务
+    set_mode_wait(mon, "AUTO")
+    prepare_for_arm(mon)
+    mon.mav.arducopter_arm()
+    wait_armed(mon)
+    print("AUTO 航线已启动：%d 个航点" % len(ROUTE_WPS))
+
+    samples = []
+    start = mon.sim_ms
+    while mon.sim_ms - start < 300000:
+        mon.recv()
+        if mon.local is None:
+            continue
+        sp = math.hypot(mon.local.vx, mon.local.vy)
+        samples.append((mon.sim_ms, mon.mission_seq, mon.local.x, mon.local.y, sp))
+        if mon.landed_state == ON_GROUND and mon.sim_ms - start > 30000:
+            break
+        if not mon.armed and mon.sim_ms - start > 30000:
+            break
+
+    wait_disarmed(mon, 60)
+    return {"waypoints_ne_m": ROUTE_WPS,
+            "turn_offset_m": turn_offset,
+            "turn_deg": turn_deg,
+            "segments": summarise_route(samples)}
+
+
+def summarise_route(samples):
+    """按 MISSION_CURRENT 切段，逐段统计速度与回线误差。
+
+    作业段匀速是植保的核心诉求——喷洒量与速度直接相关，掉速就是重喷。
+    所以主指标是速度波动（标准差/均值）与掉头处的最低速度，
+    回线误差用点到航段直线的垂距。
+    """
+    by_seq = {}
+    for t, seq, x, y, sp in samples:
+        if seq is None or sp is None:
+            continue
+        by_seq.setdefault(seq, []).append((t, x, y, sp))
+
+    out = []
+    for seq in sorted(by_seq):
+        seg = by_seq[seq]
+        if len(seg) < 5:
+            continue
+        sps = [s[3] for s in seg]
+        mean = sum(sps) / len(sps)
+        var = sum((v - mean) ** 2 for v in sps) / len(sps)
+        row = {
+            "mission_seq": seq,
+            "duration_s": (seg[-1][0] - seg[0][0]) / 1000.0,
+            "speed_mean_m_s": mean,
+            "speed_std_m_s": math.sqrt(var),
+            "speed_min_m_s": min(sps),
+            "speed_max_m_s": max(sps),
+            "speed_cv": math.sqrt(var) / mean if mean > 0.05 else None,
+            "samples": len(seg),
+        }
+        # 回线误差：点到该段起止连线的垂距
+        x0, y0 = seg[0][1], seg[0][2]
+        x1, y1 = seg[-1][1], seg[-1][2]
+        dx, dy = x1 - x0, y1 - y0
+        L = math.hypot(dx, dy)
+        if L > 1.0:
+            devs = [abs((s[1] - x0) * dy - (s[2] - y0) * dx) / L for s in seg]
+            row["crosstrack_max_m"] = max(devs)
+            row["crosstrack_rms_m"] = math.sqrt(sum(d * d for d in devs) / len(devs))
+        out.append(row)
+    return out
+
+
 def summarise_log(path):
     """从日志算 P02 的验收量。
 
@@ -787,7 +909,7 @@ def latest_log(out):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle", "fence"))
+    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle", "fence", "route"))
     parser.add_argument("--baseline", action="store_true",
                         help="关闭新增物理项，跑默认物理模型对照")
     parser.add_argument("--speedup", type=float, default=2.0)
@@ -796,6 +918,10 @@ def main(argv=None):
                         metavar="PARAM=VALUE",
                         help="覆盖飞控参数，可重复。用于算法 A/B（物理项保持不变，只切算法）")
     parser.add_argument("--variant", help="结果里记录的变体名，例如 baseline-algo / candidate-algo")
+    parser.add_argument("--turn-offset", type=float, default=ROUTE_TURN_OFFSET_M,
+                        help="route 场景的掉头连接段长度（米），用于分辨掉速是几何还是限幅所致")
+    parser.add_argument("--turn-deg", type=float, default=90.0,
+                        help="route 场景的转角度数；掉速若随 cos(角/2) 走即为 SCurve 混合的几何必然")
     args = parser.parse_args(argv)
 
     overrides = {}
@@ -827,6 +953,8 @@ def main(argv=None):
             result.update(run_loiter_circle(mon))
         elif args.case == "fence":
             result.update(run_fence(mon))
+        elif args.case == "route":
+            result.update(run_route(mon, args.turn_offset, args.turn_deg))
         else:
             result.update(run_reverse(mon))
     finally:
