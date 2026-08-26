@@ -81,6 +81,20 @@
  # define AC_ARCNAV_HEADING_LEAD_S  0.5f
 #endif
 
+// Fraction of the available yaw rate the turn is allowed to ask for.  Holding
+// the nose on the tangent needs v/r continuously, so a turn sized to the full
+// limit leaves nothing to recover a transient with and the nose never catches
+// up.  Measured in SITL: r=3 m at 2 m/s needs 38 deg/s against 50-58 deg/s
+// available, and the nose still trails 15 degrees at its worst.
+// Ratio of a smoothstep's peak slope to its average.  d/du (3u^2 - 2u^3) peaks
+// at 1.5 in the middle of the ramp, so a transition shaped this way needs to be
+// 1.5x as long as a straight ramp to keep the same peak yaw acceleration.
+#define AC_ARCNAV_SMOOTHSTEP_PEAK  1.5f
+
+#ifndef AC_ARCNAV_YAW_RATE_FRACTION
+ # define AC_ARCNAV_YAW_RATE_FRACTION  0.5f
+#endif
+
 class AC_ArcNav {
 public:
     AC_ArcNav() {}
@@ -166,11 +180,21 @@ public:
     /// free to crab into a crosswind to hold that track.  Commanding heading
     /// from the measured velocity instead would make the vehicle turn into the
     /// wind and leave the swath line.
-    float track_heading_rad() const { return heading_at_m(_s_m + _speed_ms * _heading_lead_s); }
+    float track_heading_rad() const;
 
     /// Seconds of path the heading command leads the reference point by, to
     /// cover the yaw loop's own lag.  Zero commands the tangent at the
     /// reference point itself.
+    ///
+    /// The look-ahead is faded in across the entry transition and back out
+    /// across the exit, rather than applied at full value throughout.  Applying
+    /// it flat defeats the transition it is supposed to work with: at the start
+    /// of the turn the look-ahead point is already a full lead-distance in, so
+    /// the commanded yaw rate starts at its maximum instead of at zero, and the
+    /// ramp the transition exists to create never reaches the controller.
+    /// Measured in SITL, that made the commanded rate a step from 0 to 28.6
+    /// deg/s on the first sample and put a 17.9 degree spike in the heading
+    /// error right after entry.
     void set_heading_lead_s(float lead_s) { _heading_lead_s = MAX(lead_s, 0.0f); }
     float heading_lead_s() const { return _heading_lead_s; }
 
@@ -178,6 +202,10 @@ public:
     /// Curvature is piecewise linear, so its integral is closed form; before
     /// the start and past the end the path is straight and the heading holds.
     float heading_at_m(float s_m) const;
+
+    /// Distance the heading command currently looks ahead by, metres.  Not a
+    /// constant: see the note on set_heading_lead_s().
+    float heading_lead_m() const;
 
     /// Rate the tangent rotates at, rad/s, signed by the direction of travel:
     /// omega = v * curvature.  The spirals make this ramp from zero rather than
@@ -189,6 +217,71 @@ public:
     /// On a tight, slow turn this binds before the lean angle does, so callers
     /// should check it against their yaw rate limit before committing.
     float peak_heading_rate_rads() const { return _speed_ms / MAX(_radius_m, 0.01f); }
+
+    /// Tell the generator what the yaw channel can do, before calling set_arc.
+    ///
+    /// Binding the nose to the tangent makes yaw a function of the position
+    /// trajectory rather than the free flat output it normally is: the tangent
+    /// turns at v*curvature, so its rate of change is v^2 * d(curvature)/ds.
+    /// Both of those then have to fit inside what the yaw channel can deliver,
+    /// which is the weakest axis on a multirotor - it works against rotor drag
+    /// torque, not against a lever arm.
+    ///
+    /// rate_max_rads   yaw rate the vehicle can hold, e.g. ATC_RATE_Y_MAX
+    /// accel_max_radss yaw angular acceleration available, e.g. ATC_ACCEL_Y_MAX
+    ///
+    /// Zero for either leaves that limit unchecked.  Without this call set_arc
+    /// only checks the lean angle, which on a tight turn is not the binding
+    /// constraint.
+    void set_yaw_limits(float rate_max_rads, float accel_max_radss) {
+        _yaw_rate_max_rads = MAX(rate_max_rads, 0.0f);
+        _yaw_accel_max_radss = MAX(accel_max_radss, 0.0f);
+    }
+
+    /// A U-turn planned from what the yaw channel can do, rather than from the
+    /// swath.  Everything here follows from the two yaw limits and the speed.
+    struct UTurnPlan {
+        float radius_m;             // radius of the constant-curvature part
+        float spiral_len_m;         // each transition, metres
+        float duration_s;           // time to complete the whole turn
+        float peak_yaw_rate_rads;   // highest tangent rotation rate reached
+        bool  rate_limited;         // true if the sweep is long enough to reach
+                                    // peak_yaw_rate; false means the turn is
+                                    // two ramps with no constant part
+    };
+
+    /// Plan a turn from the yaw channel's capability instead of from geometry.
+    ///
+    /// Sizing a turn from the swath and then checking whether the yaw can keep
+    /// up gets the dependency backwards: the swath is negotiable (skip a row,
+    /// swing wide into the headland) while the yaw capability is not.  Start
+    /// from what the vehicle can actually do and the radius falls out, along
+    /// with the time the turn takes - which is what the operator cares about,
+    /// since it is dead time between spray runs.
+    ///
+    /// With the nose on the tangent the whole turn is one yaw manoeuvre through
+    /// sweep_rad, flown at constant speed.  Shaping that as a trapezoidal yaw
+    /// rate profile gives, directly:
+    ///
+    ///   radius     = v / yaw_rate          the constant-curvature part
+    ///   spiral     = v * yaw_rate / yaw_accel
+    ///   duration   = yaw_rate/yaw_accel + sweep/yaw_rate
+    ///
+    /// If the sweep is too short to reach yaw_rate_max the profile degenerates
+    /// to two ramps and the peak rate is sqrt(sweep * yaw_accel) instead.
+    ///
+    /// Pass the limits already derated for the working tilt angle: measured in
+    /// SITL, a hover step reaches 78 deg/s but the same airframe holds only
+    /// 55 deg/s at the 20 degrees of lean a turn needs, because roll and pitch
+    /// take the mixer headroom first.
+    static UTurnPlan plan_from_yaw_capability(float speed_ms, float sweep_rad,
+                                              float yaw_rate_max_rads,
+                                              float yaw_accel_max_radss);
+
+    /// Yaw angular acceleration the transitions ask for, rad/s/s.  Constant
+    /// through each spiral, because curvature ramps linearly there:
+    /// d(v * curvature)/dt = v^2 * (1/r) / L_s.
+    float required_yaw_accel_radss() const;
 
     void stop() { _active = false; }
 
@@ -222,6 +315,8 @@ private:
     float    _s_m = 0.0f;               // distance flown along the path
     float    _heading_rad = 0.0f;       // tangent bearing at _s_m
     float    _heading_lead_s = AC_ARCNAV_HEADING_LEAD_S;
+    float    _yaw_rate_max_rads = 0.0f;
+    float    _yaw_accel_max_radss = 0.0f;
     Vector2f _pos_ne_m;                 // reference position at _s_m
 
     float    _start_heading_rad = 0.0f;

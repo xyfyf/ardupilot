@@ -4,6 +4,25 @@
 
 extern const AP_HAL::HAL& hal;
 
+// Curvature shape across a transition, 0 to 1 over the normalised length.
+// Zero slope at both ends is the whole point: that is what makes the yaw
+// acceleration - and so the yaw torque - continuous rather than stepped.
+static float smoothstep(float u)
+{
+    u = constrain_float(u, 0.0f, 1.0f);
+    return sq(u) * (3.0f - 2.0f * u);
+}
+
+// Integral of smoothstep from 0 to u, i.e. u^3 - u^4/2.  Over a whole
+// transition (u = 1) this is 1/2, so a transition of length L turns through
+// L/(2r) - exactly what a linear ramp would.
+static float smoothstep_integral(float u)
+{
+    u = constrain_float(u, 0.0f, 1.0f);
+    const float u3 = u * sq(u);
+    return u3 - 0.5f * u3 * u;
+}
+
 float AC_ArcNav::tilt_budget_rad(const AC_PosControl& pos_control)
 {
     return pos_control.get_lean_angle_max_rad() * constrain_float(AC_ARCNAV_TILT_FRACTION, 0.1f, 1.0f);
@@ -44,12 +63,24 @@ float AC_ArcNav::curvature_at_m(float s_m) const
         // no room for transitions, so the path is a bare arc
         return inv_r;
     }
+    // Smoothstep rather than a straight ramp.  A linear curvature ramp is the
+    // classic clothoid and it bounds the yaw acceleration, but that
+    // acceleration still steps at both ends of the ramp - and yaw acceleration
+    // is yaw torque, which comes from spinning rotors up and down against their
+    // own inertia.  A torque step is no more followable than the rate step the
+    // clothoid was introduced to remove, just one derivative down.  Smoothstep
+    // has zero slope at both ends, so the torque comes on and goes off
+    // continuously.
+    //
+    // It integrates to the same total turn as the linear ramp, L_s/(2r), so the
+    // geometry of the turn is unchanged; what it costs is a 1.5x higher peak
+    // slope for the same length, which set_arc pays for by lengthening L_s.
     if (s_m <= _spiral_len_m) {
-        return inv_r * constrain_float(s_m / _spiral_len_m, 0.0f, 1.0f);
+        return inv_r * smoothstep(s_m / _spiral_len_m);
     }
     const float exit_start_m = _spiral_len_m + _arc_len_m;
     if (s_m >= exit_start_m) {
-        return inv_r * constrain_float((_total_len_m - s_m) / _spiral_len_m, 0.0f, 1.0f);
+        return inv_r * smoothstep((_total_len_m - s_m) / _spiral_len_m);
     }
     return inv_r;
 }
@@ -71,14 +102,15 @@ float AC_ArcNav::heading_at_m(float s_m) const
     } else if (!is_positive(_spiral_len_m)) {
         swept_rad = s_m / _radius_m;
     } else if (s_m <= _spiral_len_m) {
-        // entry ramp: area under a curvature triangle of height s/(r*L_s)
-        swept_rad = sq(s_m) / (2.0f * _radius_m * _spiral_len_m);
+        // entry transition: integral of smoothstep, which is u^3 - u^4/2
+        swept_rad = _spiral_len_m * smoothstep_integral(s_m / _spiral_len_m) / _radius_m;
     } else if (s_m <= _spiral_len_m + _arc_len_m) {
+        // a whole transition turns through L_s/(2r), same as a linear ramp
         swept_rad = _spiral_len_m / (2.0f * _radius_m) + (s_m - _spiral_len_m) / _radius_m;
     } else {
-        // exit ramp: the whole sweep less the triangle still to come
+        // exit transition: the whole sweep less what the remaining tail turns
         const float remaining_m = _total_len_m - s_m;
-        swept_rad = _sweep_rad - sq(remaining_m) / (2.0f * _radius_m * _spiral_len_m);
+        swept_rad = _sweep_rad - _spiral_len_m * smoothstep_integral(remaining_m / _spiral_len_m) / _radius_m;
     }
     return wrap_PI(_start_heading_rad + _direction * swept_rad);
 }
@@ -103,6 +135,44 @@ Vector2f AC_ArcNav::integrate_exit_position() const
     return pos;
 }
 
+AC_ArcNav::UTurnPlan AC_ArcNav::plan_from_yaw_capability(float speed_ms, float sweep_rad,
+                                                         float yaw_rate_max_rads,
+                                                         float yaw_accel_max_radss)
+{
+    UTurnPlan plan {};
+    sweep_rad = fabsf(sweep_rad);
+    if (!is_positive(speed_ms) || !is_positive(sweep_rad) ||
+        !is_positive(yaw_rate_max_rads) || !is_positive(yaw_accel_max_radss)) {
+        return plan;
+    }
+
+    // Reaching the rate limit and coming back down costs rate^2/accel of the
+    // sweep.  If the sweep is smaller than that the profile never gets there.
+    // A smoothstep ramp takes 1.5x as long as a linear one to reach the same
+    // rate under the same acceleration limit, because its peak slope is 1.5x
+    // its average.  That is the price of a continuous torque.
+    const float ramp_sweep_rad = AC_ARCNAV_SMOOTHSTEP_PEAK * sq(yaw_rate_max_rads) / yaw_accel_max_radss;
+    plan.rate_limited = ramp_sweep_rad <= sweep_rad;
+
+    if (plan.rate_limited) {
+        plan.peak_yaw_rate_rads = yaw_rate_max_rads;
+        // ramp up, hold, ramp down
+        plan.duration_s = AC_ARCNAV_SMOOTHSTEP_PEAK * yaw_rate_max_rads / yaw_accel_max_radss
+                          + sweep_rad / yaw_rate_max_rads;
+    } else {
+        // two ramps meeting at the peak: sweep = peak^2/accel
+        plan.peak_yaw_rate_rads = safe_sqrt(sweep_rad * yaw_accel_max_radss / AC_ARCNAV_SMOOTHSTEP_PEAK);
+        plan.duration_s = 2.0f * AC_ARCNAV_SMOOTHSTEP_PEAK * plan.peak_yaw_rate_rads / yaw_accel_max_radss;
+    }
+
+    // The path follows from the yaw profile: curvature is yaw rate over speed,
+    // so the tightest part has radius v/peak_rate, and the ramp covers the
+    // distance flown while the rate builds.
+    plan.radius_m = speed_ms / plan.peak_yaw_rate_rads;
+    plan.spiral_len_m = AC_ARCNAV_SMOOTHSTEP_PEAK * speed_ms * plan.peak_yaw_rate_rads / yaw_accel_max_radss;
+    return plan;
+}
+
 bool AC_ArcNav::set_arc(const AC_PosControl& pos_control,
                         const Vector2f& centre_ne_m, float radius_m,
                         const Vector2f& start_ne_m, float sweep_rad,
@@ -121,6 +191,17 @@ bool AC_ArcNav::set_arc(const AC_PosControl& pos_control,
     const float accel_needed = sq(speed_ms) / radius_m;
     _required_lean_rad = atanf(accel_needed / GRAVITY_MSS);
     if (_required_lean_rad > tilt_budget_rad(pos_control)) {
+        return false;
+    }
+
+    // Binding the nose to the tangent costs a yaw rate of v/r for the whole
+    // constant-curvature part.  Multirotor yaw works against rotor drag torque
+    // rather than a lever arm, so it is the weakest axis and this constraint
+    // bites long before the lean angle does on a tight turn.  Leave half the
+    // available rate as headroom: a turn that asks for all of it has nothing
+    // left to recover the entry transient with.
+    if (is_positive(_yaw_rate_max_rads) &&
+        speed_ms / radius_m > _yaw_rate_max_rads * AC_ARCNAV_YAW_RATE_FRACTION) {
         return false;
     }
 
@@ -158,6 +239,28 @@ bool AC_ArcNav::set_arc(const AC_PosControl& pos_control,
     // 0.53 m spiral.  Sizing the ramp to cover the look-ahead keeps the yaw
     // command a ramp, which is the whole point of the transition.
     spiral_len_m = MAX(spiral_len_m, speed_ms * _heading_lead_s);
+    // With the nose on the tangent, yaw accelerates at v^2/(r*L_s) through a
+    // spiral.  A short spiral therefore asks for a yaw acceleration the vehicle
+    // may not have; lengthening it is the only way to lower that demand without
+    // slowing down or opening the radius, both of which are ruled out here -
+    // the speed is fixed by the spray rate and the radius by the swath.
+    if (is_positive(_yaw_accel_max_radss)) {
+        // The commanded heading rate is v*curvature evaluated at the look-ahead
+        // point, so its rate of change carries two factors:
+        //
+        //   yaw_accel = v^2 * curvature'(s) * (1 + lead'(s))
+        //
+        // curvature' peaks at k/(r*L_s), and the look-ahead fades in across the
+        // transition so lead'(s) = v*tau/L_s there.  Ignoring that second factor
+        // under-sizes the transition: it is what turns a ramp the vehicle could
+        // have followed into one it cannot.  Requiring the peak to fit gives a
+        // quadratic in L_s, whose positive root is the shortest transition that
+        // keeps the commanded yaw acceleration inside what the vehicle has.
+        const float a = AC_ARCNAV_SMOOTHSTEP_PEAK * sq(speed_ms) / (radius_m * _yaw_accel_max_radss);
+        const float lead_m = speed_ms * _heading_lead_s;
+        const float min_len_m = 0.5f * (a + safe_sqrt(sq(a) + 4.0f * a * lead_m));
+        spiral_len_m = MAX(spiral_len_m, min_len_m);
+    }
     // Each spiral turns through spiral/(2r), so the pair uses spiral/r of the
     // sweep and the arc takes what is left.  A sweep too small to fit both
     // spirals gets as much transition as it can and no constant arc at all.
@@ -178,11 +281,47 @@ bool AC_ArcNav::set_arc(const AC_PosControl& pos_control,
     return true;
 }
 
+// Look-ahead distance in use right now.  It fades in over the entry transition
+// and out over the exit so that the commanded heading rate still starts and ends
+// at zero - the turn joins a straight leg at both ends, and a straight leg has
+// no curvature, so anything else is a step.  Through the constant-curvature part
+// the full lead applies, which is where the yaw lag actually needs covering.
+float AC_ArcNav::heading_lead_m() const
+{
+    const float full_m = _speed_ms * _heading_lead_s;
+    if (!is_positive(_spiral_len_m)) {
+        return full_m;
+    }
+    if (_s_m < _spiral_len_m) {
+        return full_m * constrain_float(_s_m / _spiral_len_m, 0.0f, 1.0f);
+    }
+    const float exit_start_m = _spiral_len_m + _arc_len_m;
+    if (_s_m > exit_start_m) {
+        return full_m * constrain_float((_total_len_m - _s_m) / _spiral_len_m, 0.0f, 1.0f);
+    }
+    return full_m;
+}
+
+float AC_ArcNav::track_heading_rad() const
+{
+    return heading_at_m(_s_m + heading_lead_m());
+}
+
+float AC_ArcNav::required_yaw_accel_radss() const
+{
+    if (!is_positive(_spiral_len_m) || !is_positive(_radius_m)) {
+        // a bare arc steps the tangent rate, which is an unbounded demand
+        return FLT_MAX;
+    }
+    // smoothstep peaks at 1.5x the average slope, at the middle of the ramp
+    return AC_ARCNAV_SMOOTHSTEP_PEAK * sq(_speed_ms) / (_radius_m * _spiral_len_m);
+}
+
 float AC_ArcNav::track_heading_rate_rads() const
 {
     // Taken at the look-ahead point too, so the rate feedforward stays the
     // derivative of the heading it is paired with.
-    return _direction * _speed_ms * curvature_at_m(_s_m + _speed_ms * _heading_lead_s);
+    return _direction * _speed_ms * curvature_at_m(_s_m + heading_lead_m());
 }
 
 Vector2f AC_ArcNav::exit_velocity_ne_ms() const
@@ -226,6 +365,13 @@ bool AC_ArcNav::update(AC_PosControl& pos_control, float dt)
     // curvature into a heading and the heading into a position.  Stepping in
     // distance rather than in angle is what lets the curvature vary: on the
     // spirals there is no single centre to sweep an angle about.
+    //
+    // Position and heading are two independent plans sharing one time axis, and
+    // what the governor slows down is that shared axis - not one of the plans -
+    // so the nose keeps pointing at the tangent of the point the vehicle is
+    // actually at.  Distance stands in for that axis here only because the turn
+    // is flown at constant speed, where s = v*tau.  A turn that varied its speed
+    // would need the time axis carried explicitly.
     float ds = _speed_ms * dt * _dt_scalar;
     bool last_step = false;
     if (_s_m + ds >= _total_len_m) {

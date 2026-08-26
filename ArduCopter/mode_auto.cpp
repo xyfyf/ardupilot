@@ -1,5 +1,37 @@
 #include "Copter.h"
 
+#include <AC_WPNav/AC_ArcNav.h>
+
+// Generator for the constant-speed coordinated turn.  Kept at file scope so
+// it costs nothing in ModeAuto when the feature is unused.
+static AC_ArcNav auto_arc_nav;
+
+// How far along the entry tangent to place the lead-in point that keeps the leg
+// before a coordinated turn from decelerating.  It only has to give the SCurve a
+// direction to carry speed into, so any distance comfortably past the turn's own
+// transition will do.
+#define AUTO_ARC_LEAD_M  10.0f
+
+// Turns at or below this count are flown as a constant-speed coordinated turn
+// rather than as a station-keeping circle.
+//
+// This is decided from the turn count rather than a flag because there is
+// nowhere to put a flag: the packed mission item's option flags are all eight
+// spoken for, and its two general-purpose bytes already hold the turn count and
+// the radius.  The semantics carry it anyway - LOITER_TURNS means "orbit N
+// times", and less than a full turn is not an orbit, it is a change of
+// direction.  A field U-turn is exactly half a turn; a 90 degree corner is a
+// quarter.  The circle flown is identical either way; what changes is that the
+// vehicle no longer stops at its edge and the nose tracks the tangent.
+#define AUTO_ARC_MAX_TURNS  0.5f
+
+// Loops to keep holding after the turn finishes before giving up on the mission
+// taking over.  mission.update() runs before the controller switch, so
+// verify_circle() normally advances on the very next loop; this only catches the
+// case where nothing follows the turn.
+#define AUTO_ARC_HANDOVER_LOOPS  40
+
+
 #if MODE_AUTO_ENABLED
 
 /*
@@ -135,6 +167,10 @@ void ModeAuto::run()
 
     case SubMode::CIRCLE:
         circle_run();
+        break;
+
+    case SubMode::ARC:
+        arc_run();
         break;
 
     case SubMode::NAVGUIDED:
@@ -496,6 +532,154 @@ void ModeAuto::land_start()
 
     // set submode
     set_submode(SubMode::LAND);
+}
+
+// arc_start - begin a constant-speed coordinated turn from the current position
+//
+// The nose is held on the desired tangent all the way round, so the turn costs a
+// yaw rate of v/r continuously.  On a multirotor that is the weakest axis, and
+// it binds long before the lean angle does on a field-sized U-turn, which is why
+// the yaw budget is checked before the arc is accepted rather than after.
+//
+// Returns false if the turn cannot be flown as asked; the caller then falls back
+// to the station-keeping circle so the mission item still completes.
+bool ModeAuto::arc_start(const Location& centre_loc, float radius_m, float turns, bool ccw)
+{
+    if (!is_positive(radius_m) || !is_positive(turns)) {
+        return false;
+    }
+
+    Vector2f centre_ne_m;
+    if (!centre_loc.get_vector_xy_from_origin_NE_cm(centre_ne_m)) {
+        return false;
+    }
+    centre_ne_m *= 0.01f;   // the helper returns centimetres
+
+    Vector2f pos_ne_m;
+    if (!AP::ahrs().get_relative_position_NE_origin_float(pos_ne_m)) {
+        return false;
+    }
+
+    // The turn is flown at the working speed by definition - the whole point is
+    // that it matches the spray runs either side of it.
+    const float speed_ms = wp_nav->get_default_speed_NE_ms();
+
+    // MAVLink sign convention: param3 negative means counter-clockwise, which
+    // in the NE frame (bearings measured from north toward east) is a decreasing
+    // angle, hence a negative sweep.
+    const float sweep_rad = radians(360.0f) * turns * (ccw ? -1.0f : 1.0f);
+
+    auto_arc_nav.set_yaw_limits(attitude_control->get_slew_yaw_max_rads(),
+                                attitude_control->get_accel_yaw_max_radss());
+
+    const float yaw_rate_needed = speed_ms / radius_m;
+    const float yaw_rate_max = attitude_control->get_slew_yaw_max_rads();
+    if (is_positive(yaw_rate_max) &&
+        yaw_rate_needed > yaw_rate_max * AC_ARCNAV_YAW_RATE_FRACTION) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "Arc: y%.0f>budget%.0f, circling",
+                        (double)degrees(yaw_rate_needed),
+                        (double)degrees(yaw_rate_max * AC_ARCNAV_YAW_RATE_FRACTION));
+        return false;
+    }
+
+    if (!auto_arc_nav.set_arc(*pos_control, centre_ne_m, radius_m, pos_ne_m, sweep_rad,
+                              speed_ms, pos_control->get_pos_desired_U_m())) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "Arc: r%.0f v%.1f unflyable, circling",
+                        (double)radius_m, (double)speed_ms);
+        return false;
+    }
+
+    // WPNAV_ACCEL is sized for straight legs and is typically well below what
+    // holding a circle needs, so raise the position controller's limits for the
+    // duration of the turn.  Do not re-initialise it: the vehicle is already
+    // flying under it at working speed and that state is exactly what the arc
+    // continues from.
+    const float accel_arc_mss = sq(speed_ms) / radius_m;
+    pos_control->set_max_speed_accel_NE_m(speed_ms, accel_arc_mss * 1.2f);
+    pos_control->set_correction_speed_accel_NE_m(speed_ms, accel_arc_mss * 1.2f);
+    // These are restored in arc_run() when the turn ends.  Leaving them raised
+    // would hand the next mission item a position controller tuned for the turn
+    // rather than for WPNAV_*, and the correction limits in particular decide
+    // when wp_nav considers a waypoint reached.
+
+    gcs().send_text(MAV_SEVERITY_INFO, "Arc r%.1f v%.1f sp%.2f y%.0f",
+                    (double)radius_m, (double)speed_ms,
+                    (double)auto_arc_nav.spiral_length_m(),
+                    (double)degrees(yaw_rate_needed));
+
+    arc_handover_count = 0;
+    set_submode(SubMode::ARC);
+    return true;
+}
+
+// arc_run - fly the coordinated turn
+void ModeAuto::arc_run()
+{
+    if (is_disarmed_or_landed()) {
+        make_safe_ground_handling();
+        return;
+    }
+
+    motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
+
+    if (!auto_arc_nav.update(*pos_control, pos_control->get_dt_s())) {
+        // The sweep is done.  Do NOT change submode here: verify_circle()
+        // identifies a finished turn by _mode being ARC, so switching away
+        // before the mission has advanced leaves it unable to tell the turn
+        // ended and the mission stalls on this item forever.  Hold the last
+        // targets instead and let verify_circle() advance on the next loop.
+        if (arc_handover_count == 0) {
+            // Hand the position controller back the way the rest of the mission
+            // expects to find it.  arc_start() raised these to what holding the
+            // circle needs, which is well above WPNAV_ACCEL.
+            pos_control->set_max_speed_accel_NE_m(wp_nav->get_default_speed_NE_ms(),
+                                                  wp_nav->get_wp_acceleration_mss());
+            pos_control->set_correction_speed_accel_NE_m(wp_nav->get_default_speed_NE_ms(),
+                                                         wp_nav->get_wp_acceleration_mss());
+        }
+        if (arc_handover_count < AUTO_ARC_HANDOVER_LOOPS) {
+            arc_handover_count++;
+            pos_control->update_NE_controller();
+            pos_control->update_U_controller();
+            attitude_control->input_thrust_vector_heading_rad(
+                pos_control->get_thrust_vector(),
+                auto_arc_nav.track_heading_rad(), 0.0f);
+            return;
+        }
+        // nothing took over - the turn was the last thing in the mission
+        loiter_start();
+        return;
+    }
+    arc_handover_count = 0;
+
+    pos_control->update_NE_controller();
+    pos_control->update_U_controller();
+
+#if HAL_LOGGING_ENABLED
+    Vector3f arc_vel_ne;
+    IGNORE_RETURN(AP::ahrs().get_velocity_NED(arc_vel_ne));
+    AP::logger().WriteStreaming("ARCN", "TimeUS,Prog,Gov,Spd,Tgt,PErr,HdgE,Spir,Alat,HdgR",
+                                "s-----d---", "F---------", "Qfffffffff",
+                                AP_HAL::micros64(),
+                                auto_arc_nav.progress(),
+                                auto_arc_nav.dt_scalar(),
+                                arc_vel_ne.xy().length(),
+                                auto_arc_nav.commanded_speed_ms(),
+                                pos_control->get_pos_error_NE_m(),
+                                degrees(wrap_PI(auto_arc_nav.track_heading_rad() - AP::ahrs().get_yaw_rad())),
+                                auto_arc_nav.spiral_length_m(),
+                                pos_control->get_accel_target_NEU_mss().xy().length(),
+                                degrees(auto_arc_nav.track_heading_rate_rads()));
+#endif
+
+    // Heading comes from the *desired* tangent, never from the measured
+    // velocity: a sprayer has to crab to hold a straight ground track in wind,
+    // and slaving the nose to where it is actually going would turn it into the
+    // wind and walk it off the swath line.
+    attitude_control->input_thrust_vector_heading_rad(
+        pos_control->get_thrust_vector(),
+        auto_arc_nav.track_heading_rad(),
+        auto_arc_nav.track_heading_rate_rads());
 }
 
 // circle_movetoedge_start - initialise waypoint controller to move to edge of a circle with it's center at the specified location
@@ -1621,6 +1805,33 @@ bool ModeAuto::set_next_wp(const AP_Mission::Mission_Command& current_cmd, const
     case MAV_CMD_NAV_LAND:
         // stop because we may change between rel,abs and terrain alt types
     case MAV_CMD_NAV_LOITER_TURNS:
+        if (next_cmd.get_loiter_turns() <= AUTO_ARC_MAX_TURNS) {
+            // A coordinated turn has to be entered at working speed, so the leg
+            // before it must not decelerate into its own endpoint.  Handing
+            // wp_nav a point further along the arc's entry tangent makes the
+            // waypoint a fast one and lines the SCurve up with the direction the
+            // arc starts in.  Stopping here instead would destroy the very thing
+            // the turn exists to preserve.
+            const Location dest_loc = loc_from_cmd(current_cmd, default_loc);
+            const Location centre_loc = loc_from_cmd(next_cmd, dest_loc);
+            Vector2f dest_ne_m, centre_ne_m;
+            if (dest_loc.get_vector_xy_from_origin_NE_cm(dest_ne_m) &&
+                centre_loc.get_vector_xy_from_origin_NE_cm(centre_ne_m)) {
+                Vector2f radial = (dest_ne_m - centre_ne_m) * 0.01f;
+                if (radial.length() > 0.1f) {
+                    radial.normalize();
+                    // tangent is the radius turned a quarter circle the way the
+                    // turn goes; ccw here is the MAVLink sense (param3 < 0)
+                    const float dir = next_cmd.content.location.loiter_ccw ? -1.0f : 1.0f;
+                    const Vector2f tangent{-radial.y * dir, radial.x * dir};
+                    Location next_dest_loc = dest_loc;
+                    next_dest_loc.offset(tangent.x * AUTO_ARC_LEAD_M, tangent.y * AUTO_ARC_LEAD_M);
+                    return wp_nav->set_wp_destination_next_loc(next_dest_loc);
+                }
+            }
+        }
+        // a station-keeping circle still stops at its edge
+        FALLTHROUGH;
     case MAV_CMD_NAV_RETURN_TO_LAUNCH:
     case MAV_CMD_NAV_VTOL_TAKEOFF:
     case MAV_CMD_NAV_TAKEOFF:
@@ -1717,6 +1928,18 @@ void ModeAuto::do_circle(const AP_Mission::Mission_Command& cmd)
 
     // true if circle should be ccw
     const bool circle_direction_ccw = cmd.content.location.loiter_ccw;
+
+    // A coordinated turn must not stop at the edge first, so it takes a
+    // different path entirely: the arc starts from wherever the vehicle is now,
+    // which the preceding leg has already put on the circle at working speed.
+    // Falling back to the circle behaviour on failure is deliberate - a turn
+    // that cannot be flown as commanded should still complete the mission item.
+    if (cmd.id == MAV_CMD_NAV_LOITER_TURNS &&
+        cmd.get_loiter_turns() <= AUTO_ARC_MAX_TURNS &&
+        arc_start(circle_center, circle_radius_m, cmd.get_loiter_turns(), circle_direction_ccw)) {
+        circle_last_num_complete = -1;
+        return;
+    }
 
     // move to edge of circle (verify_circle) will ensure we begin circling once we reach the edge
     circle_movetoedge_start(circle_center, circle_radius_m, circle_direction_ccw);
@@ -2256,6 +2479,11 @@ bool ModeAuto::verify_nav_wp(const AP_Mission::Mission_Command& cmd)
 // verify_circle - check if we have circled the point enough
 bool ModeAuto::verify_circle(const AP_Mission::Mission_Command& cmd)
 {
+    // a coordinated turn is done when its generator says the sweep is finished
+    if (_mode == SubMode::ARC) {
+        return !auto_arc_nav.active();
+    }
+
     // check if we've reached the edge
     if (_mode == SubMode::CIRCLE_MOVE_TO_EDGE) {
         if (copter.wp_nav->reached_wp_destination()) {

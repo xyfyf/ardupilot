@@ -235,15 +235,21 @@ def upload_mission(mon, items):
         typ = msg.get_type()
         if typ in ("MISSION_REQUEST", "MISSION_REQUEST_INT"):
             seq = msg.seq
-            command, lat, lon, alt = items[seq]
+            item = items[seq]
+            command, lat, lon, alt = item[:4]
+            if len(item) >= 8:
+                # 显式给 param1..4，用于 LOITER_TURNS 这类靠 param 表达语义的命令
+                p1, p2, p3, p4 = item[4:8]
+            else:
+                p1 = p2 = p3 = 0.0
+                # NAV_WAYPOINT 的 param4 是航向，NaN 表示沿用默认；但样条航点
+                # 不接受 NaN（AP 会回 MISSION_ACK=9 INVALID_PARAM4），必须给 0。
+                p4 = (0.0 if command == mavutil.mavlink.MAV_CMD_NAV_SPLINE_WAYPOINT
+                      else float("nan"))
             mon.mav.mav.mission_item_int_send(
                 mav.target_system, mav.target_component, seq,
                 mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
-                command, 0, 1, 0, 0, 0,
-                # NAV_WAYPOINT 的 param4 是航向，NaN 表示沿用默认；但样条航点
-                # 不接受 NaN（AP 会回 MISSION_ACK=9 INVALID_PARAM4），必须给 0。
-                (0.0 if command == mavutil.mavlink.MAV_CMD_NAV_SPLINE_WAYPOINT
-                 else float("nan")),
+                command, 0, 1, p1, p2, p3, p4,
                 int(round(lat * 1e7)), int(round(lon * 1e7)), alt,
                 mavutil.mavlink.MAV_MISSION_TYPE_MISSION)
             sent.add(seq)
@@ -1222,6 +1228,194 @@ def run_uturn_arcnav(mon, swath=SWATH_M, speed=2.0, leg=SPRAY_LEG_M):
     return res
 
 
+def run_uturn_auto(mon, swath=SWATH_M, speed=None, leg=None, turns=0.5):
+    """AUTO 任务里的协调转弯：LOITER_TURNS 带 param2=1。
+
+    验证两件事，都是 GUIDED 版本测不到的：
+      1) 掉头前的作业直线**不减速**——set_next_wp 必须走切线延长点分支。
+         若走回「always stop」，飞机会在弧起点停住，入弧速度为零，
+         匀速掉头就无从谈起，这正是接入 AUTO 的核心难点。
+      2) 掉头段本身匀速、机头贴期望切线（看 ARCN 日志）。
+
+    掉头速度不由任务给出，就是 WPNAV_SPEED——作业掉头与作业直线同速是需求
+    本身，mission item 里也确实没有地方存第二个速度。
+    """
+    alt = ROUTE_ALT_M
+    R = swath / 2.0
+    leg = SPRAY_LEG_M if leg is None else leg
+    lat0, lon0 = HOME[0], HOME[1]
+
+    def ll(n, e):
+        return ne_to_latlon(lat0, lon0, n, e)
+
+    WP = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
+    TO = mavutil.mavlink.MAV_CMD_NAV_TAKEOFF
+    LT = mavutil.mavlink.MAV_CMD_NAV_LOITER_TURNS
+    LAND = mavutil.mavlink.MAV_CMD_NAV_LAND
+
+    a = ll(0.0, 0.0)            # 作业线起点
+    b = ll(leg, 0.0)            # 作业线终点 = 弧起点
+    c = ll(leg, R)              # 掉头圆心，在弧起点正东半个行距
+    d = ll(0.0, 2.0 * R)        # 下一条作业线终点
+
+    # param3 取正 = 顺时针（MAVLink 约定）。起点在圆心正西，顺时针半圈
+    # 后出口在圆心正东，出口切线朝正南，正好接下一条作业线。
+    items = [
+        (WP, lat0, lon0, 0.0),
+        (TO, lat0, lon0, alt),
+        (WP, a[0], a[1], alt),
+        (WP, b[0], b[1], alt),
+        (LT, c[0], c[1], alt, turns, 1.0, R, 0.0),
+        (WP, d[0], d[1], alt),
+        # LAND 给 0/0 表示原地下降。给经纬度会走 do_land 的 FlyToLocation 分支，
+        # 实测在本场景下不收敛（与协调转弯无关：turns=1.0 走原有盘旋路径同样卡住）。
+        (LAND, 0.0, 0.0, 0.0),
+    ]
+    upload_mission(mon, items)
+    set_mode_wait(mon, "AUTO")
+    prepare_for_arm(mon)
+    mon.mav.arducopter_arm()
+    wait_armed(mon)
+
+    samples = []
+    start = mon.sim_ms
+    while mon.sim_ms - start < 300000:
+        mon.recv()
+        if mon.local is None:
+            continue
+        samples.append((mon.sim_ms, mon.mission_seq,
+                        math.hypot(mon.local.vx, mon.local.vy)))
+        if not mon.armed and mon.sim_ms - start > 30000:
+            break
+    wait_disarmed(mon, 60)
+
+    # 关键量：进弧前那一段（mission_seq 指向弧起点航点）的**最低速度**。
+    # 若 set_next_wp 让飞机停在航点上，这个数会掉到接近零。
+    ARC_SEQ = 4
+    pre = [s[2] for s in samples if s[1] == ARC_SEQ - 1]
+    arc = [s[2] for s in samples if s[1] == ARC_SEQ]
+    res = {"swath_m": swath, "uturn_radius_m": R, "arc_seq": ARC_SEQ,
+           "reached_arc": bool(arc)}
+    if pre:
+        # 只看这一段的后半，前半还在从上一个航点加速
+        tail = pre[len(pre) // 2:]
+        res["pre_arc_speed_min_m_s"] = min(tail)
+        res["pre_arc_speed_mean_m_s"] = sum(tail) / len(tail)
+    if arc:
+        res["arc_speed_min_m_s"] = min(arc)
+        res["arc_speed_mean_m_s"] = sum(arc) / len(arc)
+    print("  进弧前尾段最低速 %.2f m/s（若接近 0 说明航点处停了），弧内最低速 %.2f m/s"
+          % (res.get("pre_arc_speed_min_m_s", -1), res.get("arc_speed_min_m_s", -1)))
+    return res
+
+
+def run_yaw_step(mon, alt=None):
+    """偏航阶跃辨识：测这架飞机**实际可用**的偏航速率，而不是参数限幅值。
+
+    这是数据需求清单 6.2 节现场科目的仿真版。之所以必须实测：ATC_SLEW_YAW
+    是目标限幅，不是能力——把它设成 120 deg/s 不会让机体真的转得动 120。
+    P06 的「机头贴期望切线」要求偏航速率 v/R，能不能相邻行掉头完全取决于
+    这里量出来的可达值，所以这个数是 P06 的前置输入。
+
+    做法与现场科目一致：定点悬停下给满量程偏航速率指令，等速率稳定后回中，
+    左右各做一次；再做一组约 1/3 量程的小阶跃，用于判断线性度。
+    """
+    alt = ROUTE_ALT_M if alt is None else alt
+    command_takeoff(mon, alt)
+    set_mode_wait(mon, "GUIDED", 15)
+
+    # 位置忽略、速度置零、加速度忽略、yaw 角忽略、只用 yaw_rate
+    MASK = (0b111            # x y z 位置忽略
+            | (0b111 << 6)   # 加速度忽略
+            | (1 << 10))     # yaw 角忽略，保留 yaw_rate
+
+    def hold(yaw_rate_rads, ms):
+        t0 = mon.sim_ms
+        while mon.sim_ms - t0 < ms:
+            mon.mav.mav.set_position_target_local_ned_send(
+                int(mon.sim_ms), mon.mav.target_system, mon.mav.target_component,
+                mavutil.mavlink.MAV_FRAME_LOCAL_NED, MASK,
+                0.0, 0.0, -alt, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, yaw_rate_rads)
+            mon.recv()
+
+    # 指令给到远超能力的值，让机体自己饱和在它的真实上限上
+    FULL = 3.0      # rad/s，约 172 deg/s，肯定超出六旋翼能力
+    THIRD = 1.0     # rad/s，约 57 deg/s，用于判断线性度
+    marks = []
+    def mark(tag):
+        marks.append((mon.sim_ms, tag))
+
+    hold(0.0, 5000)                     # 先稳住
+    mark("full_pos"); hold(+FULL, 4000)
+    mark("settle");   hold(0.0, 4000)
+    mark("full_neg"); hold(-FULL, 4000)
+    mark("settle");   hold(0.0, 3000)
+    mark("third_pos"); hold(+THIRD, 4000)
+    mark("settle");    hold(0.0, 3000)
+
+    set_mode_wait(mon, "LAND")
+    wait_disarmed(mon, 120)
+    return {"yaw_step_marks": marks, "full_cmd_rads": FULL, "third_cmd_rads": THIRD}
+
+
+def summarise_yaw_step(path):
+    """从日志读出可达偏航速率与一阶时间常数。
+
+    时间常数取阶跃后速率爬到稳态 63.2% 所用的时间——只要响应近似一阶，
+    这个数就是 AC_ArcNav 航向前视时间 τ 应该取的值。
+    """
+    if not path or not os.path.exists(path):
+        return {}
+    from pymavlink import DFReader
+    m = DFReader.DFReader_binary(path)
+    rate, pidy = [], []
+    while True:
+        msg = m.recv_match(type=["RATE", "PIDY"])
+        if msg is None:
+            break
+        if msg.get_type() == "RATE":
+            rate.append((msg.TimeUS / 1e6, msg.YDes, msg.Y, msg.YOut))
+        else:
+            pidy.append((msg.TimeUS / 1e6, msg.Tar, msg.Act, msg.P, msg.I, msg.D))
+    if not rate:
+        return {}
+
+    ys = [r[2] for r in rate]
+    out = {"yaw_rate_max_pos_degs": max(ys), "yaw_rate_max_neg_degs": min(ys),
+           "yaw_out_peak": max(abs(r[3]) for r in rate)}
+    if pidy:
+        out["pidy_tar_peak_rads"] = max(abs(p[1]) for p in pidy)
+        out["pidy_act_peak_rads"] = max(abs(p[2]) for p in pidy)
+        # 目标远大于实际，说明是机体/增益权限不足而非限幅
+        out["tar_over_act"] = (out["pidy_tar_peak_rads"] /
+                               max(out["pidy_act_peak_rads"], 1e-6))
+
+    # 用正向满阶跃段拟一阶时间常数：找速率从接近 0 单调爬升的最长一段
+    best = None
+    i = 0
+    while i < len(rate):
+        if rate[i][2] > 5.0:            # deg/s，离开噪声带
+            j = i
+            while j + 1 < len(rate) and rate[j + 1][2] >= rate[j][2] - 3.0:
+                j += 1
+            if best is None or (j - i) > (best[1] - best[0]):
+                best = (i, j)
+            i = j + 1
+        else:
+            i += 1
+    if best:
+        seg = rate[best[0]:best[1] + 1]
+        steady = max(r[2] for r in seg)
+        target = steady * 0.632
+        for t, _, y, _ in seg:
+            if y >= target:
+                out["yaw_tau_s"] = t - seg[0][0]
+                break
+        out["yaw_steady_degs"] = steady
+    return out
+
+
 def summarise_log(path):
     """从日志算 P02 的验收量。
 
@@ -1274,7 +1468,7 @@ def latest_log(out):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle", "fence", "route", "uturn", "uturn-guided", "uturn-arcnav"))
+    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle", "fence", "route", "uturn", "uturn-guided", "uturn-arcnav", "uturn-auto", "yaw-step"))
     parser.add_argument("--baseline", action="store_true",
                         help="关闭新增物理项，跑默认物理模型对照")
     parser.add_argument("--speedup", type=float, default=2.0)
@@ -1285,6 +1479,8 @@ def main(argv=None):
     parser.add_argument("--variant", help="结果里记录的变体名，例如 baseline-algo / candidate-algo")
     parser.add_argument("--turn-offset", type=float, default=ROUTE_TURN_OFFSET_M,
                         help="route 场景的掉头连接段长度（米），用于分辨掉速是几何还是限幅所致")
+    parser.add_argument("--turns", type=float, default=0.5,
+                        help="LOITER_TURNS 圈数；<=0.5 走匀速协调转弯，>0.5 走原有盘旋")
     parser.add_argument("--swath", type=float, default=SWATH_M,
                         help="uturn 场景的作业行距（米），U 转半径 = 行距/2")
     parser.add_argument("--speed", type=float, default=2.0,
@@ -1324,6 +1520,10 @@ def main(argv=None):
             result.update(run_loiter_circle(mon))
         elif args.case == "fence":
             result.update(run_fence(mon))
+        elif args.case == "uturn-auto":
+            result.update(run_uturn_auto(mon, args.swath, turns=args.turns))
+        elif args.case == "yaw-step":
+            result.update(run_yaw_step(mon))
         elif args.case == "uturn-arcnav":
             result.update(run_uturn_arcnav(mon, args.swath, args.speed))
         elif args.case == "uturn-guided":
@@ -1345,6 +1545,8 @@ def main(argv=None):
 
     result["dataflash_log"] = latest_log(out)
     result["metrics"] = summarise_log(result["dataflash_log"])
+    if args.case == "yaw-step":
+        result["metrics"].update(summarise_yaw_step(result["dataflash_log"]))
     result["statustext"] = mon.messages
     result_path = os.path.join(out, "result.json")
     with open(result_path, "w", encoding="utf-8") as f:

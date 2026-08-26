@@ -374,16 +374,231 @@ def reverse_video(coupled_result, baseline_result, outdir):
     return mp4, gif, storyboard
 
 
+def read_arc_log(path):
+    """读协调转弯需要的三条序列：位置、姿态、以及 ARCN 自己的轨迹量。"""
+    series = {k: [] for k in ("pos", "att", "arc")}
+    log = DFReader.DFReader_binary(path)
+    while True:
+        msg = log.recv_match(type=["XKF1", "ATT", "ARCN"])
+        if msg is None:
+            break
+        typ = msg.get_type()
+        t = msg.TimeUS * 1.0e-6
+        if typ == "XKF1" and getattr(msg, "C", 0) == 0:
+            series["pos"].append((t, msg.PN, msg.PE, msg.VN, msg.VE))
+        elif typ == "ATT":
+            series["att"].append((t, msg.Yaw))
+        elif typ == "ARCN":
+            series["arc"].append((t, msg.Prog, msg.Gov, msg.Spd, msg.Tgt,
+                                  msg.PErr, msg.HdgE, msg.Spir, msg.Alat, msg.HdgR))
+    return {k: np.asarray(v, dtype=float) for k, v in series.items()}
+
+
+def _bar(frame, rect, frac, color, bg=PANEL):
+    x, y, w, h = rect
+    cv2.rectangle(frame, (x, y), (x + w, y + h), bg, -1)
+    fill = int(w * max(0.0, min(1.0, frac)))
+    if fill > 0:
+        cv2.rectangle(frame, (x, y), (x + fill, y + h), color, -1)
+    cv2.rectangle(frame, (x, y), (x + w, y + h), GRID, 1)
+
+
+def uturn_video(result_path, outdir, seconds_pad=2.0):
+    """协调转弯的俯视动画。
+
+    这一段最该被看见的不是轨迹本身，而是**机头与期望切线的夹角**：轨迹画得再
+    圆，机头没跟上，喷幅方向就不对。所以画面上同时给出两个方向箭头——实际机头
+    与期望切线——它们的夹角就是 ARCN.HdgE，肉眼可判。
+    """
+    result = load_result(result_path)
+    data = read_arc_log(result["dataflash_log"])
+    arc = data["arc"]
+    if len(arc) == 0:
+        raise RuntimeError("日志里没有 ARCN，这一架次没有跑协调转弯")
+    pos = data["pos"]
+    att = data["att"]
+
+    t0 = arc[0, 0] - seconds_pad
+    t1 = arc[-1, 0] + seconds_pad
+    seg = pos[(pos[:, 0] >= t0) & (pos[:, 0] <= t1)]
+    if len(seg) < 2:
+        raise RuntimeError("位置数据不足")
+
+    # 视图范围按这段轨迹自适应，留一成边距
+    n_lo, n_hi = seg[:, 1].min(), seg[:, 1].max()
+    e_lo, e_hi = seg[:, 2].min(), seg[:, 2].max()
+    span = max(n_hi - n_lo, e_hi - e_lo, 1.0) * 1.20
+    n_mid, e_mid = (n_lo + n_hi) / 2, (e_lo + e_hi) / 2
+
+    MAP_W = 760
+    px_per_m = (MAP_W - 80) / span
+
+    def to_px(north, east):
+        # 屏幕 x 向右为东，y 向下为南，与俯视图一致
+        x = MAP_W / 2 + (east - e_mid) * px_per_m
+        y = H / 2 - (north - n_mid) * px_per_m
+        return int(x), int(y)
+
+    target_speed = float(arc[0, 4])
+    hdg_scale = max(20.0, float(np.abs(arc[:, 6]).max()))
+
+    path = os.path.join(outdir, "uturn_coordinated.mp4")
+    out = writer(path)
+    trail = []
+    for i in range(int((t1 - t0) * FPS)):
+        t = t0 + i / FPS
+        frame = np.full((H, W, 3), BG, np.uint8)
+
+        north = interp(pos, t, 1)
+        east = interp(pos, t, 2)
+        yaw_deg = interp(att, t, 1)
+        in_arc = arc[0, 0] <= t <= arc[-1, 0]
+        prog = interp(arc, t, 1) if in_arc else (0.0 if t < arc[0, 0] else 1.0)
+        spd = interp(arc, t, 3) if in_arc else math.hypot(interp(pos, t, 3), interp(pos, t, 4))
+        hdg_err = interp(arc, t, 6) if in_arc else 0.0
+        hdg_rate = interp(arc, t, 9) if in_arc else 0.0
+        gov = interp(arc, t, 2) if in_arc else 1.0
+        perr = interp(arc, t, 5) if in_arc else 0.0
+
+        # --- 地图面板 ---
+        cv2.rectangle(frame, (0, 0), (MAP_W, H), PANEL, -1)
+        for g in range(-40, 41, 5):
+            gx, _ = to_px(0, e_mid + g)
+            _, gy = to_px(n_mid + g, 0)
+            if 0 < gx < MAP_W:
+                cv2.line(frame, (gx, 0), (gx, H), GRID, 1)
+            if 0 < gy < H:
+                cv2.line(frame, (0, gy), (MAP_W, gy), GRID, 1)
+
+        trail.append(to_px(north, east))
+        if len(trail) > 1:
+            cv2.polylines(frame, [np.array(trail, np.int32)], False, GREEN, 3, cv2.LINE_AA)
+
+        cx, cy = to_px(north, east)
+        draw_hexa_top(frame, (cx, cy), yaw_deg, scale=26, color=CYAN)
+
+        # 实际机头方向与期望切线方向；两者夹角就是 HdgE
+        L = 92
+        yaw = math.radians(yaw_deg)
+        arrow(frame, (cx, cy), (cx + L * math.sin(yaw), cy - L * math.cos(yaw)), CYAN, 4)
+        tangent = math.radians(yaw_deg + hdg_err)
+        arrow(frame, (cx, cy),
+              (cx + L * math.sin(tangent), cy - L * math.cos(tangent)), ORANGE, 4)
+
+        # --- 右侧仪表 ---
+        px = MAP_W + 30
+        entries = [
+            ("协调转弯 · 俯视", (24, 20), 30, WHITE, True),
+            ("绿=实际航迹  青=机头  橙=期望切线", (24, 60), 20, MUTED, False),
+            ("t = %+.2f s" % (t - arc[0, 0]), (px, 24), 24, MUTED, False),
+        ]
+        y = 76
+        entries.append(("速度  %.2f / %.2f m/s" % (spd, target_speed), (px, y), 26, WHITE, True))
+        _bar(frame, (px, y + 36, 400, 22), spd / max(target_speed, 0.1),
+             GREEN if abs(spd - target_speed) < 0.15 * target_speed else YELLOW)
+        y += 84
+
+        entries.append(("航向误差  %+.1f°" % hdg_err, (px, y), 26, WHITE, True))
+        entries.append(("机头与期望切线的夹角", (px, y + 30), 18, MUTED, False))
+        _bar(frame, (px, y + 56, 400, 22), abs(hdg_err) / hdg_scale,
+             GREEN if abs(hdg_err) < 5 else (YELLOW if abs(hdg_err) < 12 else RED))
+        y += 104
+
+        entries.append(("指令偏航速率  %+.1f °/s" % hdg_rate, (px, y), 26, WHITE, True))
+        _bar(frame, (px, y + 36, 400, 22), abs(hdg_rate) / 90.0, ORANGE)
+        y += 84
+
+        entries.append(("参考推进  %.2f" % gov, (px, y), 26, WHITE, True))
+        entries.append(("1=跟得上，0.05=参考已停住等飞机", (px, y + 30), 18, MUTED, False))
+        _bar(frame, (px, y + 56, 400, 22), gov, GREEN if gov > 0.9 else RED)
+        y += 104
+
+        entries.append(("位置误差  %.2f m" % abs(perr), (px, y), 26, WHITE, True))
+        y += 44
+        entries.append(("掉头进度  %.0f%%" % (prog * 100), (px, y), 26, WHITE, True))
+        _bar(frame, (px, y + 36, 400, 22), prog, CYAN)
+
+        frame = add_text(frame, entries)
+        out.write(frame)
+    out.release()
+    return [path]
+
+
+def uturn_chart(result_path, outdir):
+    """一张静态总览图：轨迹 + 速度 + 航向误差 + 指令偏航速率。"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib import font_manager
+
+    for cand in ("Noto Sans CJK SC", "Noto Sans CJK JP", "WenQuanYi Zen Hei"):
+        if any(f.name == cand for f in font_manager.fontManager.ttflist):
+            plt.rcParams["font.family"] = cand
+            break
+    plt.rcParams["axes.unicode_minus"] = False
+
+    result = load_result(result_path)
+    data = read_arc_log(result["dataflash_log"])
+    arc, pos = data["arc"], data["pos"]
+    if len(arc) == 0:
+        raise RuntimeError("日志里没有 ARCN")
+    t0, t1 = arc[0, 0], arc[-1, 0]
+    seg = pos[(pos[:, 0] >= t0 - 2) & (pos[:, 0] <= t1 + 2)]
+    rel = arc[:, 0] - t0
+
+    fig, ax = plt.subplots(2, 2, figsize=(13, 8.5))
+    fig.suptitle("协调转弯 SITL 结果 — %s" % result.get("variant", ""), fontsize=15)
+
+    a = ax[0][0]
+    a.plot(seg[:, 2], seg[:, 1], color="#2e8b57", lw=2, label="实际航迹")
+    a.set_aspect("equal"); a.grid(alpha=.3)
+    a.set_xlabel("东 (m)"); a.set_ylabel("北 (m)"); a.set_title("俯视航迹")
+    a.legend(fontsize=9)
+
+    a = ax[0][1]
+    a.plot(rel, arc[:, 3], color="#2e8b57", lw=1.8, label="实际速度")
+    a.axhline(arc[0, 4], color="#d95f02", ls="--", lw=1.5, label="目标速度")
+    a.set_ylim(0, max(arc[0, 4] * 1.4, arc[:, 3].max() * 1.1))
+    a.grid(alpha=.3); a.set_xlabel("弧内时间 (s)"); a.set_ylabel("m/s")
+    a.set_title("速度保持（掉速 %.1f%%）"
+                % (100 * (1 - arc[:, 3].min() / max(arc[0, 4], 1e-6))))
+    a.legend(fontsize=9)
+
+    a = ax[1][0]
+    a.plot(rel, arc[:, 6], color="#7570b3", lw=1.8)
+    a.axhline(0, color="k", lw=.8)
+    a.grid(alpha=.3); a.set_xlabel("弧内时间 (s)"); a.set_ylabel("度")
+    a.set_title("机头相对期望切线的误差（均值 %.2f°，峰值 %.2f°）"
+                % (np.abs(arc[:, 6]).mean(), np.abs(arc[:, 6]).max()))
+
+    a = ax[1][1]
+    a.plot(rel, arc[:, 9], color="#d95f02", lw=1.8, label="指令偏航速率")
+    a.plot(rel, arc[:, 8] * 10, color="#1b9e77", lw=1.2, ls=":", label="指令横向加速度 ×10")
+    a.grid(alpha=.3); a.set_xlabel("弧内时间 (s)")
+    a.set_title("偏航速率与横向加速度剖面（螺线 %.2f m）" % arc[0, 7])
+    a.legend(fontsize=9)
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    path = os.path.join(outdir, "uturn_overview.png")
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+    return [path]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("case", choices=("landing", "reverse"))
+    parser.add_argument("case", choices=("landing", "reverse", "uturn"))
     parser.add_argument("coupled_result")
-    parser.add_argument("baseline_result")
+    parser.add_argument("baseline_result", nargs="?",
+                        help="uturn 不需要基线架次")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     os.makedirs(args.output, exist_ok=True)
     if args.case == "landing":
         paths = landing_video(args.coupled_result, args.baseline_result, args.output)
+    elif args.case == "uturn":
+        paths = uturn_video(args.coupled_result, args.output)
+        paths += uturn_chart(args.coupled_result, args.output)
     else:
         paths = reverse_video(args.coupled_result, args.baseline_result, args.output)
     for path in paths:

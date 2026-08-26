@@ -544,6 +544,7 @@ public:
         RTL,
         CIRCLE_MOVE_TO_EDGE,
         CIRCLE,
+        ARC,
         NAVGUIDED,
         LOITER,
         LOITER_TO_ALT,
@@ -569,6 +570,11 @@ public:
     void land_start();
     void circle_movetoedge_start(const Location &circle_center, float radius_m, bool ccw_turn);
     void circle_start();
+
+    // Constant-speed coordinated turn, used for the U-turn between spray runs.
+    // Unlike circle_start() this never stops at the edge first: the whole point
+    // is to enter at working speed and hold it round the turn.
+    bool arc_start(const Location& centre_loc, float radius_m, float turns, bool ccw);
     void nav_guided_start();
 
     bool is_landing() const override;
@@ -650,6 +656,7 @@ private:
     void land_run();
     void rtl_run();
     void circle_run();
+    void arc_run();
     void nav_guided_run();
     void loiter_run();
     void loiter_to_alt_run();
@@ -787,6 +794,11 @@ private:
     } desired_speed_override_ms;
 
     float circle_last_num_complete;
+
+    // Loops spent holding after a coordinated turn finishes, waiting for the
+    // mission to take over.  Only a fallback: normally verify_circle() sees the
+    // turn is done on the very next loop and advances.
+    uint8_t arc_handover_count;
 };
 
 #if AUTOTUNE_ENABLED

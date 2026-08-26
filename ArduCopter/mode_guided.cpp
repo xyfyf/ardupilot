@@ -251,26 +251,46 @@ bool ModeGuided::set_arc_destination(const Location& centre, float radius_m,
         return false;
     }
 
-    if (!guided_arc_nav.set_arc(*pos_control, centre_ne_m, fabsf(radius_m), pos_ne_m, sweep_rad,
-                           speed_ms, pos_control->get_pos_desired_U_m())) {
+    // A multirotor's yaw is normally a free flat output, planned independently
+    // of position.  Pinning the nose to the tangent gives that freedom up: yaw
+    // becomes a function of the path, turning at v*curvature and accelerating
+    // at v^2*d(curvature)/ds.  Both then have to fit inside the weakest axis on
+    // the airframe, so hand the generator the yaw budget and let it treat those
+    // as hard constraints - sizing its transitions to the acceleration limit
+    // and refusing a turn that overruns the rate limit.
+    const float yaw_rate_max = attitude_control->get_slew_yaw_max_rads();
+    guided_arc_nav.set_yaw_limits(yaw_rate_max, attitude_control->get_accel_yaw_max_radss());
+
+    // Work the rate demand out here as well, so a refusal can say which limit
+    // it hit instead of just failing.
+    const float yaw_rate_needed = speed_ms / fabsf(radius_m);
+    if (is_positive(yaw_rate_max) &&
+        yaw_rate_needed > yaw_rate_max * AC_ARCNAV_YAW_RATE_FRACTION) {
+        gcs().send_text(MAV_SEVERITY_WARNING,
+                        "ArcNav: needs %.0f deg/s yaw, budget %.0f of %.0f",
+                        (double)degrees(yaw_rate_needed),
+                        (double)degrees(yaw_rate_max * AC_ARCNAV_YAW_RATE_FRACTION),
+                        (double)degrees(yaw_rate_max));
         return false;
     }
 
-    // Holding the nose on the track means yawing at the rate the tangent turns,
-    // omega = v * curvature.  The transition spirals ramp that up from zero
-    // rather than stepping to it, but the peak is still v / r, and on a tight,
-    // slow turn the peak binds before the lean angle does: 2 m/s on a 2 m
-    // radius needs 57 deg/s while ATC_RATE_Y_MAX often sits at 50.  Refuse
-    // rather than fly the turn with the nose off the track.
-    const float yaw_rate_needed = guided_arc_nav.peak_heading_rate_rads();
-    const float yaw_rate_max = attitude_control->get_slew_yaw_max_rads();
-    if (is_positive(yaw_rate_max) && yaw_rate_needed > yaw_rate_max * 0.8f) {
+    if (!guided_arc_nav.set_arc(*pos_control, centre_ne_m, fabsf(radius_m), pos_ne_m, sweep_rad,
+                           speed_ms, pos_control->get_pos_desired_U_m())) {
         gcs().send_text(MAV_SEVERITY_WARNING,
-                        "ArcNav: needs %.0f deg/s yaw, limit %.0f",
-                        (double)degrees(yaw_rate_needed), (double)degrees(yaw_rate_max));
-        guided_arc_nav.stop();
+                        "ArcNav: %.0f m at %.1f m/s needs %.0f deg lean",
+                        (double)fabsf(radius_m), (double)speed_ms,
+                        (double)degrees(atanf(sq(speed_ms) / (fabsf(radius_m) * GRAVITY_MSS))));
         return false;
     }
+
+    // Keep this inside the 50-character statustext limit; it silently truncates
+    // and a clipped number reads as a real one.
+    gcs().send_text(MAV_SEVERITY_INFO,
+                    "ArcNav r%.1f v%.1f sp%.2f y%.0f a%.0f",
+                    (double)fabsf(radius_m), (double)speed_ms,
+                    (double)guided_arc_nav.spiral_length_m(),
+                    (double)degrees(yaw_rate_needed),
+                    (double)degrees(guided_arc_nav.required_yaw_accel_radss()));
 
     // The position controller carries its own NE speed and acceleration limits,
     // taken from WPNAV_*.  They are unrelated to the lean angle budget checked
@@ -301,7 +321,14 @@ void ModeGuided::arc_run()
     motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
 
     if (!guided_arc_nav.update(*pos_control, pos_control->get_dt_s())) {
-        // finished, or never started: settle into a position hold at the exit
+        // Finished, or never started.  Restore the speed and acceleration limits
+        // that set_arc_destination() raised for the turn before settling into a
+        // position hold, otherwise everything that follows inherits a position
+        // controller tuned for holding a circle.
+        pos_control->set_max_speed_accel_NE_m(wp_nav->get_default_speed_NE_ms(),
+                                              wp_nav->get_wp_acceleration_mss());
+        pos_control->set_correction_speed_accel_NE_m(wp_nav->get_default_speed_NE_ms(),
+                                                     wp_nav->get_wp_acceleration_mss());
         pos_control_start();
         return;
     }
