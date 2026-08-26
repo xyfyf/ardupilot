@@ -1488,6 +1488,150 @@ def summarise_mag_align(path, declination_deg=None):
                                   else "随航向变化，属磁干扰，补偿角修不掉")}
 
 
+def estimate_mag_yaw_offset_gps(path, declination_deg=None):
+    """用 GPS 地速矢量估计磁罗盘的固定偏航安装偏差，并顺带解出风。
+
+    比 GSF 法更准，因为它只依赖 GPS 速度（精度高），不继承 GSF 自身的偏差。
+
+    模型：设磁罗盘装歪了 Δ，则真航向 = 磁航向 − Δ。无侧滑时空速矢量沿真航向，
+    地速 = 空速矢量 + 风：
+
+        vn = Va·cos(ψ−Δ) + Wn
+        ve = Va·sin(ψ−Δ) + We
+
+    展开并令 a = Va·cosΔ、b = Va·sinΔ，方程对 (a, b, Wn, We) **完全线性**：
+
+        vn = a·cosψ + b·sinψ + Wn
+        ve = a·sinψ − b·cosψ + We
+
+    于是一次最小二乘就能同时解出偏差与风，无需迭代、无需初值：
+    Δ = atan2(b, a)，Va = hypot(a, b)。
+
+    要求航段覆盖至少两个差别足够大的航向（四个更好），且采样期间风基本恒定
+    ——这正是正方形航线的用意。
+
+    **对多旋翼不成立，仅作交叉参考。** 模型的前提是速度矢量沿机头方向（无
+    侧滑），固定翼满足，多旋翼不满足：位置控制器会让机器沿航线飞，机头指哪
+    与速度方向无关，缺的那一块靠侧飞补上——这正是 P06 里刻意利用的 crab
+    特性。实测注入 0/8/16 度时本方法给出 -0.87 / 4.12 / 8.86 度，斜率只有
+    0.55；同一批日志用 GSF 法斜率为 1.09。风与残差都拟合得很好（风解出接近
+    零、残差 0.25 m/s），说明不是数值问题，而是前提不适用。
+
+    留着它有两个用处：一是顺带解出风矢量与空速，二是它与 GSF 法的偏离量本身
+    反映了航段上的平均侧滑角。
+    """
+    if not path or not os.path.exists(path):
+        return {}
+    from pymavlink import DFReader
+    import math as _m
+    import bisect
+
+    m = DFReader.DFReader_binary(path)
+    att, mag, vel = [], [], []
+    dec_from_log = None
+    while True:
+        msg = m.recv_match(type=["ATT", "MAG", "XKF1", "PARM"])
+        if msg is None:
+            break
+        typ = msg.get_type()
+        if typ == "PARM":
+            if msg.Name == "COMPASS_DEC":
+                dec_from_log = _m.degrees(msg.Value)
+            continue
+        t = msg.TimeUS * 1e-6
+        if typ == "ATT":
+            att.append((t, msg.Roll, msg.Pitch, msg.Yaw))
+        elif typ == "MAG" and getattr(msg, "I", 0) == 0:
+            mag.append((t, msg.MagX, msg.MagY, msg.MagZ))
+        elif typ == "XKF1" and getattr(msg, "C", 0) == 0:
+            vel.append((t, msg.VN, msg.VE))
+    if not att or not mag or not vel:
+        return {"mag_gps_note": "缺 ATT / MAG / XKF1"}
+
+    if declination_deg is None:
+        declination_deg = dec_from_log if dec_from_log is not None else 0.0
+
+    att_t = [a[0] for a in att]
+    vel_t = [v[0] for v in vel]
+
+    yaw_rate = [0.0]
+    for i in range(1, len(att)):
+        dt = att[i][0] - att[i - 1][0]
+        d = att[i][3] - att[i - 1][3]
+        while d > 180: d -= 360
+        while d < -180: d += 360
+        yaw_rate.append(d / dt if dt > 0 else 0.0)
+
+    rows = []
+    for t, mx, my, mz in mag:
+        i = min(bisect.bisect_left(att_t, t), len(att) - 1)
+        if abs(yaw_rate[i]) > 5.0:
+            continue                      # 转弯段：航向在动，配对不可靠
+        j = min(bisect.bisect_left(vel_t, t), len(vel) - 1)
+        vn, ve = vel[j][1], vel[j][2]
+        if _m.hypot(vn, ve) < 2.0:
+            continue                      # 速度太低时航迹方向噪声大
+        roll = _m.radians(att[i][1]); pitch = _m.radians(att[i][2])
+        cr, sr = _m.cos(roll), _m.sin(roll)
+        cp, sp = _m.cos(pitch), _m.sin(pitch)
+        hx = mx * cp + my * sr * sp + mz * cr * sp
+        hy = my * cr - mz * sr
+        psi = _m.radians(_m.degrees(_m.atan2(-hy, hx)) + declination_deg)
+        rows.append((psi, vn, ve))
+
+    if len(rows) < 100:
+        return {"mag_gps_note": "稳定直线段样本不足（%d）" % len(rows)}
+
+    # 覆盖的航向必须够散，否则 a、b 与风无法分离
+    hs = sorted(_m.degrees(r[0]) % 360.0 for r in rows)
+    gaps = [hs[k + 1] - hs[k] for k in range(len(hs) - 1)] + [hs[0] + 360 - hs[-1]]
+    if max(gaps) > 200.0:
+        return {"mag_gps_note": "航向覆盖不足，最大空隙 %.0f°" % max(gaps)}
+
+    # 正规方程：未知 x = [a, b, Wn, We]
+    ATA = [[0.0] * 4 for _ in range(4)]
+    ATb = [0.0] * 4
+    for psi, vn, ve in rows:
+        c, s = _m.cos(psi), _m.sin(psi)
+        for row, obs in (([c, s, 1.0, 0.0], vn), ([s, -c, 0.0, 1.0], ve)):
+            for p in range(4):
+                ATb[p] += row[p] * obs
+                for q in range(4):
+                    ATA[p][q] += row[p] * row[q]
+
+    # 高斯消元（4x4，直接写开比引入依赖更省事）
+    M = [ATA[i][:] + [ATb[i]] for i in range(4)]
+    for col in range(4):
+        piv = max(range(col, 4), key=lambda r: abs(M[r][col]))
+        if abs(M[piv][col]) < 1e-9:
+            return {"mag_gps_note": "法方程奇异，航向覆盖或速度变化不足"}
+        M[col], M[piv] = M[piv], M[col]
+        pv = M[col][col]
+        for k in range(col, 5):
+            M[col][k] /= pv
+        for r in range(4):
+            if r == col:
+                continue
+            f = M[r][col]
+            for k in range(col, 5):
+                M[r][k] -= f * M[col][k]
+    a, b, wn, we = (M[i][4] for i in range(4))
+
+    delta = _m.degrees(_m.atan2(b, a))
+    va = _m.hypot(a, b)
+    resid = 0.0
+    for psi, vn, ve in rows:
+        c, s = _m.cos(psi), _m.sin(psi)
+        resid += (a * c + b * s + wn - vn) ** 2 + (a * s - b * c + we - ve) ** 2
+    rms = _m.sqrt(resid / (2 * len(rows)))
+
+    return {"mag_gps_yaw_offset_deg_UNRELIABLE_FOR_MULTIROTOR": round(delta, 2),
+            "mag_gps_airspeed_ms": round(va, 2),
+            "mag_gps_wind_ms": [round(wn, 2), round(we, 2)],
+            "mag_gps_resid_rms_ms": round(rms, 3),
+            "mag_gps_samples": len(rows)}
+
+
 def run_yaw_step(mon, alt=None):
     """偏航阶跃辨识：测这架飞机**实际可用**的偏航速率，而不是参数限幅值。
 
@@ -1742,6 +1886,7 @@ def main(argv=None):
         result["metrics"].update(summarise_yaw_step(result["dataflash_log"]))
     if args.case == "mag-align":
         result["metrics"].update(summarise_mag_align(result["dataflash_log"]))
+        result["metrics"].update(estimate_mag_yaw_offset_gps(result["dataflash_log"]))
     result["statustext"] = mon.messages
     result_path = os.path.join(out, "result.json")
     with open(result_path, "w", encoding="utf-8") as f:
