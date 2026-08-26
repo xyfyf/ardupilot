@@ -130,6 +130,18 @@ void AP_Compass_SITL::_timer()
         Vector3f f = (_eliptical_corr * new_mag_data) - _sitl->mag_ofs[i].get();
         // rotate compass
         f.rotate_inverse((enum Rotation)_sitl->mag_orient[i].get());
+        // Residual mounting misalignment on top of the discrete rotation.  A
+        // compass bolted on a few degrees out reads a field rotated by that
+        // much, and nothing in the stack corrects it: COMPASS_AUTO_ROT only
+        // ever picks one of the 24 discrete orientations.  Applied inverse for
+        // the same reason as the rotation above - the sensor frame is being
+        // moved relative to the body, not the field relative to the sensor.
+        const Vector3f &angl_deg = _sitl->mag_angl[i].get();
+        if (!angl_deg.is_zero()) {
+            Matrix3f misalign;
+            misalign.from_euler(radians(angl_deg.x), radians(angl_deg.y), radians(angl_deg.z));
+            f = misalign.mul_transpose(f);
+        }
         f.rotate(get_board_orientation());
         // scale the compass to simulate sensor scale factor errors
         f *= _sitl->mag_scaling[i];

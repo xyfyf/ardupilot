@@ -62,10 +62,20 @@ void Motor::calculate_forces(const struct sitl_input &input,
     motor_vel += -(position % gyro);
 
     // calculate velocity into prop, clipping at zero
-    float velocity_in = MAX(0, -motor_vel.projected(thrust_vector).z);
+    // Axial velocity through the disc, positive when air enters from above -
+    // that is, when the rotor is climbing or flying forward.
+    const float axial_vel = -motor_vel.projected(thrust_vector).z;
+    // The thrust baseline still clamps at zero.  Letting momentum theory run on
+    // into descent predicts thrust *rising* without bound, which is both
+    // non-physical - the theory's assumption of a one-way slipstream fails the
+    // moment the rotor starts descending into its own wake - and destabilising:
+    // tried directly, the vehicle could no longer land at all.  What descent
+    // actually does is modelled separately, as a loss, below.
+    const float velocity_in = MAX(0.0f, axial_vel);
+    const float descent_vel = MAX(0.0f, -axial_vel);
 
     // get thrust for untilted motor
-    float motor_thrust = calc_thrust(command, air_density, velocity_in, voltage_scale);
+    float motor_thrust = calc_thrust(command, air_density, velocity_in, voltage_scale, descent_vel);
 
     // the yaw torque of the motor
     const float yaw_scale = 0.05 * diagonal_size * motor_thrust;
@@ -212,10 +222,28 @@ float Motor::pwm_to_command(float pwm) const
 /*
   calculate thrust given a command value
 */
-float Motor::calc_thrust(float command, float air_density, float velocity_in, float voltage_scale) const
+float Motor::calc_thrust(float command, float air_density, float velocity_in, float voltage_scale, float descent_velocity) const
 {
     float velocity_out = voltage_scale * max_outflow_velocity * sqrtf((1-mot_expo)*command + mot_expo*sq(command));
     float ret = 0.5 * air_density * effective_prop_area * (sq(velocity_out) - sq(velocity_in));
+
+    // Vortex ring state.  A rotor descending into its own wake recirculates
+    // that wake through the disc instead of convecting it away, and thrust
+    // falls sharply over a band of descent rates rather than rising as momentum
+    // theory would have it.  Published envelopes put the worst of it near one
+    // hover induced velocity of descent and have it clear by about two, so the
+    // loss is a bell in eta = descent / v_hover, with v_hover taken as the
+    // momentum-theory hover value for this disc, v_out/2.
+    //
+    // This matters for landing, not for cruise: it is the mechanism by which a
+    // vehicle that has started down can lose the thrust it needs to arrest the
+    // descent, and keep accelerating into the ground.
+    if (is_positive(vrs_gain) && is_positive(descent_velocity) && is_positive(velocity_out)) {
+        const float v_hover = 0.5f * velocity_out;
+        const float eta = descent_velocity / MAX(v_hover, 0.01f);
+        const float x = (eta - vrs_peak) / MAX(vrs_width, 0.01f);
+        ret *= 1.0f - constrain_float(vrs_gain, 0.0f, 0.9f) * expf(-sq(x));
+    }
 #if 0
     if (command > 0) {
         ::printf("air_density=%f effective_prop_area=%f velocity_in=%f velocity_max=%f\n",

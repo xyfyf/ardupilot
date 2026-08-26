@@ -105,6 +105,10 @@ public:
     float pwm_to_command(float pwm) const;
 
     // setup motor key parameters
+    void set_vrs_params(float gain, float peak, float width) {
+        vrs_gain = gain; vrs_peak = peak; vrs_width = width;
+    }
+
     void setup_params(uint16_t _pwm_min, uint16_t _pwm_max, float _spin_min, float _spin_max, float _expo, float _slew_max,
                       float _diagonal_size, float _power_factor, float _voltage_max, float _effective_prop_area,
                       float _velocity_max, Vector3f _position, Vector3f _thrust_vector, float _yaw_factor,
@@ -120,7 +124,7 @@ public:
     }
 
     // calculate thrust of motor
-    float calc_thrust(float command, float air_density, float velocity_in, float voltage_scale) const;
+    float calc_thrust(float command, float air_density, float velocity_in, float voltage_scale, float descent_velocity = 0.0f) const;
 
 private:
     float mot_pwm_min;
@@ -134,6 +138,17 @@ private:
     float voltage_max;
     float effective_prop_area;
     float max_outflow_velocity;
+
+    // Axial-inflow model for descent.  A rotor descending into its own wake
+    // does not behave like a hovering one: between roughly 0 and 2 times the
+    // hover induced velocity it enters the vortex ring state, where momentum
+    // theory stops applying and thrust drops sharply instead of rising.  The
+    // loss is modelled as a bell in the non-dimensional descent rate
+    // eta = -V_climb / v_hover, which is the parameter the published VRS
+    // envelopes are all drawn against.  Set vrs_gain to zero to disable.
+    float vrs_gain = 0.0f;      // peak fractional thrust loss
+    float vrs_peak = 1.1f;      // eta at which the loss peaks
+    float vrs_width = 0.6f;     // half-width of the bell in eta
     float true_prop_area;
     float momentum_drag_coefficient;
     float diagonal_size;

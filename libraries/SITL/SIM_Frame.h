@@ -155,6 +155,13 @@ private:
         float ground_effect_vref = 0.0;      // descent speed that halves the cushion, m/s; 0 = no reduction
         float ground_effect_tau = 0.15;      // induced-flow lag, s
 
+        // Vortex ring state.  Zero disables it, which is the default so that
+        // existing models keep their behaviour; set vrs_gain to switch the
+        // descent regime on.  See Motor::calc_thrust for the model.
+        float vrs_gain = 0.0;                // peak fractional thrust loss
+        float vrs_peak = 1.1;                // eta = descent / hover induced vel at the peak
+        float vrs_width = 0.6;               // half-width of the loss bell in eta
+
         // Aerodynamic moments caused by translational airflow, in Nm per
         // m/s.  Components map lateral speed to roll, forward speed to
         // pitch, and lateral speed to yaw respectively.  Large multirotor

@@ -481,6 +481,9 @@ void Frame::load_frame_params(const char *model_json)
         FRAME_VAR(ground_effect_kmax),
         FRAME_VAR(ground_effect_vref),
         FRAME_VAR(ground_effect_tau),
+        FRAME_VAR(vrs_gain),
+        FRAME_VAR(vrs_peak),
+        FRAME_VAR(vrs_width),
         {"velocity_torque_gain", &model.velocity_torque_gain, VarType::VECTOR3F},
         {"moment_inertia", &model.moment_of_inertia, VarType::VECTOR3F},
         FRAME_VAR(num_motors),
@@ -600,6 +603,7 @@ void Frame::init(const char *frame_str, Battery *_battery)
     }
 
     for (uint8_t i=0; i<num_motors; i++) {
+        motors[i].set_vrs_params(model.vrs_gain, model.vrs_peak, model.vrs_width);
         motors[i].setup_params(model.pwmMin, model.pwmMax, model.spin_min, model.spin_max, model.propExpo, model.slew_max,
                                model.diagonal_size, power_factor, model.maxVoltage, effective_prop_area, velocity_max,
                                model.motor_pos[i], model.motor_thrust_vec[i], model.yaw_factor[i], true_prop_area,

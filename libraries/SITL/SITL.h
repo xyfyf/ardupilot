@@ -188,6 +188,12 @@ public:
     AP_Vector3f mag_diag[HAL_COMPASS_MAX_SENSORS];  // diagonal corrections
     AP_Vector3f mag_offdiag[HAL_COMPASS_MAX_SENSORS];  // off-diagonal corrections
     AP_Int8 mag_orient[HAL_COMPASS_MAX_SENSORS];   // external compass orientation
+    // Small-angle mounting misalignment left over after the discrete rotation,
+    // degrees, applied as roll/pitch/yaw about the body axes.  COMPASS_AUTO_ROT
+    // only ever resolves the 24 discrete orientations, so a compass bolted on a
+    // few degrees out stays uncorrected and shows up as a heading bias - which
+    // is precisely the case this exists to reproduce.
+    AP_Vector3f mag_angl[HAL_COMPASS_MAX_SENSORS];
     AP_Int8 mag_fail[HAL_COMPASS_MAX_SENSORS];   // fail magnetometer, 1 for no data, 2 for freeze
     AP_Int8 mag_save_ids;
 

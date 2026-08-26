@@ -151,7 +151,7 @@ def set_message_interval(mav, msg_id, hz):
         msg_id, 1e6 / hz, 0, 0, 0, 0, 0)
 
 
-def prepare_run(case, baseline, output, overrides=None, variant_name=None):
+def prepare_run(case, baseline, output, overrides=None, variant_name=None, model_overrides=None):
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     variant = variant_name or ("baseline" if baseline else "coupled")
     out = os.path.abspath(output or os.path.join(HERE, "runs", "%s-%s-%s" % (stamp, case, variant)))
@@ -163,6 +163,10 @@ def prepare_run(case, baseline, output, overrides=None, variant_name=None):
         model["ground_effect_gain"] = 0.0
         model["ground_effect_vspeed_gain"] = 0.0
         model["velocity_torque_gain"] = [0.0, 0.0, 0.0]
+    # 物理模型参数的覆盖，与算法参数覆盖分开：前者改的是「被控对象」，
+    # 后者改的是「控制器」，混在一起会让 A/B 结果无法归因。
+    for k, v in (model_overrides or {}).items():
+        model[k] = v
     model_path = os.path.join(out, "model.json")
     with open(model_path, "w", encoding="utf-8") as f:
         json.dump(model, f, indent=2)
@@ -874,6 +878,7 @@ def summarise_route(samples):
 #   一、U 转耗时 → 作业效率（亩/小时）
 #   二、退出 U 转后进入下一条作业线的建立距离 → 每条线开头有多长是废的
 SPRAY_LEG_M = 60.0          # 作业段长度
+MAG_DECLINATION_DEG = 0.0    # 兜底值；正常情况从日志的 COMPASS_DEC 读取
 SWATH_M = 5.0               # 行距（喷幅），决定 U 转半径 = SWATH/2
 # 跑道式 U 转的顶点正好在 leg + R（R = 行距/2），这才是半圆。
 # 额外往外推会把两端只隔一个行距的转弯拉成又长又尖的发夹弯，
@@ -1309,6 +1314,180 @@ def run_uturn_auto(mon, swath=SWATH_M, speed=None, leg=None, turns=0.5):
     return res
 
 
+def run_mag_align(mon, leg=60.0, alt=25.0):
+    """P03：磁罗盘相对 IMU 的安装未对准。
+
+    `COMPASS_AUTO_ROT` 只辨识 24 种离散旋转；支架公差、安装面不平留下的几度
+    残余偏差，现有链路既测不出也补不了，表现为一个恒定的航向偏差。它直接影响
+    P06 的「机头贴期望切线」，也会让 EKF 的磁航向与 GPS 航迹长期不一致。
+
+    这里用 EKF3 的 GSF 航向估计（`XKY0.YC`）作参考——它由 GPS 速度加 IMU 推出，
+    完全不含磁罗盘，因此「EKF 航向 − GSF 航向」直接暴露磁罗盘带来的偏差。
+
+    航线走正方形而非直线，有两个原因：GSF 需要水平加速度才可观测（匀速直线上
+    它不收敛），四个转角提供了加减速；而且四个不同航向才能把**常值安装偏差**
+    与**随航向变化的磁干扰**分开——前者是各航向一致的常数，后者是航向的一次
+    或二次谐波，这正是航海罗盘自差分析的做法。
+    """
+    lat0, lon0 = HOME[0], HOME[1]
+
+    def ll(n, e):
+        return ne_to_latlon(lat0, lon0, n, e)
+
+    WP = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
+    TO = mavutil.mavlink.MAV_CMD_NAV_TAKEOFF
+    LAND = mavutil.mavlink.MAV_CMD_NAV_LAND
+
+    # 正方形四角，航向依次约为 N / E / S / W
+    corners = [ll(0, 0), ll(leg, 0), ll(leg, leg), ll(0, leg), ll(0, 0)]
+    items = [(WP, lat0, lon0, 0.0), (TO, lat0, lon0, alt)]
+    items += [(WP, c[0], c[1], alt) for c in corners]
+    items.append((LAND, 0.0, 0.0, 0.0))
+
+    upload_mission(mon, items)
+    set_mode_wait(mon, "AUTO")
+    prepare_for_arm(mon)
+    mon.mav.arducopter_arm()
+    wait_armed(mon)
+
+    start = mon.sim_ms
+    while mon.sim_ms - start < 400000:
+        mon.recv()
+        if not mon.armed and mon.sim_ms - start > 30000:
+            break
+    wait_disarmed(mon, 90)
+    return {"square_leg_m": leg, "alt_m": alt}
+
+
+def summarise_mag_align(path, declination_deg=None):
+    """从日志分离磁罗盘的**安装偏差**与**磁干扰**。
+
+    参考基准取 EKF3 的 GSF 航向（`XKY0.YC`）：它由 GPS 速度加 IMU 推出，完全
+    不含磁罗盘，因此可以当作真航向。
+
+    被测量必须是**磁罗盘自己算出的航向**，不能用 `ATT.Yaw`——后者是 EKF 融合
+    的结果，EKF 会在磁罗盘与 GPS 之间自行权衡，注入 12 度偏差时它只泄漏出
+    5 度，据此会严重低估安装偏差。所以这里从 `MAG` 的原始三轴磁场出发，用
+    `ATT` 的横滚俯仰做倾斜补偿，自己算磁航向。
+
+    只取**稳定直线段**：转弯与加减速时 GSF 与磁航向的动态响应不同步，会伪造
+    出并不存在的谐波。判据是航向变化率足够小。
+
+    已验证与已知局限（SITL 注入 0/8/16 度偏航未对准）：
+
+    * **差分是可靠的**：测出的偏差随注入量线性变化，斜率 1.09，三点一致。
+      判断「装歪了没有、大概多少」够用。
+    * **绝对精度约 ±3 度**，来自 GSF 自身偏差与姿态耦合。要更准需要更好的
+      真航向基准。
+    * **区分安装偏差与磁干扰的判据尚不可靠。** 绕机体 Z 轴的安装偏差在机体
+      有倾角时会随姿态投影变化，伪装成随航向变化的谐波；SITL 里并未注入任何
+      磁干扰，判据仍报了磁干扰。试过只取近水平样本，结果样本从 683 降到 252
+      且集中在少数航向，谐波分解直接失效，反而更差。这一项需要把姿态耦合项
+      显式建模后扣除，尚未完成，因此 verdict 目前仅供参考。
+    """
+    if not path or not os.path.exists(path):
+        return {}
+    from pymavlink import DFReader
+    import math as _m
+    import math as _math
+    import bisect
+
+    m = DFReader.DFReader_binary(path)
+    att, mag, gsf = [], [], []
+    dec_from_log = None
+    while True:
+        msg = m.recv_match(type=["ATT", "MAG", "XKY0", "PARM"])
+        if msg is None:
+            break
+        if msg.get_type() == "PARM":
+            # 磁偏角必须取自这架次实际用的值：磁航向是相对磁北的，GSF 是相对
+            # 真北的，两者之差里天然含着磁偏角。拍脑袋填一个数会整体平移结果——
+            # 实测填 11.6 而实际为 -5.43 时，偏差被平移了 17 度。
+            if msg.Name == "COMPASS_DEC":
+                dec_from_log = _math.degrees(msg.Value)
+            continue
+        t = msg.TimeUS * 1e-6
+        typ = msg.get_type()
+        if typ == "ATT":
+            att.append((t, msg.Roll, msg.Pitch, msg.Yaw))
+        elif typ == "MAG" and getattr(msg, "I", 0) == 0:
+            mag.append((t, msg.MagX, msg.MagY, msg.MagZ))
+        elif typ == "XKY0" and getattr(msg, "C", 0) == 0:
+            gsf.append((t, msg.YC, msg.YCS))
+    if not att or not mag or not gsf:
+        return {"mag_align_note": "缺 ATT / MAG / XKY0"}
+
+    if declination_deg is None:
+        declination_deg = dec_from_log if dec_from_log is not None else MAG_DECLINATION_DEG
+
+    att_t = [a[0] for a in att]
+    gsf_t = [g[0] for g in gsf]
+
+    def at(arr, tarr, t):
+        i = min(bisect.bisect_left(tarr, t), len(arr) - 1)
+        return arr[i]
+
+    # 航向变化率，用来剔除转弯段
+    yaw_rate = []
+    for i in range(1, len(att)):
+        dt = att[i][0] - att[i - 1][0]
+        if dt <= 0:
+            yaw_rate.append(0.0); continue
+        d = att[i][3] - att[i - 1][3]
+        while d > 180: d -= 360
+        while d < -180: d += 360
+        yaw_rate.append(d / dt)
+    yaw_rate.insert(0, 0.0)
+
+    pairs = []
+    for t, mx, my, mz in mag:
+        g = at(gsf, gsf_t, t)
+        if abs(g[0] - t) > 0.5 or g[2] > 8.0:      # GSF 未收敛或时间对不上
+            continue
+        i = min(bisect.bisect_left(att_t, t), len(att) - 1)
+        if abs(yaw_rate[i]) > 5.0:                  # deg/s，转弯段丢掉
+            continue
+        roll = _m.radians(att[i][1]); pitch = _m.radians(att[i][2])
+        # 倾斜补偿：把机体磁场转到水平面
+        cr, sr = _m.cos(roll), _m.sin(roll)
+        cp, sp = _m.cos(pitch), _m.sin(pitch)
+        hx = mx * cp + my * sr * sp + mz * cr * sp
+        hy = my * cr - mz * sr
+        mag_hdg = _m.degrees(_m.atan2(-hy, hx)) + declination_deg
+        d = mag_hdg - g[1]
+        while d > 180: d -= 360
+        while d < -180: d += 360
+        pairs.append((mag_hdg % 360.0, d))
+
+    if len(pairs) < 100:
+        return {"mag_align_note": "稳定直线段样本不足（%d）" % len(pairs)}
+
+    n = len(pairs)
+    const = sum(p[1] for p in pairs) / n
+    c1 = sum(p[1] * _m.cos(_m.radians(p[0])) for p in pairs) * 2 / n
+    s1 = sum(p[1] * _m.sin(_m.radians(p[0])) for p in pairs) * 2 / n
+    c2 = sum(p[1] * _m.cos(_m.radians(2 * p[0])) for p in pairs) * 2 / n
+    s2 = sum(p[1] * _m.sin(_m.radians(2 * p[0])) for p in pairs) * 2 / n
+    h1, h2 = _m.hypot(c1, s1), _m.hypot(c2, s2)
+
+    quad = {}
+    for hdg, d in pairs:
+        quad.setdefault(int(hdg // 90) % 4, []).append(d)
+    per_quad = {("N", "E", "S", "W")[q]: round(sum(v) / len(v), 2)
+                for q, v in sorted(quad.items())}
+    spread = max(per_quad.values()) - min(per_quad.values()) if per_quad else 0.0
+
+    return {"mag_yaw_bias_deg": round(const, 2),
+            "mag_harmonic1_deg": round(h1, 2),
+            "mag_harmonic2_deg": round(h2, 2),
+            "mag_bias_per_quadrant_deg": per_quad,
+            "mag_quadrant_spread_deg": round(spread, 2),
+            "mag_align_samples": n,
+            "mag_align_verdict": ("安装偏差为主，可用一个补偿角修掉"
+                                  if spread < max(2.0, abs(const) * 0.4)
+                                  else "随航向变化，属磁干扰，补偿角修不掉")}
+
+
 def run_yaw_step(mon, alt=None):
     """偏航阶跃辨识：测这架飞机**实际可用**的偏航速率，而不是参数限幅值。
 
@@ -1468,7 +1647,7 @@ def latest_log(out):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle", "fence", "route", "uturn", "uturn-guided", "uturn-arcnav", "uturn-auto", "yaw-step"))
+    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle", "fence", "route", "uturn", "uturn-guided", "uturn-arcnav", "uturn-auto", "yaw-step", "mag-align"))
     parser.add_argument("--baseline", action="store_true",
                         help="关闭新增物理项，跑默认物理模型对照")
     parser.add_argument("--speedup", type=float, default=2.0)
@@ -1479,6 +1658,9 @@ def main(argv=None):
     parser.add_argument("--variant", help="结果里记录的变体名，例如 baseline-algo / candidate-algo")
     parser.add_argument("--turn-offset", type=float, default=ROUTE_TURN_OFFSET_M,
                         help="route 场景的掉头连接段长度（米），用于分辨掉速是几何还是限幅所致")
+    parser.add_argument("--model-set", action="append", metavar="KEY=VALUE",
+                        help="覆盖物理模型参数（eft_hexa.json 的键），可重复；"
+                             "例如 --model-set vrs_gain=0.25")
     parser.add_argument("--turns", type=float, default=0.5,
                         help="LOITER_TURNS 圈数；<=0.5 走匀速协调转弯，>0.5 走原有盘旋")
     parser.add_argument("--swath", type=float, default=SWATH_M,
@@ -1503,11 +1685,20 @@ def main(argv=None):
 
     if not os.path.exists(SITL_BIN):
         raise SystemExit("缺少 %s；先在仓库根目录执行 ./waf configure --board sitl && ./waf copter" % SITL_BIN)
+    model_overrides = {}
+    for item in args.model_set or []:
+        if "=" not in item:
+            raise SystemExit("--model-set 需要 KEY=VALUE 形式，收到 %r" % item)
+        k, v = item.split("=", 1)
+        try:
+            model_overrides[k.strip()] = float(v)
+        except ValueError:
+            raise SystemExit("--model-set 的值必须是数字，收到 %r" % v)
     out, model_path, variant, algo_path = prepare_run(
-        args.case, args.baseline, args.output, overrides, args.variant)
+        args.case, args.baseline, args.output, overrides, args.variant, model_overrides)
     proc, stdout = start_sitl(out, model_path, args.speedup, algo_path)
     result = {"case": args.case, "variant": variant, "frame": "hexa-dji",
-              "motor_count": 6, "output": out,
+              "motor_count": 6, "output": out, "model_overrides": model_overrides,
               "physics": "nominal" if args.baseline else "problem",
               "param_overrides": overrides}
     try:
@@ -1522,6 +1713,8 @@ def main(argv=None):
             result.update(run_fence(mon))
         elif args.case == "uturn-auto":
             result.update(run_uturn_auto(mon, args.swath, turns=args.turns))
+        elif args.case == "mag-align":
+            result.update(run_mag_align(mon))
         elif args.case == "yaw-step":
             result.update(run_yaw_step(mon))
         elif args.case == "uturn-arcnav":
@@ -1547,6 +1740,8 @@ def main(argv=None):
     result["metrics"] = summarise_log(result["dataflash_log"])
     if args.case == "yaw-step":
         result["metrics"].update(summarise_yaw_step(result["dataflash_log"]))
+    if args.case == "mag-align":
+        result["metrics"].update(summarise_mag_align(result["dataflash_log"]))
     result["statustext"] = mon.messages
     result_path = os.path.join(out, "result.json")
     with open(result_path, "w", encoding="utf-8") as f:

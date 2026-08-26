@@ -880,6 +880,14 @@ const AP_Param::GroupInfo SIM::var_mag[] = {
     // @User: Advanced
     AP_GROUPINFO("MAG_SAVE_IDS", 37, SIM, mag_save_ids, 1),
 
+    // @Param: MAG1_ANGL_X
+    // @DisplayName: MAG1 small-angle misalignment X (roll)
+    // @Description: Residual mounting misalignment of the first compass about the body roll axis, on top of MAG1_ORIENT. COMPASS_AUTO_ROT only resolves the 24 discrete orientations, so use this to reproduce a compass that is bolted on a few degrees out.
+    // @Units: deg
+    // @User: Advanced
+    // @Vector3Parameter: 1
+    AP_GROUPINFO("MAG1_ANGL", 38, SIM, mag_angl[0], 0),
+
     AP_GROUPEND
 };
 
