@@ -5,6 +5,7 @@
   landing  地面站式 AUTO 任务：起飞 -> 两个航点 -> NAV_LAND
   reverse  LOITER 手动打杆：加速到 5 m/s -> 突然反向，重复三次
   circle   CIRCLE 模式 2 m 半径绕圈：1.0/1.5/2.0/2.5 m/s 逐档，每档 2 圈
+  loiter-circle  LOITER 杆量画圈：同上四档，但无 AC_Circle 自限速，可打到饱和
 
 默认启用自定义机型中的近地增升与速度相关气动力矩。加 --baseline 可把这
 两项归零，用同一场景做 A/B，确认现象来自物理项而不是脚本本身。
@@ -423,6 +424,8 @@ def run_reverse(mon):
 CIRCLE_RADIUS_M = 2.0
 CIRCLE_SPEEDS_MS = (1.0, 1.5, 2.0, 2.5)
 CIRCLE_LAPS = 2
+# 满杆对应的倾角上限：ANGLE_MAX=1500 与 LOIT_ANG_MAX=15 取小者
+LOITER_ANGLE_MAX_DEG = 15.0
 
 
 def set_param(mon, name, value, timeout_ms=8000):
@@ -530,6 +533,100 @@ def run_circle(mon):
     return {"circle_radius_m": CIRCLE_RADIUS_M, "steps": steps}
 
 
+def run_loiter_circle(mon):
+    """LOITER 手动画圈：杆量按 A·cos(ωt) / A·sin(ωt) 旋转。
+
+    与 CIRCLE 模式的区别是这里没有 AC_Circle 的自限速——杆量直接映射到倾角
+    指令，所以能真的把指令顶到 ANGLE_MAX 上。协调圆周下 a = ω·v、R = v/ω，
+    因此 R 固定时 ω = v/R、所需倾角 θ = atan(v²/(R·g))。
+    """
+    command_takeoff(mon, 15.0)
+    set_mode_wait(mon, "LOITER")
+    for _ in range(60):
+        rc_override(mon)
+        mon.recv()
+    print("LOITER 已稳定，2 m 半径逐档画圈（杆量驱动）")
+
+    steps = []
+    for speed in CIRCLE_SPEEDS_MS:
+        omega = speed / CIRCLE_RADIUS_M                      # rad/s
+        need_deg = math.degrees(math.atan(
+            speed * speed / (CIRCLE_RADIUS_M * 9.80665)))
+        # 满杆对应 LOIT_ANG_MAX / ANGLE_MAX 的较小者，本机为 15°
+        frac = min(need_deg / LOITER_ANGLE_MAX_DEG, 1.0)
+        amp = int(round(frac * 500))
+        saturated_cmd = need_deg > LOITER_ANGLE_MAX_DEG
+
+        lap_s = 2.0 * math.pi / omega
+        hold_ms = int(2 * lap_s * 1000)
+        settle_ms = int(lap_s * 250)
+        start = mon.sim_ms
+        samples = []
+        while mon.sim_ms - start < hold_ms:
+            t = (mon.sim_ms - start) / 1000.0
+            roll = 1500 + int(round(amp * math.cos(omega * t)))
+            pitch = 1500 + int(round(amp * math.sin(omega * t)))
+            rc_override(mon, roll=roll, pitch=pitch)
+            mon.recv()
+            err = mon.attitude_error_deg()
+            tilt = target_tilt_deg(mon)
+            vel = mon.body_velocity()
+            if err is None or tilt is None or vel is None or mon.local is None:
+                continue
+            samples.append((mon.sim_ms - start, tilt, err[0], err[1],
+                            math.hypot(vel[0], vel[1]),
+                            mon.local.x, mon.local.y))
+
+        steady = [s for s in samples if s[0] >= settle_ms] or samples
+        tilts = [s[1] for s in steady]
+        errs = sorted(math.hypot(s[2], s[3]) for s in steady)
+        spds = [s[4] for s in steady]
+        step = {
+            "target_speed_m_s": speed,
+            "omega_deg_s": math.degrees(omega),
+            "required_tilt_deg": need_deg,
+            "stick_frac": frac,
+            "command_saturated_by_design": saturated_cmd,
+            "samples": len(steady),
+        }
+        if tilts:
+            step["target_tilt_max_deg"] = max(tilts)
+            step["target_tilt_mean_deg"] = sum(tilts) / len(tilts)
+            step["tilt_saturated_frac"] = sum(
+                t >= LOITER_ANGLE_MAX_DEG - 0.3 for t in tilts) / len(tilts)
+        if errs:
+            step["att_err_mean_deg"] = sum(errs) / len(errs)
+            step["att_err_p95_deg"] = errs[int(len(errs) * 0.95)]
+            step["att_err_max_deg"] = errs[-1]
+        if spds:
+            step["actual_speed_mean_m_s"] = sum(spds) / len(spds)
+        if len(steady) > 10:
+            # 实际半径：稳态段位置的均值当圆心，到圆心距离的均值当半径。
+            # 指令顶到限幅时半径会被撑大，这是饱和最直观的外部表现。
+            cx = sum(s[5] for s in steady) / len(steady)
+            cy = sum(s[6] for s in steady) / len(steady)
+            radii = [math.hypot(s[5] - cx, s[6] - cy) for s in steady]
+            step["actual_radius_mean_m"] = sum(radii) / len(radii)
+        steps.append(step)
+        print("  %.1f m/s: 需倾角 %.1f°%s，实测指令倾角 max %.1f°，饱和占比 %.0f%%，"
+              "实测半径 %.2f m，姿态误差均值 %.2f°"
+              % (speed, need_deg, "（满杆也给不出）" if saturated_cmd else "",
+                 step.get("target_tilt_max_deg", float("nan")),
+                 100 * step.get("tilt_saturated_frac", 0),
+                 step.get("actual_radius_mean_m", float("nan")),
+                 step.get("att_err_mean_deg", float("nan"))))
+
+        rc_override(mon)
+        settle = mon.sim_ms
+        while mon.sim_ms - settle < 4000:
+            rc_override(mon)
+            mon.recv()
+
+    set_mode_wait(mon, "LAND")
+    wait_disarmed(mon, 120)
+    return {"circle_radius_m": CIRCLE_RADIUS_M, "mode": "LOITER", "steps": steps}
+
+
 def summarise_log(path):
     """从日志算 P02 的验收量。
 
@@ -582,7 +679,7 @@ def latest_log(out):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("case", choices=("landing", "reverse", "circle"))
+    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle"))
     parser.add_argument("--baseline", action="store_true",
                         help="关闭新增物理项，跑默认物理模型对照")
     parser.add_argument("--speedup", type=float, default=2.0)
@@ -618,6 +715,8 @@ def main(argv=None):
             result.update(run_landing(mon))
         elif args.case == "circle":
             result.update(run_circle(mon))
+        elif args.case == "loiter-circle":
+            result.update(run_loiter_circle(mon))
         else:
             result.update(run_reverse(mon))
     finally:
