@@ -257,10 +257,12 @@ bool ModeGuided::set_arc_destination(const Location& centre, float radius_m,
     }
 
     // Holding the nose on the track means yawing at the rate the tangent turns,
-    // omega = v / r.  On a tight, slow arc that binds before the lean angle
-    // does: 2 m/s on a 2 m radius needs 57 deg/s while ATC_RATE_Y_MAX often
-    // sits at 50.  Refuse rather than fly the turn with the nose off the track.
-    const float yaw_rate_needed = fabsf(guided_arc_nav.track_heading_rate_rads());
+    // omega = v * curvature.  The transition spirals ramp that up from zero
+    // rather than stepping to it, but the peak is still v / r, and on a tight,
+    // slow turn the peak binds before the lean angle does: 2 m/s on a 2 m
+    // radius needs 57 deg/s while ATC_RATE_Y_MAX often sits at 50.  Refuse
+    // rather than fly the turn with the nose off the track.
+    const float yaw_rate_needed = guided_arc_nav.peak_heading_rate_rads();
     const float yaw_rate_max = attitude_control->get_slew_yaw_max_rads();
     if (is_positive(yaw_rate_max) && yaw_rate_needed > yaw_rate_max * 0.8f) {
         gcs().send_text(MAV_SEVERITY_WARNING,
@@ -317,23 +319,34 @@ void ModeGuided::arc_run()
     // @Field: Tgt: commanded tangential speed
     // @Field: PErr: horizontal position error
     // @Field: HdgE: heading error against the track tangent, degrees
+    // @Field: Spir: length of each clothoid transition, metres; 0 is a bare arc
+    // @Field: Alat: commanded lateral acceleration, m/s/s
+    // @Field: HdgR: commanded tangent rotation rate, degrees/s
     Vector3f arc_vel_ne;
     IGNORE_RETURN(AP::ahrs().get_velocity_NED(arc_vel_ne));
-    AP::logger().WriteStreaming("ARCN", "TimeUS,Prog,Gov,Spd,Tgt,PErr,HdgE",
-                                "s-----d", "F------", "Qffffff",
+    const float arc_hdg_rate_degs = degrees(guided_arc_nav.track_heading_rate_rads());
+    AP::logger().WriteStreaming("ARCN", "TimeUS,Prog,Gov,Spd,Tgt,PErr,HdgE,Spir,Alat,HdgR",
+                                "s-----d---", "F---------", "Qfffffffff",
                                 AP_HAL::micros64(),
                                 guided_arc_nav.progress(),
                                 guided_arc_nav.dt_scalar(),
                                 arc_vel_ne.xy().length(),
                                 guided_arc_nav.commanded_speed_ms(),
                                 pos_control->get_pos_error_NE_m(),
-                                degrees(wrap_PI(guided_arc_nav.track_heading_rad() - AP::ahrs().get_yaw_rad())));
+                                degrees(wrap_PI(guided_arc_nav.track_heading_rad() - AP::ahrs().get_yaw_rad())),
+                                guided_arc_nav.spiral_length_m(),
+                                pos_control->get_accel_target_NEU_mss().xy().length(),
+                                arc_hdg_rate_degs);
 #endif
 
-    // Point the nose along the track, and feed forward the rate the tangent is
-    // turning at.  Without the rate term the heading lags the tangent all the
-    // way round, which is exactly what "keep the nose on the velocity vector"
-    // must not do.
+    // Heading comes from the *desired* tangent, never from the measured
+    // velocity.  Slaving the nose to where the vehicle is actually going would
+    // break crosswind work: a sprayer has to crab to hold a straight ground
+    // track, and forcing heading onto the measured velocity would turn it into
+    // the wind and walk it off the swath line.  Pointing at the planned tangent
+    // instead lets the position controller crab as much as it needs to while
+    // the nose stays on the line.  The rate term is the tangent's own rotation
+    // rate, so the heading leads rather than lags around the turn.
     attitude_control->input_thrust_vector_heading_rad(
         pos_control->get_thrust_vector(),
         guided_arc_nav.track_heading_rad(),
