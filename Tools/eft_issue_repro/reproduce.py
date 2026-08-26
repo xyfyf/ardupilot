@@ -6,6 +6,7 @@
   reverse  LOITER 手动打杆：加速到 5 m/s -> 突然反向，重复三次
   circle   CIRCLE 模式 2 m 半径绕圈：1.0/1.5/2.0/2.5 m/s 逐档，每档 2 圈
   loiter-circle  LOITER 杆量画圈：同上四档，但无 AC_Circle 自限速，可打到饱和
+  fence    圆形围栏接近：2.0/3.5/5.0 m/s 逐档撞边界，量实际余量与冲出量
 
 默认启用自定义机型中的近地增升与速度相关气动力矩。加 --baseline 可把这
 两项归零，用同一场景做 A/B，确认现象来自物理项而不是脚本本身。
@@ -627,6 +628,113 @@ def run_loiter_circle(mon):
     return {"circle_radius_m": CIRCLE_RADIUS_M, "mode": "LOITER", "steps": steps}
 
 
+# P05：圆形围栏接近。围栏圆心即 Home，从圆心向外加速接近边界，
+# 看避障实际把飞机停在离边界多远——与 AVOID_MARGIN 的差值就是冲出量。
+FENCE_RADIUS_M = 60.0
+FENCE_APPROACH_SPEEDS_MS = (2.0, 5.0, 8.0, 12.0)
+
+
+def horiz_radius(mon):
+    if mon.local is None:
+        return None
+    return math.hypot(mon.local.x, mon.local.y)
+
+
+def run_fence(mon):
+    command_takeoff(mon, 15.0)
+    set_mode_wait(mon, "LOITER")
+    for _ in range(60):
+        rc_override(mon)
+        mon.recv()
+
+    set_param(mon, "FENCE_TYPE", 2)          # 只留圆形围栏，隔离变量
+    set_param(mon, "FENCE_RADIUS", FENCE_RADIUS_M)
+    set_param(mon, "FENCE_ACTION", 0)        # 只报告，不触发 RTL，才能观察避障本身
+    set_param(mon, "FENCE_ENABLE", 1)
+    # 圆形围栏避障用的是 FENCE_MARGIN 而不是 AVOID_MARGIN
+    # （AC_Avoid::adjust_velocity_circle_fence 取 _fence.get_margin()），
+    # AVOID_MARGIN 管的是 proximity 传感器那条路。这里沿用实机的 FENCE_MARGIN=5。
+    margin = 5.0
+    set_param(mon, "FENCE_MARGIN", margin)
+    set_param(mon, "AVOID_MARGIN", 10.0)
+    set_param(mon, "AVOID_ENABLE", 7)        # 与实机 defaults.parm 一致
+    set_param(mon, "AVOID_ACCEL_MAX", 4.0)   # 实机设的 4 m/s²，但 ANGLE_MAX=15° 只给得出 2.63
+    print("圆形围栏 %.0f m，FENCE_MARGIN %.0f m，逐档接近" % (FENCE_RADIUS_M, margin))
+
+    steps = []
+    for speed in FENCE_APPROACH_SPEEDS_MS:
+        # LOIT_SPEED 在 AC_Loiter::init() 读取，必须退出再进 LOITER 才生效
+        set_param(mon, "LOIT_SPEED", speed * 100.0)
+        set_mode_wait(mon, "ALT_HOLD", 15)
+        set_mode_wait(mon, "LOITER", 15)
+
+        # 固定时长跑满：2 m/s 走完 60 m 需 30 s，留足余量。不要用「半径不再增长」
+        # 当停止判据——起飞点 r≈0、速度≈0 时它会立刻误触发。
+        start = mon.sim_ms
+        r_max, v_at_max, samples = 0.0, 0.0, []
+        while mon.sim_ms - start < 70000:
+            rc_override(mon, pitch=2000)     # 满杆向前（机头朝北，即 +X 向外）
+            mon.recv()
+            r = horiz_radius(mon)
+            vel = mon.body_velocity()
+            if r is None or vel is None:
+                continue
+            sp = math.hypot(vel[0], vel[1])
+            samples.append((mon.sim_ms - start, r, sp))
+            if r > r_max:
+                r_max, v_at_max = r, sp
+
+        # 末段持续顶住围栏，看是否在边界上振荡
+        osc = [r for t, r, _ in samples if t >= 55000]
+
+        margin_min = FENCE_RADIUS_M - r_max
+        step = {
+            "target_speed_m_s": speed,
+            "fence_radius_m": FENCE_RADIUS_M,
+            "fence_margin_m": margin,
+            "closest_radius_m": r_max,
+            "margin_achieved_m": margin_min,
+            "margin_overshoot_m": margin - margin_min,
+            "breached": r_max > FENCE_RADIUS_M,
+            "speed_at_closest_m_s": v_at_max,
+        }
+        if osc:
+            step["hold_radius_mean_m"] = sum(osc) / len(osc)
+            step["hold_radius_pp_m"] = max(osc) - min(osc)
+            step["hold_margin_mean_m"] = FENCE_RADIUS_M - step["hold_radius_mean_m"]
+        # 制动峰值：接近段速度的最大下降率
+        decel = 0.0
+        for a, b in zip(samples, samples[1:]):
+            dt = (b[0] - a[0]) / 1000.0
+            if dt > 0:
+                decel = max(decel, (a[2] - b[2]) / dt)
+        step["peak_decel_m_s2"] = decel
+        steps.append(step)
+        print("  %.1f m/s: 最近半径 %.2f m，实际余量 %.2f m（设定 %.0f，冲出 %.2f）%s，"
+              "制动峰值 %.2f m/s²，停稳后半径峰峰 %.2f m"
+              % (speed, r_max, margin_min, margin, step["margin_overshoot_m"],
+                 "  ** 越界 **" if step["breached"] else "",
+                 decel, step.get("hold_radius_pp_m", float("nan"))))
+
+        # 回飞到圆心附近，为下一档留出加速距离
+        back = mon.sim_ms
+        while mon.sim_ms - back < 45000:
+            rc_override(mon, pitch=1000)
+            mon.recv()
+            r = horiz_radius(mon)
+            if r is not None and r < 12.0:
+                break
+        rc_override(mon)
+        settle = mon.sim_ms
+        while mon.sim_ms - settle < 4000:
+            rc_override(mon)
+            mon.recv()
+
+    set_mode_wait(mon, "LAND")
+    wait_disarmed(mon, 120)
+    return {"fence_radius_m": FENCE_RADIUS_M, "steps": steps}
+
+
 def summarise_log(path):
     """从日志算 P02 的验收量。
 
@@ -679,7 +787,7 @@ def latest_log(out):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle"))
+    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle", "fence"))
     parser.add_argument("--baseline", action="store_true",
                         help="关闭新增物理项，跑默认物理模型对照")
     parser.add_argument("--speedup", type=float, default=2.0)
@@ -717,6 +825,8 @@ def main(argv=None):
             result.update(run_circle(mon))
         elif args.case == "loiter-circle":
             result.update(run_loiter_circle(mon))
+        elif args.case == "fence":
+            result.update(run_fence(mon))
         else:
             result.update(run_reverse(mon))
     finally:
