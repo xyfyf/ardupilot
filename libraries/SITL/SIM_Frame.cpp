@@ -476,10 +476,11 @@ void Frame::load_frame_params(const char *model_json)
         FRAME_VAR(slew_max),
         FRAME_VAR(disc_area),
         FRAME_VAR(mdrag_coef),
-        FRAME_VAR(ground_effect_height),
-        FRAME_VAR(ground_effect_collapse_height),
+        FRAME_VAR(ground_effect_radius),
         FRAME_VAR(ground_effect_gain),
-        FRAME_VAR(ground_effect_vspeed_gain),
+        FRAME_VAR(ground_effect_kmax),
+        FRAME_VAR(ground_effect_vref),
+        FRAME_VAR(ground_effect_tau),
         {"velocity_torque_gain", &model.velocity_torque_gain, VarType::VECTOR3F},
         {"moment_inertia", &model.moment_of_inertia, VarType::VECTOR3F},
         FRAME_VAR(num_motors),
@@ -704,36 +705,31 @@ void Frame::calculate_forces(const Aircraft &aircraft,
         thrust -= drag_bf;
     }
 
-    if (model.ground_effect_height > 0.0f) {
-        const float hagl = aircraft.get_hagl();
-        if (hagl < model.ground_effect_height) {
-            float height_scale;
-            if (model.ground_effect_collapse_height > 0.0f &&
-                hagl < model.ground_effect_collapse_height) {
-                // A descending rotor cushion can collapse immediately before
-                // contact.  The optional lower ramp models that transient
-                // without changing legacy models.
-                height_scale = constrain_float(
-                    MAX(hagl, 0.0f) / model.ground_effect_collapse_height,
-                    0.0f,
-                    1.0f);
-            } else {
-                const float lower_height = constrain_float(
-                    model.ground_effect_collapse_height,
-                    0.0f,
-                    model.ground_effect_height * 0.99f);
-                height_scale = constrain_float(
-                    1.0f - (MAX(hagl, lower_height) - lower_height) /
-                    (model.ground_effect_height - lower_height),
-                    0.0f,
-                    1.0f);
-            }
-            const float descent_speed = MAX(aircraft.get_velocity_ef().z, 0.0f);
-            const float gain = MAX(
-                model.ground_effect_gain + model.ground_effect_vspeed_gain * descent_speed,
-                0.0f) * height_scale;
-            thrust *= 1.0f + gain;
+    if (is_positive(model.ground_effect_gain)) {
+        // 桨半径：优先用显式值，否则从桨盘面积反算
+        float R = model.ground_effect_radius;
+        if (!is_positive(R) && model.num_motors > 0 && is_positive(model.disc_area)) {
+            R = sqrtf(model.disc_area / model.num_motors / M_PI);
         }
+        float target = 0.0f;
+        if (is_positive(R)) {
+            const float z = MAX(aircraft.get_hagl(), 0.01f);
+            // Cheeseman-Bennett，闭式解在 z→R/4 处发散，必须限幅
+            const float k = constrain_float(sq(R / (4.0f * z)), 0.0f,
+                                            constrain_float(model.ground_effect_kmax, 0.0f, 0.95f));
+            target = model.ground_effect_gain * (1.0f / (1.0f - k) - 1.0f);
+            if (is_positive(model.ground_effect_vref)) {
+                // 下降会把气垫吹散：降得越快，稳态增益越小
+                const float vz = MAX(aircraft.get_velocity_ef().z, 0.0f);
+                target /= 1.0f + sq(vz / model.ground_effect_vref);
+            }
+        }
+        // 一阶滞后。这是本模型的关键：气垫是有惯性的状态量，不是高度的瞬时函数。
+        // 控制器会把油门配平到「已经建立起来的」气垫上，等它消失时就来不及了。
+        const float tau = MAX(model.ground_effect_tau, 1.0e-3f);
+        const float dt = aircraft.get_frame_time_s();
+        ground_effect_state += (target - ground_effect_state) * constrain_float(dt / tau, 0.0f, 1.0f);
+        thrust *= 1.0f + MAX(ground_effect_state, 0.0f);
     }
 
     body_accel = thrust/aircraft.gross_mass();

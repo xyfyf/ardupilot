@@ -199,6 +199,10 @@ public:
     static bool set_pose(uint8_t instance, const Location &loc, const Quaternion &quat,
                          const Vector3f &velocity_ef, const Vector3f &gyro_rads);
 
+    // simulation timestep in seconds, for models that carry state between
+    // steps (e.g. the lagged ground-effect cushion in Frame)
+    float get_frame_time_s(void) const { return frame_time_us * 1.0e-6f; }
+
 protected:
     SIM *sitl;
     // origin of position vector

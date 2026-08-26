@@ -15,16 +15,25 @@
     "refRotRate": 120.0,
     "pwmMin": 1050.0,
     "pwmMax": 1950.0,
-    "spin_min": 0.10,
+    "spin_min": 0.1,
     "spin_max": 0.95,
     "slew_max": 75.0,
     "disc_area": 4.71,
-    "mdrag_coef": 0.10,
-    "moment_inertia": [12.5, 12.5, 25.0],
+    "mdrag_coef": 0.1,
+    "moment_inertia": [
+        12.5,
+        12.5,
+        25.0
+    ],
     "num_motors": 6,
-    "ground_effect_height": 0.35,
-    "ground_effect_collapse_height": 0.06,
-    "ground_effect_gain": 0.02,
-    "ground_effect_vspeed_gain": 0.16,
-    "velocity_torque_gain": [18.0, -18.0, 0.0]
+    "ground_effect_gain": 0.26,
+    "velocity_torque_gain": [
+        18.0,
+        -18.0,
+        0.0
+    ],
+    "ground_effect_radius": 0.5,
+    "ground_effect_kmax": 0.6,
+    "ground_effect_vref": 0.0,
+    "ground_effect_tau": 0.15
 }

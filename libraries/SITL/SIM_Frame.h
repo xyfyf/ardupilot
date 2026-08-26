@@ -52,6 +52,9 @@ public:
     void init(const char *frame_str, Battery *_battery);
 
     // calculate rotational and linear accelerations
+    // lagged ground-effect state, carried between simulation steps
+    float ground_effect_state = 0.0f;
+
     void calculate_forces(const Aircraft &aircraft,
                           const struct sitl_input &input,
                           Vector3f &rot_accel, Vector3f &body_accel, float* rpm,
@@ -134,13 +137,23 @@ private:
         float mdrag_coef = 0.2;
 
         // Near-ground rotor thrust augmentation.  These default to zero so
-        // existing models retain their current behaviour.  The gain is
-        // linearly faded from full strength at ground level to zero at
-        // ground_effect_height.  Positive vertical speed is down in NED.
-        float ground_effect_height = 0.0;
-        float ground_effect_collapse_height = 0.0;
-        float ground_effect_gain = 0.0;
-        float ground_effect_vspeed_gain = 0.0;
+        // existing models retain their current behaviour.
+        //
+        // Static part is Cheeseman-Bennett: T_IGE/T_OGE = 1/(1-(R/4z)^2),
+        // clamped by ground_effect_kmax because the closed form diverges as
+        // z approaches R/4.  Descending spoils the cushion, so the static
+        // value is scaled by 1/(1+(vz/ground_effect_vref)^2).
+        //
+        // The dynamic part matters more than the static one for touchdown:
+        // the induced flow field takes time to build and to collapse, so the
+        // cushion is a lagged state, not an instantaneous function of height.
+        // That lag is what lets a controller trim throttle down to an
+        // established cushion and then be caught out when it goes away.
+        float ground_effect_radius = 0.0;    // rotor radius, m; 0 = derive from disc area
+        float ground_effect_gain = 0.0;      // overall scale, 0 disables the model
+        float ground_effect_kmax = 0.6;      // clamp on (R/4z)^2
+        float ground_effect_vref = 0.0;      // descent speed that halves the cushion, m/s; 0 = no reduction
+        float ground_effect_tau = 0.15;      // induced-flow lag, s
 
         // Aerodynamic moments caused by translational airflow, in Nm per
         // m/s.  Components map lateral speed to roll, forward speed to
