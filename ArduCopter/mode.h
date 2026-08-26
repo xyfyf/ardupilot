@@ -1145,9 +1145,17 @@ public:
         VelAccel,
         Accel,
         Angle,
+        Arc,
     };
 
     SubMode submode() const { return guided_mode; }
+
+    // Fly a constant-speed circular arc, e.g. the U-turn between two spray
+    // lines.  Returns false without changing mode if the arc needs more lean
+    // than AC_ArcNav allows, in which case the caller should widen the radius
+    // or slow down.  See AC_ArcNav.h for why waypoints cannot hold speed here.
+    bool set_arc_destination(const Location& centre, float radius_m,
+                             float turns, float speed_ms);
 
     void angle_control_start();
     void angle_control_run();
@@ -1195,6 +1203,9 @@ private:
     // wp controller
     void wp_control_start();
     void wp_control_run();
+
+    // constant-speed circular arc
+    void arc_run();
 
     void pva_control_start();
     void pos_control_start();

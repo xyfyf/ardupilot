@@ -12,6 +12,11 @@ static Vector3f guided_vel_target_neu_ms;       // velocity target (used by pos_
 static Vector3f guided_accel_target_neu_mss;    // acceleration target (used by pos_vel_accel controller vel_accel controller and accel controller)
 static uint32_t update_time_ms;                 // system time of last target update to pos_vel_accel, vel_accel or accel controller
 
+// Constant-speed circular arc generator, used by SubMode::Arc.  It holds no
+// reference to the position controller; callers pass it in, which keeps the
+// construction order of the two independent.
+static AC_ArcNav guided_arc_nav;
+
 struct {
     uint32_t update_time_ms;
     Quaternion attitude_quat;
@@ -69,6 +74,10 @@ void ModeGuided::run()
     case SubMode::TakeOff:
         // run takeoff controller
         takeoff_run();
+        break;
+
+    case SubMode::Arc:
+        arc_run();
         break;
 
     case SubMode::WP:
@@ -198,6 +207,100 @@ void ModeGuided::wp_control_start()
 }
 
 // run guided mode's waypoint navigation controller
+// Fly a constant-speed circular arc.  Sized for the field U-turn between two
+// spray lines, where SCurve blending loses most of the working speed; see
+// AC_ArcNav.h.  Refuses arcs that need more lean than the budget allows rather
+// than accepting them and slowing down in the air.
+bool ModeGuided::set_arc_destination(const Location& centre, float radius_m,
+                                     float turns, float speed_ms)
+{
+    Vector2f centre_ne_m;
+    if (!centre.get_vector_xy_from_origin_NE_cm(centre_ne_m)) {
+        return false;
+    }
+    centre_ne_m *= 0.01f;   // the helper returns centimetres
+
+    // Start on the circle at the vehicle's current bearing from the centre, so
+    // the arc begins where the aircraft already is.
+    Vector2f pos_ne_m;
+    if (!AP::ahrs().get_relative_position_NE_origin_float(pos_ne_m)) {
+        return false;
+    }
+
+    if (!is_positive(speed_ms)) {
+        speed_ms = wp_nav->get_default_speed_NE_ms();
+    }
+    // Negative radius selects a clockwise arc, matching CIRCLE_RATE's sign
+    // convention.  turns is in revolutions: 0.5 is the half circle of a U-turn.
+    const float sweep_rad = radians(360.0f) * turns * (is_negative(radius_m) ? -1.0f : 1.0f);
+
+    // The arc holds a constant tangential speed from its first step, so it must
+    // be entered at that speed.  Entering slow leaves the reference running away
+    // from the vehicle, which shows up as lean angle saturation and a large
+    // speed loss - exactly what this generator exists to avoid.  Real use (the
+    // end of a spray leg flown at working speed) satisfies this naturally.
+    Vector3f vel_ne_ms_3d;
+    if (!AP::ahrs().get_velocity_NED(vel_ne_ms_3d)) {
+        return false;
+    }
+    const float entry_speed = vel_ne_ms_3d.xy().length();
+    if (entry_speed < speed_ms * 0.7f) {
+        gcs().send_text(MAV_SEVERITY_WARNING,
+                        "ArcNav: entry speed %.1f < required %.1f m/s",
+                        (double)entry_speed, (double)speed_ms);
+        return false;
+    }
+
+    if (!guided_arc_nav.set_arc(*pos_control, centre_ne_m, fabsf(radius_m), pos_ne_m, sweep_rad,
+                           speed_ms, pos_control->get_pos_desired_U_m())) {
+        return false;
+    }
+
+    // The position controller carries its own NE speed and acceleration limits,
+    // taken from WPNAV_*.  They are unrelated to the lean angle budget checked
+    // above, and WPNAV_ACCEL is typically well below what holding a circle
+    // needs: at 5 m/s on a 12 m radius the arc wants 2.08 m/s^2 while
+    // WPNAV_ACCEL defaults to 1.5.  Clamped there, the vehicle cannot hold the
+    // circle and sheds speed instead.  Raise the limits for the arc; leaving it
+    // hands them back to the WPNAV defaults.
+    const float accel_arc_mss = sq(speed_ms) / fabsf(radius_m);
+    pos_control->set_max_speed_accel_NE_m(speed_ms, accel_arc_mss * 1.2f);
+    pos_control->set_correction_speed_accel_NE_m(speed_ms, accel_arc_mss * 1.2f);
+
+    // Do not re-init the position controller: the vehicle is already flying
+    // under it, and resetting would throw away the velocity state the arc is
+    // meant to continue from.
+    guided_mode = SubMode::Arc;
+    return true;
+}
+
+// Feed the arc's position, velocity and acceleration to the position
+// controller.  Hands back to a plain position hold once the sweep completes.
+void ModeGuided::arc_run()
+{
+    if (!copter.failsafe.radio && use_pilot_yaw()) {
+        // let the pilot keep yaw authority during the turn
+    }
+
+    motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
+
+    if (!guided_arc_nav.update(*pos_control, pos_control->get_dt_s())) {
+        // finished, or never started: settle into a position hold at the exit
+        pos_control_start();
+        return;
+    }
+
+    pos_control->update_NE_controller();
+    pos_control->update_U_controller();
+
+    // point the nose along the track
+    const Vector2f vel = guided_arc_nav.exit_velocity_ne_ms();
+    attitude_control->input_thrust_vector_heading_rad(
+        pos_control->get_thrust_vector(),
+        atan2f(pos_control->get_vel_target_NEU_ms().y, pos_control->get_vel_target_NEU_ms().x));
+    (void)vel;
+}
+
 void ModeGuided::wp_control_run()
 {
     // if not armed set throttle to zero and exit immediately
@@ -421,6 +524,7 @@ bool ModeGuided::get_wp(Location& destination) const
     case SubMode::Pos:
         destination = Location(guided_pos_target_neu_m.tofloat(), guided_is_terrain_alt ? Location::AltFrame::ABOVE_TERRAIN : Location::AltFrame::ABOVE_ORIGIN);
         return true;
+    case SubMode::Arc:
     case SubMode::Angle:
     case SubMode::TakeOff:
     case SubMode::Accel:
@@ -1133,6 +1237,7 @@ float ModeGuided::wp_bearing_deg() const
         return degrees(get_bearing_rad(pos_control->get_pos_estimate_NEU_m().xy().tofloat(), guided_pos_target_neu_m.xy().tofloat()));
     case SubMode::PosVelAccel:
         return degrees(pos_control->get_bearing_to_target_rad());
+    case SubMode::Arc:
     case SubMode::TakeOff:
     case SubMode::Accel:
     case SubMode::VelAccel:
@@ -1149,6 +1254,7 @@ float ModeGuided::crosstrack_error_m() const
     switch (guided_mode) {
     case SubMode::WP:
         return wp_nav->crosstrack_error_m();
+    case SubMode::Arc:
     case SubMode::Pos:
     case SubMode::TakeOff:
     case SubMode::Accel:

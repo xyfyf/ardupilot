@@ -166,6 +166,9 @@ void GCS_MAVLINK_Copter::send_position_target_local_ned()
                     POSITION_TARGET_TYPEMASK_YAW_IGNORE| POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE; // ignore everything except position
         target_pos_neu_m = copter.mode_guided.get_target_pos_NEU_m().tofloat();
         break;
+    case ModeGuided::SubMode::Arc:
+        // the arc generator drives the position controller directly, so report
+        // the same triple as PosVelAccel
     case ModeGuided::SubMode::PosVelAccel:
         type_mask = POSITION_TARGET_TYPEMASK_YAW_IGNORE| POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE; // ignore everything except position, velocity & acceleration
         target_pos_neu_m = copter.mode_guided.get_target_pos_NEU_m().tofloat();
@@ -476,6 +479,40 @@ MAV_RESULT GCS_MAVLINK_Copter::handle_preflight_reboot(const mavlink_command_int
     return GCS_MAVLINK::handle_preflight_reboot(packet, msg);
 }
 
+// Fly a constant-speed circular arc about the given centre while in GUIDED.
+// This is the field U-turn between two spray lines: SCurve blending loses most
+// of the working speed over a radius of half the swath, see AC_ArcNav.h.
+//   param1  turns; 0.5 is the half circle of a U-turn
+//   param2  tangential speed m/s; 0 uses WPNAV_SPEED
+//   param3  radius m; negative selects a clockwise arc
+//   x, y    centre of the circle
+// Rejected if the arc would need more lean than the budget allows, so that an
+// unflyable turn is refused on the ground rather than flown slowly in the air.
+MAV_RESULT GCS_MAVLINK_Copter::handle_command_int_nav_loiter_turns(const mavlink_command_int_t &packet)
+{
+#if MODE_GUIDED_ENABLED
+    if (!copter.flightmode->in_guided_mode()) {
+        return MAV_RESULT_TEMPORARILY_REJECTED;
+    }
+    // COMMAND_INT carries lat/lng directly in x/y.  location_from_command_t()
+    // is for the commands listed in command_long_stores_location(), which this
+    // is not; and the altitude is irrelevant here because the arc holds the
+    // height the vehicle is already at.
+    Location centre;
+    centre.lat = packet.x;
+    centre.lng = packet.y;
+    if (centre.lat == 0 && centre.lng == 0) {
+        return MAV_RESULT_DENIED;
+    }
+    if (!copter.mode_guided.set_arc_destination(centre, packet.param3, packet.param1, packet.param2)) {
+        return MAV_RESULT_FAILED;
+    }
+    return MAV_RESULT_ACCEPTED;
+#else
+    return MAV_RESULT_UNSUPPORTED;
+#endif
+}
+
 MAV_RESULT GCS_MAVLINK_Copter::handle_command_int_do_reposition(const mavlink_command_int_t &packet)
 {
 #if MODE_GUIDED_ENABLED
@@ -570,6 +607,9 @@ MAV_RESULT GCS_MAVLINK_Copter::handle_command_int_packet(const mavlink_command_i
     case MAV_CMD_DO_WINCH:
         return handle_MAV_CMD_DO_WINCH(packet);
 #endif
+
+    case MAV_CMD_NAV_LOITER_TURNS:
+        return handle_command_int_nav_loiter_turns(packet);
 
     case MAV_CMD_NAV_LOITER_UNLIM:
         if (!copter.set_mode(Mode::Number::LOITER, ModeReason::GCS_COMMAND)) {

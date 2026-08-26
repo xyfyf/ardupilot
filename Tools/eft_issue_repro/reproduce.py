@@ -1137,6 +1137,90 @@ def run_uturn_guided(mon, swath=SWATH_M, speed=2.0, leg=SPRAY_LEG_M):
     return res
 
 
+def run_uturn_arcnav(mon, swath=SWATH_M, speed=2.0, leg=SPRAY_LEG_M):
+    """固件内的 AC_ArcNav：用 MAV_CMD_NAV_LOITER_TURNS 触发匀速圆弧。
+
+    与 uturn-guided 的区别是圆弧在飞控主循环里生成（400 Hz），不再依赖
+    伴飞机以 50 Hz 流设定点。参数映射见 handle_command_int_nav_loiter_turns：
+      param1 圈数(0.5=半圈)  param2 切向速度  param3 半径(负=顺时针)  x/y 圆心
+    """
+    alt = ROUTE_ALT_M
+    R = swath / 2.0
+    command_takeoff(mon, alt)
+    set_mode_wait(mon, "GUIDED", 15)
+    for _ in range(40):
+        mon.recv()
+
+    # 作业段用「位置+速度」的行进参考：位置以恒定速度前推，横向锁在 y=0。
+    # 只给速度会让横向自由漂移，圆弧起点就不在圆上；只给位置又会在终点减速停住，
+    # 而圆弧必须以切向速度切入。两者都要。
+    lat0, lon0 = HOME[0], HOME[1]
+    start = mon.sim_ms
+    while mon.sim_ms - start < 120000:
+        t = (mon.sim_ms - start) / 1000.0
+        mon.mav.mav.set_position_target_local_ned_send(
+            int(mon.sim_ms), mon.mav.target_system, mon.mav.target_component,
+            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+            0b0000110111000000,          # 位置 + 速度
+            speed * t, 0.0, -alt,   # 参考点不钳位：钳住会让飞机在终点前减速，切入圆弧时就慢了
+            speed, 0.0, 0.0, 0, 0, 0, 0, 0)
+        mon.recv()
+        if mon.local is not None and mon.local.x > leg - 0.8:
+            break
+
+    # 圆心在作业段终点向东半个行距处，扫 0.5 圈
+    c_lat, c_lon = ne_to_latlon(lat0, lon0, leg, R)
+    mon.mav.mav.command_int_send(
+        mon.mav.target_system, mon.mav.target_component,
+        mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+        mavutil.mavlink.MAV_CMD_NAV_LOITER_TURNS, 0, 0,
+        0.5, speed, R, 0,
+        int(c_lat * 1e7), int(c_lon * 1e7), alt)
+    ack = None
+    t0 = mon.sim_ms
+    while mon.sim_ms - t0 < 5000:
+        msg = mon.recv()
+        if msg is not None and msg.get_type() == "COMMAND_ACK" and \
+                msg.command == mavutil.mavlink.MAV_CMD_NAV_LOITER_TURNS:
+            ack = msg.result
+            break
+    print("  圆弧指令 ACK=%s（0=接受，4=被拒：所需倾角超预算）" % ack)
+    if ack != 0:
+        set_mode_wait(mon, "LAND")
+        wait_disarmed(mon, 120)
+        return {"accepted": False, "ack": ack, "swath_m": swath,
+                "target_speed_m_s": speed, "uturn_radius_m": R}
+
+    samples = []
+    t0 = mon.sim_ms
+    while mon.sim_ms - t0 < int(1.6 * math.pi * R / speed * 1000) + 4000:
+        mon.recv()
+        if mon.local is None:
+            continue
+        samples.append((math.hypot(mon.local.vx, mon.local.vy),
+                        target_tilt_deg(mon),
+                        math.hypot(mon.local.x - (leg), mon.local.y - R)))
+    set_mode_wait(mon, "LAND")
+    wait_disarmed(mon, 120)
+
+    # 稳态段：掐掉进入与退出各 15%
+    n = len(samples)
+    core = samples[int(n * 0.15):int(n * 0.85)] or samples
+    sps = [s[0] for s in core]
+    tilts = [s[1] for s in core if s[1] is not None]
+    radii = [s[2] for s in core]
+    res = {"accepted": True, "swath_m": swath, "uturn_radius_m": R,
+           "target_speed_m_s": speed,
+           "speed_min_m_s": min(sps), "speed_mean_m_s": sum(sps) / len(sps),
+           "speed_dip_pct": 100 * (1 - min(sps) / speed),
+           "tilt_max_deg": max(tilts) if tilts else None,
+           "flown_radius_mean_m": sum(radii) / len(radii)}
+    print("  固件圆弧：最低速 %.2f m/s（掉速 %.0f%%），实飞半径 %.2f m，指令倾角 max %.1f°"
+          % (res["speed_min_m_s"], res["speed_dip_pct"],
+             res["flown_radius_mean_m"], res["tilt_max_deg"] or 0))
+    return res
+
+
 def summarise_log(path):
     """从日志算 P02 的验收量。
 
@@ -1189,7 +1273,7 @@ def latest_log(out):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle", "fence", "route", "uturn", "uturn-guided"))
+    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle", "fence", "route", "uturn", "uturn-guided", "uturn-arcnav"))
     parser.add_argument("--baseline", action="store_true",
                         help="关闭新增物理项，跑默认物理模型对照")
     parser.add_argument("--speedup", type=float, default=2.0)
@@ -1239,6 +1323,8 @@ def main(argv=None):
             result.update(run_loiter_circle(mon))
         elif args.case == "fence":
             result.update(run_fence(mon))
+        elif args.case == "uturn-arcnav":
+            result.update(run_uturn_arcnav(mon, args.swath, args.speed))
         elif args.case == "uturn-guided":
             result.update(run_uturn_guided(mon, args.swath, args.speed))
         elif args.case == "uturn":
