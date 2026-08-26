@@ -121,11 +121,35 @@ protected:
     // remove_motor
     void                remove_motor(int8_t motor_num);
 
+    // Degrade the mixer after one motor has stopped.
+    //
+    // Without this the controller has no idea the motor is gone: it keeps
+    // commanding it, and then drives the opposite motor down to balance thrust
+    // that is not being produced.  Measured in SITL on a hexacopter, stopping
+    // one motor pushed its own command to the top of its range and the opposite
+    // motor to the bottom - one failure turned into two - and the vehicle rolled
+    // over and crashed 17 s later with the remaining motors nowhere near
+    // saturation.
+    //
+    // surrender_yaw drops yaw control entirely.  Five motors cannot satisfy
+    // roll, pitch, yaw and throttle at once - the allocation is rank deficient
+    // once the counter-rotating pairs stop matching - so yaw is the one to give
+    // up: the vehicle rotates but stays upright and can be flown down.
+    //
+    // Returns false if the motor number is invalid or already removed.  The
+    // change is not reversible, which matches the failure it models.
+    bool                set_motor_failed(uint8_t motor_num, bool surrender_yaw = true);
+
+    // motor removed by set_motor_failed(), or -1
+    int8_t              get_failed_motor() const { return _failed_motor; }
+
     // configures the motors for the defined frame_class and frame_type
     virtual void        setup_motors(motor_frame_class frame_class, motor_frame_type frame_type);
 
     // normalizes the roll, pitch and yaw factors so maximum magnitude is 0.5
     void                normalise_rpy_factors();
+
+    int8_t              _failed_motor = -1;
 
     // call vehicle supplied thrust compensation if set
     void                thrust_compensation(void) override;

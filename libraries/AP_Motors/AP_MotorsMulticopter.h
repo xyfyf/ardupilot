@@ -176,6 +176,10 @@ protected:
 
     // time to spool motors to min throttle
     AP_Float            _spool_up_time;
+
+    // Motor to treat as failed (1..N), 0 for none.  See
+    // AP_MotorsMatrix::set_motor_failed().
+    AP_Int8         _fail_motor_idx;
     AP_Float            _spool_down_time;
 
     // scaling for booster motor throttle

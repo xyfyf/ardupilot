@@ -15,6 +15,7 @@
 
 #include <AP_HAL/AP_HAL.h>
 #include "AP_MotorsMatrix.h"
+#include <GCS_MAVLink/GCS.h>
 #include <AP_Vehicle/AP_Vehicle_Type.h>
 
 extern const AP_HAL::HAL& hal;
@@ -212,6 +213,17 @@ float AP_MotorsMatrix::boost_ratio(float boost_value, float normal_value) const
 // includes new scaling stability patch
 void AP_MotorsMatrix::output_armed_stabilizing()
 {
+    // Act on a motor the detector (or a ground test) has flagged as failed.
+    // Done here rather than at the parameter write so it takes effect on the
+    // very next mixer pass, and only once - the degradation is not reversible.
+    const int8_t fail_idx = _fail_motor_idx.get();
+    if (fail_idx > 0 && _failed_motor < 0) {
+        if (set_motor_failed(uint8_t(fail_idx - 1))) {
+            gcs().send_text(MAV_SEVERITY_CRITICAL,
+                            "Motor %d failed: yaw surrendered", int(fail_idx));
+        }
+    }
+
     // apply voltage and air pressure compensation
     const float compensation_gain = thr_lin.get_compensation_gain(); // compensation for battery voltage and altitude
 
@@ -553,6 +565,34 @@ void AP_MotorsMatrix::remove_motor(int8_t motor_num)
         _yaw_factor[motor_num] = 0.0f;
         _throttle_factor[motor_num] = 0.0f;
     }
+}
+
+bool AP_MotorsMatrix::set_motor_failed(uint8_t motor_num, bool surrender_yaw)
+{
+    if (motor_num >= AP_MOTORS_MAX_NUM_MOTORS || !motor_enabled[motor_num]) {
+        return false;
+    }
+
+    remove_motor(motor_num);
+
+    if (surrender_yaw) {
+        // Zero every yaw factor, not just the failed motor's.  Leaving the
+        // others in place would have the mixer keep trying to produce a yaw
+        // moment it can no longer balance, and it would pay for that attempt
+        // out of the roll and pitch authority that is keeping the vehicle
+        // upright.
+        for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
+            _yaw_factor[i] = 0.0f;
+        }
+    }
+
+    // The remaining motors must be rescaled: with one contributor gone the
+    // surviving factors no longer span the same range, and without this the
+    // effective roll and pitch gains change underneath the attitude controller.
+    normalise_rpy_factors();
+
+    _failed_motor = motor_num;
+    return true;
 }
 
 void AP_MotorsMatrix::add_motors(const struct MotorDef *motors, uint8_t num_motors)

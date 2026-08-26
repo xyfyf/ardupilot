@@ -231,6 +231,13 @@ const AP_Param::GroupInfo AP_MotorsMulticopter::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("SPOOL_TIM_DN", 44, AP_MotorsMulticopter, _spool_down_time, 0),
 
+    // @Param: FAIL_IDX
+    // @DisplayName: Failed motor index
+    // @Description: Motor number (1 to 12) to treat as failed, or 0 for none. Setting this removes the motor from the mixer and surrenders yaw control - the degraded allocation a multirotor needs once a motor stops, since the remaining motors cannot satisfy roll, pitch, yaw and throttle at the same time. Without it the controller keeps commanding the dead motor and drives its opposite one down to balance thrust that is not there, turning one failure into two. Intended to be written by a failure detector; may also be set manually for ground testing. Not reversible in flight.
+    // @Range: 0 12
+    // @User: Advanced
+    AP_GROUPINFO("FAIL_IDX", 45, AP_MotorsMulticopter, _fail_motor_idx, 0),
+
     AP_GROUPEND
 };
 

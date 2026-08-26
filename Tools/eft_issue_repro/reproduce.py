@@ -1642,6 +1642,138 @@ def estimate_mag_yaw_offset_gps(path, declination_deg=None):
             "mag_gps_samples": len(rows)}
 
 
+def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False):
+    """P04：单个电机停转后的可控性。
+
+    注入用 `SIM_ENGINE_FAIL` + `SIM_ENGINE_MUL=0`，它缩放的是 servo PWM
+    输入（`SITL_State.cpp`），因此该电机的推力**与转速一起归零**——正是本轮
+    定义的「电机停转」，而不只是推力丢失。
+
+    六旋翼掉一个电机，推力其实是够的：50 kg 机悬停油门约 0.16，剩下五台各
+    出 0.16×6/5≈0.19，离饱和很远。真正丢掉的是**偏航配平**——失效电机的反
+    扭矩没有了对手，六台电机的正反桨不再成对抵消。所以这里重点量的不是掉高，
+    而是偏航是否失控、姿态还保不保得住。
+
+    motor 为 1..6（对应 SERVO1..6），内部转成 SIM_ENGINE_FAIL 的位掩码。
+    """
+    alt = ROUTE_ALT_M if alt is None else alt
+    command_takeoff(mon, alt)
+    set_mode_wait(mon, "GUIDED", 15)
+
+    # 悬停稳定后再注入，否则量到的是爬升瞬态而非失效响应
+    t0 = mon.sim_ms
+    while mon.sim_ms - t0 < 12000:
+        mon.recv()
+
+    pre = []
+    t0 = mon.sim_ms
+    while mon.sim_ms - t0 < 3000:
+        mon.recv()
+        if mon.local is not None:
+            pre.append(-mon.local.z)
+
+    fail_ms = mon.sim_ms
+    set_param(mon, "SIM_ENGINE_MUL", 0)
+    set_param(mon, "SIM_ENGINE_FAIL", 1 << (motor - 1))
+    if degrade:
+        # 同时告诉飞控哪台电机失效。真机上这一步由检测器完成；这里直接给出
+        # 答案，先把「降级混控本身管不管用」与「检测得准不准」两件事分开验证。
+        set_param(mon, "MOT_FAIL_IDX", motor)
+    print("  === 电机 %d 停转注入于 t=%.1fs ===" % (motor, fail_ms / 1000.0))
+
+    samples = []
+    while mon.sim_ms - fail_ms < watch_s * 1000:
+        mon.recv()
+        if mon.local is None:
+            continue
+        samples.append(((mon.sim_ms - fail_ms) / 1000.0, -mon.local.z,
+                        math.hypot(mon.local.vx, mon.local.vy)))
+        if not mon.armed:
+            break
+
+    res = {"failed_motor": motor, "alt_m": alt, "degraded_mixer": bool(degrade),
+           "fail_time_ms": fail_ms,
+           "alt_before_m": sum(pre) / len(pre) if pre else None,
+           "still_armed_after_watch": bool(mon.armed)}
+    if samples:
+        res["alt_min_after_fail_m"] = min(s[1] for s in samples)
+        res["alt_end_m"] = samples[-1][1]
+        res["horiz_drift_max_m_s"] = max(s[2] for s in samples)
+    # 失效后不再尝试正常降落：此时的可控性正是被测对象，强行切模式会掩盖结果
+    if mon.armed:
+        set_mode_wait(mon, "LAND")
+        wait_disarmed(mon, 120)
+    print("  掉高 %.1f m，水平漂移峰值 %.1f m/s，%s"
+          % ((res.get("alt_before_m") or 0) - (res.get("alt_min_after_fail_m") or 0),
+             res.get("horiz_drift_max_m_s", -1),
+             "仍在空中" if res["still_armed_after_watch"] else "已落地/坠毁"))
+    return res
+
+
+def summarise_motor_fail(path, fail_time_ms=None):
+    """量化失效后的可控性：偏航是否失控、姿态保不保得住、剩余电机是否饱和。"""
+    if not path or not os.path.exists(path):
+        return {}
+    from pymavlink import DFReader
+    m = DFReader.DFReader_binary(path)
+    att, rate, rcou, msgs = [], [], [], []
+    while True:
+        msg = m.recv_match(type=["ATT", "RATE", "RCOU", "MSG"])
+        if msg is None:
+            break
+        t = msg.TimeUS * 1e-6
+        typ = msg.get_type()
+        if typ == "ATT":
+            att.append((t, msg.Roll, msg.Pitch, msg.Yaw, msg.DesRoll, msg.DesPitch))
+        elif typ == "RATE":
+            rate.append((t, msg.Y))
+        elif typ == "RCOU":
+            rcou.append((t, [getattr(msg, "C%d" % i, 0) for i in range(1, 7)]))
+        elif typ == "MSG":
+            msgs.append((t, msg.Message))
+
+    # 失效时刻：优先用注入时刻，否则从「某路输出跌到最低」推断
+    t_fail = None
+    if fail_time_ms is not None and rcou:
+        # 日志时间与 mon.sim_ms 同源（都是启动后毫秒）
+        t_fail = fail_time_ms / 1000.0
+    if t_fail is None:
+        for t, ch in rcou:
+            if min(ch) < 1050 and max(ch) > 1200:
+                t_fail = t
+                break
+    if t_fail is None:
+        return {"motor_fail_note": "无法定位失效时刻"}
+
+    win = [a for a in att if t_fail <= a[0] <= t_fail + 20]
+    if len(win) < 50:
+        return {"motor_fail_note": "失效后样本不足"}
+
+    roll_err = [abs(a[1] - a[4]) for a in win]
+    pitch_err = [abs(a[2] - a[5]) for a in win]
+    yr = [abs(r[1]) for r in rate if t_fail <= r[0] <= t_fail + 20]
+    ch_win = [c for t, c in rcou if t_fail <= t <= t_fail + 20]
+    sat = 0
+    if ch_win:
+        # 剩余电机是否顶到上限：饱和意味着推力已经不够，掉高不可避免
+        sat = sum(1 for ch in ch_win if max(ch) >= 1990) / len(ch_win)
+
+    # 内置推力丢失检测的触发延迟
+    det = None
+    for t, s in msgs:
+        if "Thrust Loss" in s and t >= t_fail:
+            det = t - t_fail
+            break
+
+    return {"fail_t_s": round(t_fail, 2),
+            "detect_delay_s": round(det, 2) if det is not None else None,
+            "roll_err_max_deg": round(max(roll_err), 2),
+            "pitch_err_max_deg": round(max(pitch_err), 2),
+            "yaw_rate_max_degs": round(max(yr), 1) if yr else None,
+            "yaw_rate_mean_degs": round(sum(yr) / len(yr), 1) if yr else None,
+            "motor_saturation_frac": round(sat, 3)}
+
+
 def run_yaw_step(mon, alt=None):
     """偏航阶跃辨识：测这架飞机**实际可用**的偏航速率，而不是参数限幅值。
 
@@ -1801,7 +1933,7 @@ def latest_log(out):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle", "fence", "route", "uturn", "uturn-guided", "uturn-arcnav", "uturn-auto", "yaw-step", "mag-align"))
+    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle", "fence", "route", "uturn", "uturn-guided", "uturn-arcnav", "uturn-auto", "yaw-step", "mag-align", "motor-fail"))
     parser.add_argument("--baseline", action="store_true",
                         help="关闭新增物理项，跑默认物理模型对照")
     parser.add_argument("--speedup", type=float, default=2.0)
@@ -1812,6 +1944,10 @@ def main(argv=None):
     parser.add_argument("--variant", help="结果里记录的变体名，例如 baseline-algo / candidate-algo")
     parser.add_argument("--turn-offset", type=float, default=ROUTE_TURN_OFFSET_M,
                         help="route 场景的掉头连接段长度（米），用于分辨掉速是几何还是限幅所致")
+    parser.add_argument("--degrade", action="store_true",
+                        help="失效同时写 MOT_FAIL_IDX，启用降级混控（剔除失效电机并放弃偏航）")
+    parser.add_argument("--motor", type=int, default=3,
+                        help="motor-fail 场景中停转的电机编号 1..6")
     parser.add_argument("--model-set", action="append", metavar="KEY=VALUE",
                         help="覆盖物理模型参数（eft_hexa.json 的键），可重复；"
                              "例如 --model-set vrs_gain=0.25")
@@ -1867,6 +2003,8 @@ def main(argv=None):
             result.update(run_fence(mon))
         elif args.case == "uturn-auto":
             result.update(run_uturn_auto(mon, args.swath, turns=args.turns))
+        elif args.case == "motor-fail":
+            result.update(run_motor_fail(mon, args.motor, degrade=args.degrade))
         elif args.case == "mag-align":
             result.update(run_mag_align(mon))
         elif args.case == "yaw-step":
@@ -1894,6 +2032,9 @@ def main(argv=None):
     result["metrics"] = summarise_log(result["dataflash_log"])
     if args.case == "yaw-step":
         result["metrics"].update(summarise_yaw_step(result["dataflash_log"]))
+    if args.case == "motor-fail":
+        result["metrics"].update(summarise_motor_fail(result["dataflash_log"],
+                                                     result.get("fail_time_ms")))
     if args.case == "mag-align":
         result["metrics"].update(summarise_mag_align(result["dataflash_log"]))
         result["metrics"].update(estimate_mag_yaw_offset_gps(result["dataflash_log"]))
