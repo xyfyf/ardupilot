@@ -1805,7 +1805,12 @@ bool ModeAuto::set_next_wp(const AP_Mission::Mission_Command& current_cmd, const
     case MAV_CMD_NAV_LAND:
         // stop because we may change between rel,abs and terrain alt types
     case MAV_CMD_NAV_LOITER_TURNS:
-        if (next_cmd.get_loiter_turns() <= AUTO_ARC_MAX_TURNS) {
+        // Test the id explicitly: the land cases above fall through to here, so
+        // reading their p1 as a turn count would send a landing down the
+        // coordinated-turn path and hand wp_nav a destination derived from the
+        // landing point.
+        if (next_cmd.id == MAV_CMD_NAV_LOITER_TURNS &&
+            next_cmd.get_loiter_turns() <= AUTO_ARC_MAX_TURNS) {
             // A coordinated turn has to be entered at working speed, so the leg
             // before it must not decelerate into its own endpoint.  Handing
             // wp_nav a point further along the arc's entry tangent makes the
