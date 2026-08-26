@@ -76,6 +76,14 @@ Vector2f AC_ArcNav::exit_position_ne_m() const
     return position_at_rad(_start_angle_rad + _direction * _sweep_rad);
 }
 
+float AC_ArcNav::track_heading_rad() const
+{
+    const float angle = _start_angle_rad + _direction * _travelled_rad;
+    const Vector2f tangent{-sinf(angle) * _direction, cosf(angle) * _direction};
+    // heading is measured from north toward east
+    return atan2f(tangent.y, tangent.x);
+}
+
 Vector2f AC_ArcNav::exit_velocity_ne_ms() const
 {
     const float a = _start_angle_rad + _direction * _sweep_rad;

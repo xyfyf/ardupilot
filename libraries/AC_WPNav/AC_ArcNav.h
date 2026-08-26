@@ -98,6 +98,16 @@ public:
     /// Tangential speed the arc was set up to hold.
     float commanded_speed_ms() const { return _speed_ms; }
 
+    /// Heading the tangent points along at the current position, radians NED.
+    /// Keeping the nose on this is what "fly the track heading" means on an arc.
+    float track_heading_rad() const;
+
+    /// Rate the tangent rotates at, rad/s, signed by the direction of travel.
+    /// The vehicle must be able to yaw at least this fast to hold the nose on
+    /// the track: omega = v / r.  On a tight, slow arc this binds before the
+    /// lean angle does, so callers should check it against their yaw rate limit.
+    float track_heading_rate_rads() const { return _direction * _speed_ms / MAX(_radius_m, 0.01f); }
+
     void stop() { _active = false; }
 
 private:

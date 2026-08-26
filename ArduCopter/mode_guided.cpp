@@ -256,6 +256,20 @@ bool ModeGuided::set_arc_destination(const Location& centre, float radius_m,
         return false;
     }
 
+    // Holding the nose on the track means yawing at the rate the tangent turns,
+    // omega = v / r.  On a tight, slow arc that binds before the lean angle
+    // does: 2 m/s on a 2 m radius needs 57 deg/s while ATC_RATE_Y_MAX often
+    // sits at 50.  Refuse rather than fly the turn with the nose off the track.
+    const float yaw_rate_needed = fabsf(guided_arc_nav.track_heading_rate_rads());
+    const float yaw_rate_max = attitude_control->get_slew_yaw_max_rads();
+    if (is_positive(yaw_rate_max) && yaw_rate_needed > yaw_rate_max * 0.8f) {
+        gcs().send_text(MAV_SEVERITY_WARNING,
+                        "ArcNav: needs %.0f deg/s yaw, limit %.0f",
+                        (double)degrees(yaw_rate_needed), (double)degrees(yaw_rate_max));
+        guided_arc_nav.stop();
+        return false;
+    }
+
     // The position controller carries its own NE speed and acceleration limits,
     // taken from WPNAV_*.  They are unrelated to the lean angle budget checked
     // above, and WPNAV_ACCEL is typically well below what holding a circle
@@ -302,24 +316,28 @@ void ModeGuided::arc_run()
     // @Field: Spd: horizontal speed
     // @Field: Tgt: commanded tangential speed
     // @Field: PErr: horizontal position error
+    // @Field: HdgE: heading error against the track tangent, degrees
     Vector3f arc_vel_ne;
     IGNORE_RETURN(AP::ahrs().get_velocity_NED(arc_vel_ne));
-    AP::logger().WriteStreaming("ARCN", "TimeUS,Prog,Gov,Spd,Tgt,PErr",
-                                "s-----", "F-----", "Qfffff",
+    AP::logger().WriteStreaming("ARCN", "TimeUS,Prog,Gov,Spd,Tgt,PErr,HdgE",
+                                "s-----d", "F------", "Qffffff",
                                 AP_HAL::micros64(),
                                 guided_arc_nav.progress(),
                                 guided_arc_nav.dt_scalar(),
                                 arc_vel_ne.xy().length(),
                                 guided_arc_nav.commanded_speed_ms(),
-                                pos_control->get_pos_error_NE_m());
+                                pos_control->get_pos_error_NE_m(),
+                                degrees(wrap_PI(guided_arc_nav.track_heading_rad() - AP::ahrs().get_yaw_rad())));
 #endif
 
-    // point the nose along the track
-    const Vector2f vel = guided_arc_nav.exit_velocity_ne_ms();
+    // Point the nose along the track, and feed forward the rate the tangent is
+    // turning at.  Without the rate term the heading lags the tangent all the
+    // way round, which is exactly what "keep the nose on the velocity vector"
+    // must not do.
     attitude_control->input_thrust_vector_heading_rad(
         pos_control->get_thrust_vector(),
-        atan2f(pos_control->get_vel_target_NEU_ms().y, pos_control->get_vel_target_NEU_ms().x));
-    (void)vel;
+        guided_arc_nav.track_heading_rad(),
+        guided_arc_nav.track_heading_rate_rads());
 }
 
 void ModeGuided::wp_control_run()
