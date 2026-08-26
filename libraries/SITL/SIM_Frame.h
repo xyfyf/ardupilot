@@ -155,6 +155,11 @@ private:
         float ground_effect_vref = 0.0;      // descent speed that halves the cushion, m/s; 0 = no reduction
         float ground_effect_tau = 0.15;      // induced-flow lag, s
 
+        // Motor speed at full command, rev/min, used to feed ESC telemetry.
+        // Zero falls back to the old behaviour (rpm derived from the vibration
+        // parameter, and reported as zero when that is off).
+        float max_rpm = 0.0;
+
         // Vortex ring state.  Zero disables it, which is the default so that
         // existing models keep their behaviour; set vrs_gain to switch the
         // descent regime on.  See Motor::calc_thrust for the model.

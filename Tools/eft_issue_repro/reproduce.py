@@ -1642,7 +1642,7 @@ def estimate_mag_yaw_offset_gps(path, declination_deg=None):
             "mag_gps_samples": len(rows)}
 
 
-def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False):
+def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False, detect=False):
     """P04：单个电机停转后的可控性。
 
     注入用 `SIM_ENGINE_FAIL` + `SIM_ENGINE_MUL=0`，它缩放的是 servo PWM
@@ -1657,6 +1657,11 @@ def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False):
     motor 为 1..6（对应 SERVO1..6），内部转成 SIM_ENGINE_FAIL 的位掩码。
     """
     alt = ROUTE_ALT_M if alt is None else alt
+    if detect:
+        # 只打开检测器，不告诉它哪台电机会失效——这才是真机上的情形
+        set_param(mon, "MOT_FAIL_RPM", 300)
+        set_param(mon, "MOT_FAIL_TIME", 200)
+        set_param(mon, "MOT_FAIL_THST", 0.15)
     command_takeoff(mon, alt)
     set_mode_wait(mon, "GUIDED", 15)
 
@@ -1691,7 +1696,7 @@ def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False):
         if not mon.armed:
             break
 
-    res = {"failed_motor": motor, "alt_m": alt, "degraded_mixer": bool(degrade),
+    res = {"failed_motor": motor, "alt_m": alt, "degraded_mixer": bool(degrade), "detector_on": bool(detect),
            "fail_time_ms": fail_ms,
            "alt_before_m": sum(pre) / len(pre) if pre else None,
            "still_armed_after_watch": bool(mon.armed)}
@@ -1944,6 +1949,8 @@ def main(argv=None):
     parser.add_argument("--variant", help="结果里记录的变体名，例如 baseline-algo / candidate-algo")
     parser.add_argument("--turn-offset", type=float, default=ROUTE_TURN_OFFSET_M,
                         help="route 场景的掉头连接段长度（米），用于分辨掉速是几何还是限幅所致")
+    parser.add_argument("--detect", action="store_true",
+                        help="打开基于转速的停转检测器，由它自己发现失效电机")
     parser.add_argument("--degrade", action="store_true",
                         help="失效同时写 MOT_FAIL_IDX，启用降级混控（剔除失效电机并放弃偏航）")
     parser.add_argument("--motor", type=int, default=3,
@@ -2004,7 +2011,7 @@ def main(argv=None):
         elif args.case == "uturn-auto":
             result.update(run_uturn_auto(mon, args.swath, turns=args.turns))
         elif args.case == "motor-fail":
-            result.update(run_motor_fail(mon, args.motor, degrade=args.degrade))
+            result.update(run_motor_fail(mon, args.motor, degrade=args.degrade, detect=args.detect))
         elif args.case == "mag-align":
             result.update(run_mag_align(mon))
         elif args.case == "yaw-step":

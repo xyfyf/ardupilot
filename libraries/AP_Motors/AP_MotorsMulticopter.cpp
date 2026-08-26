@@ -238,6 +238,29 @@ const AP_Param::GroupInfo AP_MotorsMulticopter::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("FAIL_IDX", 45, AP_MotorsMulticopter, _fail_motor_idx, 0),
 
+    // @Param: FAIL_RPM
+    // @DisplayName: Stopped motor rpm threshold
+    // @Description: A motor commanded above MOT_FAIL_THST but turning slower than this for MOT_FAIL_TIME is treated as stopped, and the mixer degrades via MOT_FAIL_IDX. Requires working ESC rpm telemetry. Set to 0 to disable detection. Detects a stopped motor only: a thrown propeller leaves the motor spinning faster, not slower, so it is not covered here.
+    // @Units: rpm
+    // @Range: 0 3000
+    // @User: Advanced
+    AP_GROUPINFO("FAIL_RPM", 46, AP_MotorsMulticopter, _fail_rpm_min, 0),
+
+    // @Param: FAIL_TIME
+    // @DisplayName: Stopped motor confirmation time
+    // @Description: How long a motor must stay below MOT_FAIL_RPM before it is declared failed. Too short risks acting on a telemetry dropout; too long delays the degraded mixer that keeps the vehicle upright.
+    // @Units: ms
+    // @Range: 50 1000
+    // @User: Advanced
+    AP_GROUPINFO("FAIL_TIME", 47, AP_MotorsMulticopter, _fail_time_ms, 200),
+
+    // @Param: FAIL_THST
+    // @DisplayName: Stopped motor detection thrust threshold
+    // @Description: Only check a motor for being stopped while it is commanded above this thrust fraction. Below it a low rpm is expected rather than a fault, and checking anyway would fire on every descent and disarm.
+    // @Range: 0 1
+    // @User: Advanced
+    AP_GROUPINFO("FAIL_THST", 48, AP_MotorsMulticopter, _fail_thrust_min, 0.15),
+
     AP_GROUPEND
 };
 

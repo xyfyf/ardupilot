@@ -180,6 +180,11 @@ protected:
     // Motor to treat as failed (1..N), 0 for none.  See
     // AP_MotorsMatrix::set_motor_failed().
     AP_Int8         _fail_motor_idx;
+
+    // rpm-based stopped-motor detection
+    AP_Float        _fail_rpm_min;
+    AP_Int16        _fail_time_ms;
+    AP_Float        _fail_thrust_min;
     AP_Float            _spool_down_time;
 
     // scaling for booster motor throttle

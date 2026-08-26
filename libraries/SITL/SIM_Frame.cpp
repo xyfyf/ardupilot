@@ -481,6 +481,7 @@ void Frame::load_frame_params(const char *model_json)
         FRAME_VAR(ground_effect_kmax),
         FRAME_VAR(ground_effect_vref),
         FRAME_VAR(ground_effect_tau),
+        FRAME_VAR(max_rpm),
         FRAME_VAR(vrs_gain),
         FRAME_VAR(vrs_peak),
         FRAME_VAR(vrs_width),
@@ -662,8 +663,23 @@ void Frame::calculate_forces(const Aircraft &aircraft,
         motors[i].calculate_forces(input, motor_offset, mtorque, mthrust, vel_air_bf, gyro, air_density, battery->get_voltage(), use_drag);
         torque += mtorque;
         thrust += mthrust;
-        // simulate motor rpm
-        if (!is_zero(_sitl->vibe_motor)) {
+        // Simulate motor rpm for ESC telemetry.
+        //
+        // This used to be computed only when vibration simulation was enabled,
+        // so with the default SIM_VIB_MOT_MAX of zero the ESC telemetry
+        // reported zero rpm on every motor - which makes any rpm-based failure
+        // detection impossible to exercise in SITL, and reads as "all motors
+        // stopped" to anything that looks. Rotor speed has nothing to do with
+        // vibration modelling, so give it its own model parameter.
+        //
+        // Speed follows the outflow velocity rather than the command directly,
+        // for the same reason calc_thrust does: the throttle curve is not
+        // linear in command.
+        if (is_positive(model.max_rpm)) {
+            const float cmd = motors[i].get_command();
+            rpm[motor_offset+i] = model.max_rpm *
+                safe_sqrt((1.0f - model.propExpo) * cmd + model.propExpo * sq(cmd));
+        } else if (!is_zero(_sitl->vibe_motor)) {
             rpm[motor_offset+i] = motors[i].get_command() * AP::sitl()->vibe_motor * 60.0f;
         }
     }

@@ -143,6 +143,12 @@ protected:
     // motor removed by set_motor_failed(), or -1
     int8_t              get_failed_motor() const { return _failed_motor; }
 
+    // Watch ESC rpm for a motor that has stopped, and degrade the mixer when
+    // one is confirmed.  Detects a stopped motor only: a thrown propeller
+    // leaves the motor spinning *faster* under no load, so it shows up as
+    // over-speed rather than under-speed and is deliberately out of scope here.
+    void                update_failure_detection();
+
     // configures the motors for the defined frame_class and frame_type
     virtual void        setup_motors(motor_frame_class frame_class, motor_frame_type frame_type);
 
@@ -150,6 +156,9 @@ protected:
     void                normalise_rpy_factors();
 
     int8_t              _failed_motor = -1;
+
+    // seconds each motor has been commanded but not turning
+    float               _fail_timer_s[AP_MOTORS_MAX_NUM_MOTORS];
 
     // call vehicle supplied thrust compensation if set
     void                thrust_compensation(void) override;

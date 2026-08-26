@@ -16,6 +16,7 @@
 #include <AP_HAL/AP_HAL.h>
 #include "AP_MotorsMatrix.h"
 #include <GCS_MAVLink/GCS.h>
+#include <AP_ESC_Telem/AP_ESC_Telem.h>
 #include <AP_Vehicle/AP_Vehicle_Type.h>
 
 extern const AP_HAL::HAL& hal;
@@ -213,6 +214,8 @@ float AP_MotorsMatrix::boost_ratio(float boost_value, float normal_value) const
 // includes new scaling stability patch
 void AP_MotorsMatrix::output_armed_stabilizing()
 {
+    update_failure_detection();
+
     // Act on a motor the detector (or a ground test) has flagged as failed.
     // Done here rather than at the parameter write so it takes effect on the
     // very next mixer pass, and only once - the degradation is not reversible.
@@ -565,6 +568,62 @@ void AP_MotorsMatrix::remove_motor(int8_t motor_num)
         _yaw_factor[motor_num] = 0.0f;
         _throttle_factor[motor_num] = 0.0f;
     }
+}
+
+void AP_MotorsMatrix::update_failure_detection()
+{
+#if HAL_WITH_ESC_TELEM
+    // One degradation per flight: the change is irreversible, and a second
+    // pass could only remove a motor the vehicle still needs.
+    if (_failed_motor >= 0 || !is_positive(_fail_rpm_min) || !armed()) {
+        return;
+    }
+
+    const float dt = get_dt_s();
+    const float confirm_s = MAX(_fail_time_ms.get(), 0) * 0.001f;
+    AP_ESC_Telem &telem = AP::esc_telem();
+
+    uint8_t suspect_count = 0;
+    int8_t suspect = -1;
+
+    for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
+        if (!motor_enabled[i]) {
+            continue;
+        }
+        float rpm;
+        // A motor coasting at low command is expected to turn slowly, so only
+        // judge one that is actually being asked for thrust.  Without this the
+        // check would fire on every descent and on every disarm.
+        if (_thrust_rpyt_out[i] < _fail_thrust_min ||
+            !telem.get_rpm(i, rpm)) {
+            _fail_timer_s[i] = 0.0f;
+            continue;
+        }
+        if (rpm < _fail_rpm_min) {
+            _fail_timer_s[i] += dt;
+            if (_fail_timer_s[i] >= confirm_s) {
+                suspect_count++;
+                suspect = i;
+            }
+        } else {
+            _fail_timer_s[i] = 0.0f;
+        }
+    }
+
+    if (suspect_count == 1) {
+        if (set_motor_failed(uint8_t(suspect))) {
+            gcs().send_text(MAV_SEVERITY_CRITICAL,
+                            "Motor %d stopped: yaw surrendered", int(suspect) + 1);
+        }
+    } else if (suspect_count > 1) {
+        // Several motors reading stopped at once is far more likely to be the
+        // telemetry link or a channel mapping error than a simultaneous
+        // multiple failure - and removing motors on that basis would cause the
+        // crash it is meant to prevent.  Warn, do not act.
+        gcs().send_text(MAV_SEVERITY_WARNING,
+                        "Motor: %u read stopped, check ESC telem", suspect_count);
+    }
+#endif // HAL_WITH_ESC_TELEM
 }
 
 bool AP_MotorsMatrix::set_motor_failed(uint8_t motor_num, bool surrender_yaw)
