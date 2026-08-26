@@ -24,8 +24,8 @@
 
   双电串联（E616）：
     BATT  = 脚本输出（MONITOR=29）
-    BATT2 = UAVCAN 电池 A，battery.id=1
-    BATT3 = UAVCAN 电池 B，battery.id=2
+    BATT2 = 自动绑定第一块 UAVCAN 电池（不限定 battery.id / CAN node ID）
+    BATT3 = 自动绑定第二块 UAVCAN 电池（不限定 battery.id / CAN node ID）
     BATT4 = ADC 分压备用（MONITOR=3，pin=10，MULT=31）
 
   BATT2/3/4 设 INTERNAL_ONLY(256)，不向地面站 MAVLink 上报 BATTERY_STATUS，
@@ -60,7 +60,7 @@
     1) 脚本放入 APM/scripts/（或 ROMFS 内置；仅 EFT_CAAC 固件编进 ROMFS）
     2) SCR_ENABLE = 1
     3) 产线须先写入 SN_PROD；与 dynamic_model_params.lua 可并行运行
-    4) 双电时 CAN 电池端 battery.id 分别设为 1 和 2
+    4) 双电无需固定 battery.id 或 CAN node ID，后端按收到的不同节点自动绑定
     5) 首次改 MONITOR 类型后重启飞控
 --]]
 
@@ -104,6 +104,19 @@ local wait_reboot_announced = false
 local uavcan_off_announced = false
 local uavcan_missing_ms = nil
 local UAVCAN_OFF_DELAY_MS = 15000
+local boot_state = "detect"  -- detect | apply | wait_backends | run
+
+local function required_instances()
+    -- Dual: script + 2x UAVCAN (ADC fallback is optional, may be instance 3)
+    if is_two then
+        return 3
+    end
+    -- Single: script + UAVCAN or ADC
+    if USE_UAVCAN_ONE then
+        return 2
+    end
+    return 2
+end
 
 local function battery_instance_ok(idx)
     return idx < battery:num_instances()
@@ -142,10 +155,6 @@ local function battery_get_temperature(idx)
         return nil
     end
     return battery:get_temperature(idx)
-end
-
-local function required_instances()
-    return ADC_IDX + 1
 end
 
 local function backends_ready()
@@ -238,7 +247,7 @@ local function detect_mode()
     return nil
 end
 
-local function apply_params_one()
+local function apply_params_one(quiet)
     local capacity = param:get("BATT_CAPACITY") or 22000
     local changed = false
 
@@ -279,15 +288,17 @@ local function apply_params_one()
     changed = set_param("BATT4_MONITOR", 0) or changed
     ensure_adc_scale()
 
-    if changed then
-        gcs:send_text(4, "BATT one: params saved, reboot if MONITOR changed")
-    else
-        gcs:send_text(6, "BATT one: params ok")
+    if not quiet then
+        if changed then
+            gcs:send_text(4, "BATT one: params saved, reboot if MONITOR changed")
+        else
+            gcs:send_text(6, "BATT one: params ok")
+        end
     end
     return changed
 end
 
-local function apply_params_two()
+local function apply_params_two(quiet)
     local capacity = param:get("BATT_CAPACITY") or 22000
     local changed = false
 
@@ -302,14 +313,16 @@ local function apply_params_two()
     changed = set_param("BATT_ARM_VOLT", 0) or changed
 
     changed = set_param("BATT2_MONITOR", 8) or changed
-    changed = set_param("BATT2_SERIAL_NUM", 1) or changed
+    -- -1 accepts any battery_id; DroneCAN binds this backend to the first free CAN node
+    changed = set_param("BATT2_SERIAL_NUM", -1) or changed
     changed = set_param("BATT2_CAPACITY", capacity) or changed
     changed = set_param("BATT2_LOW_VOLT", 0) or changed
     changed = set_param("BATT2_CRT_VOLT", 0) or changed
     changed = set_param("BATT2_OPTIONS", INTERNAL_ONLY) or changed
 
     changed = set_param("BATT3_MONITOR", 8) or changed
-    changed = set_param("BATT3_SERIAL_NUM", 2) or changed
+    -- the next distinct CAN node is assigned to the second free backend
+    changed = set_param("BATT3_SERIAL_NUM", -1) or changed
     changed = set_param("BATT3_CAPACITY", capacity) or changed
     changed = set_param("BATT3_LOW_VOLT", 0) or changed
     changed = set_param("BATT3_CRT_VOLT", 0) or changed
@@ -321,10 +334,12 @@ local function apply_params_two()
     changed = set_param("BATT4_OPTIONS", INTERNAL_ONLY) or changed
     ensure_adc_scale()
 
-    if changed then
-        gcs:send_text(4, "BATT two: params saved, reboot if MONITOR changed")
-    else
-        gcs:send_text(6, "BATT two: params ok")
+    if not quiet then
+        if changed then
+            gcs:send_text(4, "BATT two: params saved, reboot if MONITOR changed")
+        else
+            gcs:send_text(6, "BATT two: params ok")
+        end
     end
     return changed
 end
@@ -490,36 +505,47 @@ local function boot()
         return idle, 5000
     end
 
-    local ok = detect_mode()
-    if ok == nil then
-        return boot, 5000
-    end
-
-    local changed
-    if is_two then
-        changed = apply_params_two()
-    else
-        changed = apply_params_one()
-    end
-
-    if changed or not backends_ready() then
-        if not wait_reboot_announced then
-            if changed then
-                gcs:send_text(4, "BATT: reboot required for MONITOR setup")
-            else
-                gcs:send_text(4, string.format("BATT: waiting backends %d/%d",
-                    battery:num_instances(), required_instances()))
-            end
-            wait_reboot_announced = true
+    if boot_state == "detect" then
+        local ok = detect_mode()
+        if ok == nil then
+            return boot, 5000
         end
-        return boot, 5000
+        boot_state = "apply"
+    end
+
+    if boot_state == "apply" then
+        local changed
+        if is_two then
+            changed = apply_params_two(false)
+        else
+            changed = apply_params_one(false)
+        end
+        if changed then
+            gcs:send_text(4, "BATT: reboot required for MONITOR setup")
+            boot_state = "wait_backends"
+            wait_reboot_announced = true
+            return boot, 5000
+        end
+        boot_state = "wait_backends"
+    end
+
+    if boot_state == "wait_backends" then
+        if not backends_ready() then
+            if not wait_reboot_announced then
+                gcs:send_text(4, string.format("BATT: waiting backends %d/%d (reboot if MONITOR changed)",
+                    battery:num_instances(), required_instances()))
+                wait_reboot_announced = true
+            end
+            return boot, 5000
+        end
+        boot_state = "run"
     end
 
     wait_reboot_announced = false
     if is_two then
-        return update_two, 1000
+        return update_two, 200
     end
-    return update_one, 1000
+    return update_one, 200
 end
 
 local function idle()
@@ -528,8 +554,10 @@ local function idle()
         uavcan_off_announced = false
         uavcan_missing_ms = nil
         last_mode = MODE_NONE
+        boot_state = "detect"
         return boot, 5000
     end
+    boot_state = "detect"
     return idle, 5000
 end
 

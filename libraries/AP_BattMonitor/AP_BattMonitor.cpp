@@ -1066,7 +1066,15 @@ bool AP_BattMonitor::arming_checks(size_t buflen, char *buffer) const
     for (uint8_t i = 0; i < AP_BATT_MONITOR_MAX_INSTANCES; i++) {
         const auto expected_type = configured_type(i);
 
-        if (drivers[i] == nullptr && expected_type == Type::NONE) {
+        if (expected_type == Type::NONE) {
+            continue;
+        }
+
+        // Internal-only monitors are inputs to another battery backend (for
+        // example UAVCAN batteries merged by a scripting backend). The
+        // resulting battery backend is responsible for the arming check.
+        if ((_params[i]._options.get() &
+             uint16_t(AP_BattMonitor_Params::Options::InternalUseOnly)) != 0) {
             continue;
         }
 
