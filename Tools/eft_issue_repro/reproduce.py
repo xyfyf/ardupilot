@@ -8,6 +8,7 @@
   loiter-circle  LOITER 杆量画圈：同上四档，但无 AC_Circle 自限速，可打到饱和
   fence    圆形围栏接近：逐档撞边界，量实际余量与冲出量
   route    AUTO 作业航线：直线段 + 180° 掉头 + 密集航点，量速度波动与回线误差
+  uturn    田间 U 型转弯：两条作业段 + 外场 U 转，量转弯耗时与进入下条线的建立距离
 
 默认启用自定义机型中的近地增升与速度相关气动力矩。加 --baseline 可把这
 两项归零，用同一场景做 A/B，确认现象来自物理项而不是脚本本身。
@@ -237,7 +238,11 @@ def upload_mission(mon, items):
             mon.mav.mav.mission_item_int_send(
                 mav.target_system, mav.target_component, seq,
                 mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
-                command, 0, 1, 0, 0, 0, float("nan"),
+                command, 0, 1, 0, 0, 0,
+                # NAV_WAYPOINT 的 param4 是航向，NaN 表示沿用默认；但样条航点
+                # 不接受 NaN（AP 会回 MISSION_ACK=9 INVALID_PARAM4），必须给 0。
+                (0.0 if command == mavutil.mavlink.MAV_CMD_NAV_SPLINE_WAYPOINT
+                 else float("nan")),
                 int(round(lat * 1e7)), int(round(lon * 1e7)), alt,
                 mavutil.mavlink.MAV_MISSION_TYPE_MISSION)
             sent.add(seq)
@@ -857,6 +862,170 @@ def summarise_route(samples):
     return out
 
 
+# P06/P07 交汇：田间 U 型转弯。直线段是作业喷洒段，U 型转弯在外场、不喷洒。
+# 因此掉速本身不产生重喷，真正的代价是：
+#   一、U 转耗时 → 作业效率（亩/小时）
+#   二、退出 U 转后进入下一条作业线的建立距离 → 每条线开头有多长是废的
+SPRAY_LEG_M = 60.0          # 作业段长度
+SWATH_M = 5.0               # 行距（喷幅），决定 U 转半径 = SWATH/2
+# 跑道式 U 转的顶点正好在 leg + R（R = 行距/2），这才是半圆。
+# 额外往外推会把两端只隔一个行距的转弯拉成又长又尖的发夹弯，
+# 顶点曲率反而远小于 R —— 实测顶点半径会掉到 0.7 m，2 m/s 需要 30° 倾角。
+UTURN_CLEAR_M = 0.0
+
+
+def uturn_waypoints(leg, swath, style, clear=UTURN_CLEAR_M):
+    """两条平行作业段 + 外场 U 型转弯。返回 [(北, 东, 是否样条点)]。
+
+    三种做法对应 ArduPilot 原生的三条路：
+      square  两个普通航点的直角转弯 —— SCurve 按转角混合，掉速 v·cos(θ/2)
+      arc     一串普通航点近似半圆 —— 点密了更圆，但每个点仍是一个转角
+      spline  MAV_CMD_NAV_SPLINE_WAYPOINT —— 真正的平滑曲线，跑道式 U 转
+    半径一律取行距/2，即下一条作业线的横向间距。
+    """
+    R = swath / 2.0
+    cx = leg + clear                        # 圆心北向坐标，已在外场
+    wps = [(leg, 0.0, False)]               # 作业段 1 终点，普通航点
+    if style == "arc":
+        for k in range(1, 7):
+            th = math.pi * k / 7.0
+            wps.append((cx + R * math.sin(th), R - R * math.cos(th), False))
+    elif style == "spline":
+        # 一个样条顶点即可，样条会依据前后点自动定切线
+        wps.append((cx + R, R, True))
+        wps.append((leg, swath, True))
+    elif style == "spline-arc":
+        # 半圆上取多点，全部设为样条航点 —— 样条才会真正贴着设计半径走，
+        # 只给一个顶点时曲率由点位决定，实测会收紧到 0.6 m。
+        for k in range(1, 7):
+            th = math.pi * k / 7.0
+            wps.append((cx + R * math.sin(th), R - R * math.cos(th), True))
+        wps.append((leg, swath, True))
+    else:
+        wps.append((cx + R, 0.0, False))
+        wps.append((cx + R, swath, False))
+    if style not in ("spline", "spline-arc"):
+        wps.append((leg, swath, False))     # 作业段 2 起点
+    wps.append((0.0, swath, False))         # 作业段 2 终点
+    return wps
+
+
+def run_uturn(mon, swath=SWATH_M, style="square", leg=SPRAY_LEG_M):
+    home_lat, home_lon = HOME[0], HOME[1]
+    wps = uturn_waypoints(leg, swath, style)
+    items = [(mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, home_lat, home_lon, 0.0),
+             (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, home_lat, home_lon, ROUTE_ALT_M)]
+    for n, e, is_spline in wps:
+        lat, lon = ne_to_latlon(home_lat, home_lon, n, e)
+        cmd = (mavutil.mavlink.MAV_CMD_NAV_SPLINE_WAYPOINT if is_spline
+               else mavutil.mavlink.MAV_CMD_NAV_WAYPOINT)
+        items.append((cmd, lat, lon, ROUTE_ALT_M))
+    items.append((mavutil.mavlink.MAV_CMD_NAV_LAND, home_lat, home_lon, 0.0))
+    upload_mission(mon, items)
+
+    set_mode_wait(mon, "AUTO")
+    prepare_for_arm(mon)
+    mon.mav.arducopter_arm()
+    wait_armed(mon)
+    # 作业段 1 = seq2（飞向 wps[0]），作业段 2 = 最后一个航点段
+    spray1_seq = 2
+    spray2_seq = 2 + len(wps) - 1
+    print("U 型转弯：行距 %.1f m（半径 %.1f m），%s 型，作业段 %.0f m"
+          % (swath, swath / 2.0, style, leg))
+
+    samples = []
+    start = mon.sim_ms
+    while mon.sim_ms - start < 400000:
+        mon.recv()
+        if mon.local is None or mon.att is None:
+            continue
+        sp = math.hypot(mon.local.vx, mon.local.vy)
+        err = mon.attitude_error_deg()
+        tilt = target_tilt_deg(mon)
+        samples.append((mon.sim_ms, mon.mission_seq, mon.local.x, mon.local.y, sp,
+                        math.hypot(err[0], err[1]) if err else None, tilt))
+        if not mon.armed and mon.sim_ms - start > 30000:
+            break
+    wait_disarmed(mon, 60)
+
+    by = {}
+    for t, seq, x, y, sp, e, tilt in samples:
+        if seq is None:
+            continue
+        by.setdefault(seq, []).append((t, x, y, sp, e, tilt))
+
+    res = {"swath_m": swath, "uturn_radius_m": swath / 2.0, "style": style,
+           "spray_leg_m": leg,
+           "waypoints_ne_m": [(n, e) for n, e, _ in wps]}
+
+    # U 转段 = 两个作业段之间的全部航段
+    turn = [s for q in range(spray1_seq + 1, spray2_seq) for s in by.get(q, [])]
+    if turn:
+        # 实际飞出来的曲率半径：三点定圆 R = abc/(4·面积)。
+        # 若它明显小于设计半径，说明轨迹比设计更弯，限制在几何而不在限幅。
+        radii = []
+        step = max(1, len(turn) // 200)
+        for i in range(step, len(turn) - step, step):
+            (x1, y1), (x2, y2), (x3, y3) = ((turn[i - step][1], turn[i - step][2]),
+                                            (turn[i][1], turn[i][2]),
+                                            (turn[i + step][1], turn[i + step][2]))
+            a = math.hypot(x2 - x1, y2 - y1)
+            b = math.hypot(x3 - x2, y3 - y2)
+            c = math.hypot(x3 - x1, y3 - y1)
+            area2 = abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1))
+            if area2 > 1e-6 and a > 0.05 and b > 0.05:
+                radii.append(a * b * c / (2 * area2))
+        radii = [r for r in radii if r < 100.0]
+        sps = [s[3] for s in turn]
+        tilts = [s[5] for s in turn if s[5] is not None]
+        errs = [s[4] for s in turn if s[4] is not None]
+        res["uturn"] = {
+            "duration_s": (turn[-1][0] - turn[0][0]) / 1000.0,
+            "speed_min_m_s": min(sps),
+            "speed_mean_m_s": sum(sps) / len(sps),
+            "tilt_max_deg": max(tilts) if tilts else None,
+            "tilt_saturated_frac": (sum(t >= 14.7 for t in tilts) / len(tilts)) if tilts else None,
+            "att_err_mean_deg": (sum(errs) / len(errs)) if errs else None,
+            "att_err_max_deg": max(errs) if errs else None,
+            "flown_radius_min_m": min(radii) if radii else None,
+            "flown_radius_median_m": sorted(radii)[len(radii) // 2] if radii else None,
+        }
+
+    # 作业段 2：进入后多久速度与姿态稳定下来 —— 每条作业线开头有多少是废的。
+    # 必须排除末端 15 m 的停靠减速段，否则「其后一直达标」的判据永远不成立。
+    seg2 = by.get(spray2_seq, [])
+    if len(seg2) > 20:
+        ex, ey = seg2[-1][1], seg2[-1][2]
+        usable = [s for s in seg2 if math.hypot(s[1] - ex, s[2] - ey) > 15.0]
+        if len(usable) > 20:
+            target = max(s[3] for s in usable)
+            t0, x0, y0 = usable[0][0], usable[0][1], usable[0][2]
+            settle_t = settle_d = None
+            for i, s in enumerate(usable):
+                # 达标后需连续保持 3 s 才算稳定，避免瞬时穿越被误判
+                hold = [u for u in usable[i:] if u[0] - s[0] <= 3000]
+                if len(hold) < 5:
+                    break
+                if all(abs(u[3] - target) <= 0.05 * target for u in hold) and \
+                   all((u[4] is None or u[4] <= 1.0) for u in hold):
+                    settle_t = (s[0] - t0) / 1000.0
+                    settle_d = math.hypot(s[1] - x0, s[2] - y0)
+                    break
+            sps = [s[3] for s in usable]
+            mean = sum(sps) / len(sps)
+            res["spray_leg_2"] = {
+                "settle_time_s": settle_t,
+                "settle_distance_m": settle_d,
+                "usable_len_m": math.hypot(usable[-1][1] - x0, usable[-1][2] - y0),
+                "speed_mean_m_s": mean,
+                "speed_cv": math.sqrt(sum((v - mean) ** 2 for v in sps) / len(sps)) / mean,
+            }
+
+    res["segments"] = summarise_route(
+        [(t, seq, x, y, sp) for t, seq, x, y, sp, _, _ in samples])
+    return res
+
+
 def summarise_log(path):
     """从日志算 P02 的验收量。
 
@@ -909,7 +1078,7 @@ def latest_log(out):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle", "fence", "route"))
+    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle", "fence", "route", "uturn"))
     parser.add_argument("--baseline", action="store_true",
                         help="关闭新增物理项，跑默认物理模型对照")
     parser.add_argument("--speedup", type=float, default=2.0)
@@ -920,6 +1089,10 @@ def main(argv=None):
     parser.add_argument("--variant", help="结果里记录的变体名，例如 baseline-algo / candidate-algo")
     parser.add_argument("--turn-offset", type=float, default=ROUTE_TURN_OFFSET_M,
                         help="route 场景的掉头连接段长度（米），用于分辨掉速是几何还是限幅所致")
+    parser.add_argument("--swath", type=float, default=SWATH_M,
+                        help="uturn 场景的作业行距（米），U 转半径 = 行距/2")
+    parser.add_argument("--uturn-style", choices=("square", "arc", "spline", "spline-arc"), default="square",
+                        help="U 型转弯形状：square 直角式 / arc 多点近似 / spline 样条平滑")
     parser.add_argument("--turn-deg", type=float, default=90.0,
                         help="route 场景的转角度数；掉速若随 cos(角/2) 走即为 SCurve 混合的几何必然")
     args = parser.parse_args(argv)
@@ -953,6 +1126,8 @@ def main(argv=None):
             result.update(run_loiter_circle(mon))
         elif args.case == "fence":
             result.update(run_fence(mon))
+        elif args.case == "uturn":
+            result.update(run_uturn(mon, args.swath, args.uturn_style))
         elif args.case == "route":
             result.update(run_route(mon, args.turn_offset, args.turn_deg))
         else:
