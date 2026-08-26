@@ -9,6 +9,7 @@
   fence    圆形围栏接近：逐档撞边界，量实际余量与冲出量
   route    AUTO 作业航线：直线段 + 180° 掉头 + 密集航点，量速度波动与回线误差
   uturn    田间 U 型转弯：两条作业段 + 外场 U 转，量转弯耗时与进入下条线的建立距离
+  uturn-guided  同上，但绕开 SCurve，用 GUIDED 三阶设定点喂解析匀速圆弧
 
 默认启用自定义机型中的近地增升与速度相关气动力矩。加 --baseline 可把这
 两项归零，用同一场景做 A/B，确认现象来自物理项而不是脚本本身。
@@ -1026,6 +1027,116 @@ def run_uturn(mon, swath=SWATH_M, style="square", leg=SPRAY_LEG_M):
     return res
 
 
+# 概念验证：绕开 SCurve 的航段混合，直接用解析的匀速圆弧喂 GUIDED 的
+# pos+vel+accel 三阶设定点，看飞机能不能在 U 转里保住作业速度。
+# 这一步不改固件——先证明概念成立，再决定要不要写成 AC_WPNav 的轨迹原语。
+GUIDED_STREAM_HZ = 50.0
+
+
+def stream_setpoint(mon, n, e, alt, vn, ve, an, ae):
+    """发一帧 NED 的位置+速度+加速度设定点，偏航用角速率跟随航迹。"""
+    TYPE_MASK = (1 << 10)          # 忽略偏航角，改用偏航角速率
+    mon.mav.mav.set_position_target_local_ned_send(
+        int(mon.sim_ms), mon.mav.target_system, mon.mav.target_component,
+        mavutil.mavlink.MAV_FRAME_LOCAL_NED, TYPE_MASK,
+        n, e, -alt,                # NED：z 向下为正
+        vn, ve, 0.0,
+        an, ae, 0.0,
+        0.0, math.atan2(ve, vn) if (vn or ve) else 0.0)
+
+
+def uturn_guided_path(leg, swath, speed, alt):
+    """生成 直线段1 → 匀速半圆 → 直线段2 的解析参考。
+
+    半圆：圆心 (leg, swath/2)，半径 R = swath/2，
+          p(φ) = C + R·(sinφ, −cosφ)，φ 由 0 到 π
+          v(φ) = speed·(cosφ, sinφ)          切向，模长恒为 speed
+          a(φ) = (speed²/R)·(−sinφ, cosφ)    向心，指向圆心
+    速度模长全程恒定 —— 这正是航点/样条做不到的那一点。
+    """
+    R = swath / 2.0
+    t_leg = leg / speed
+    t_arc = math.pi * R / speed
+    total = t_leg + t_arc + t_leg
+
+    def at(t):
+        if t < t_leg:                                  # 直线段 1：向北
+            return (speed * t, 0.0, speed, 0.0, 0.0, 0.0)
+        t -= t_leg
+        if t < t_arc:                                  # 匀速半圆
+            phi = speed * t / R
+            return (leg + R * math.sin(phi), R - R * math.cos(phi),
+                    speed * math.cos(phi), speed * math.sin(phi),
+                    -(speed * speed / R) * math.sin(phi),
+                    (speed * speed / R) * math.cos(phi))
+        t -= t_arc                                     # 直线段 2：向南
+        return (leg - speed * t, swath, -speed, 0.0, 0.0, 0.0)
+
+    return at, total, t_leg, t_leg + t_arc
+
+
+def run_uturn_guided(mon, swath=SWATH_M, speed=2.0, leg=SPRAY_LEG_M):
+    alt = ROUTE_ALT_M
+    command_takeoff(mon, alt)
+    set_mode_wait(mon, "GUIDED", 15)
+    for _ in range(40):
+        mon.recv()
+    print("GUIDED 三阶设定点：行距 %.1f m（半径 %.1f m），速度 %.1f m/s"
+          % (swath, swath / 2.0, speed))
+
+    at, total, t_arc0, t_arc1 = uturn_guided_path(leg, swath, speed, alt)
+    start = mon.sim_ms
+    next_ms = 0.0
+    samples = []
+    while True:
+        t = (mon.sim_ms - start) / 1000.0
+        if t > total + 2.0:
+            break
+        if (mon.sim_ms - start) >= next_ms:
+            n, e, vn, ve, an, ae = at(min(t, total))
+            stream_setpoint(mon, n, e, alt, vn, ve, an, ae)
+            next_ms += 1000.0 / GUIDED_STREAM_HZ
+        mon.recv()
+        if mon.local is None:
+            continue
+        sp = math.hypot(mon.local.vx, mon.local.vy)
+        err = mon.attitude_error_deg()
+        n, e, vn, ve, _, _ = at(min(t, total))
+        # 跟踪误差：实际位置到参考位置的距离
+        track = math.hypot(mon.local.x - n, mon.local.y - e)
+        samples.append((t, sp, track, math.hypot(err[0], err[1]) if err else None,
+                        target_tilt_deg(mon)))
+
+    set_mode_wait(mon, "LAND")
+    wait_disarmed(mon, 120)
+
+    arc = [s for s in samples if t_arc0 + 0.3 <= s[0] <= t_arc1 - 0.3]
+    legs = [s for s in samples if s[0] < t_arc0 - 0.3 or s[0] > t_arc1 + 0.3]
+    res = {"swath_m": swath, "uturn_radius_m": swath / 2.0, "target_speed_m_s": speed,
+           "mode": "GUIDED-posvelaccel"}
+    for name, seg in (("arc", arc), ("legs", legs)):
+        if not seg:
+            continue
+        sps = [s[1] for s in seg]
+        tr = [s[2] for s in seg]
+        errs = [s[3] for s in seg if s[3] is not None]
+        tilts = [s[4] for s in seg if s[4] is not None]
+        res[name] = {
+            "speed_min_m_s": min(sps),
+            "speed_mean_m_s": sum(sps) / len(sps),
+            "speed_dip_pct": 100 * (1 - min(sps) / speed),
+            "track_err_max_m": max(tr),
+            "track_err_rms_m": math.sqrt(sum(x * x for x in tr) / len(tr)),
+            "att_err_mean_deg": (sum(errs) / len(errs)) if errs else None,
+            "tilt_max_deg": max(tilts) if tilts else None,
+        }
+    a = res.get("arc", {})
+    print("  圆弧段：最低速 %.2f m/s（掉速 %.0f%%），跟踪误差 max %.2f m，指令倾角 max %.1f°"
+          % (a.get("speed_min_m_s", 0), a.get("speed_dip_pct", 0),
+             a.get("track_err_max_m", 0), a.get("tilt_max_deg") or 0))
+    return res
+
+
 def summarise_log(path):
     """从日志算 P02 的验收量。
 
@@ -1078,7 +1189,7 @@ def latest_log(out):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle", "fence", "route", "uturn"))
+    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle", "fence", "route", "uturn", "uturn-guided"))
     parser.add_argument("--baseline", action="store_true",
                         help="关闭新增物理项，跑默认物理模型对照")
     parser.add_argument("--speedup", type=float, default=2.0)
@@ -1091,6 +1202,8 @@ def main(argv=None):
                         help="route 场景的掉头连接段长度（米），用于分辨掉速是几何还是限幅所致")
     parser.add_argument("--swath", type=float, default=SWATH_M,
                         help="uturn 场景的作业行距（米），U 转半径 = 行距/2")
+    parser.add_argument("--speed", type=float, default=2.0,
+                        help="uturn-guided 的目标作业速度 m/s")
     parser.add_argument("--uturn-style", choices=("square", "arc", "spline", "spline-arc"), default="square",
                         help="U 型转弯形状：square 直角式 / arc 多点近似 / spline 样条平滑")
     parser.add_argument("--turn-deg", type=float, default=90.0,
@@ -1126,6 +1239,8 @@ def main(argv=None):
             result.update(run_loiter_circle(mon))
         elif args.case == "fence":
             result.update(run_fence(mon))
+        elif args.case == "uturn-guided":
+            result.update(run_uturn_guided(mon, args.swath, args.speed))
         elif args.case == "uturn":
             result.update(run_uturn(mon, args.swath, args.uturn_style))
         elif args.case == "route":
