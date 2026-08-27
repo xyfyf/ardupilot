@@ -812,7 +812,7 @@ bool AP_Arming::rc_arm_checks(AP_Arming::Method method)
         }
 
         // if throttle check is enabled, require zero input
-        if (rc().arming_check_throttle()) {
+        if (rc().arming_check_throttle() && !skip_rc_throttle_neutral_check(method)) {
             const RC_Channel *c = &rc().get_throttle_channel();
                 if (c->get_control_in() != 0) {
                     check_failed(Check::RC, true, "%s (RC%d) is not neutral", "Throttle", c->ch());

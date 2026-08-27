@@ -561,6 +561,26 @@ bool AP_Arming_Copter::alt_checks(bool display_failure)
     return true;
 }
 
+// true when a GCS/scripting arm may ignore RC3 throttle stick position
+bool AP_Arming_Copter::gcs_skip_throttle_arm_check(AP_Arming::Method method) const
+{
+    if (!AP_Arming::method_is_GCS(method) && method != AP_Arming::Method::SCRIPTING) {
+        return false;
+    }
+#if MODE_AUTO_ENABLED
+    // AUTO_OPTIONS bit1: Allow Takeoff Without Raising Throttle (one-tap takeoff from GCS)
+    if ((copter.g2.auto_options & (1U << 1)) != 0) {
+        return true;
+    }
+#endif
+    return copter.flightmode->allows_GCS_or_SCR_arming_with_throttle_high();
+}
+
+bool AP_Arming_Copter::skip_rc_throttle_neutral_check(AP_Arming::Method method) const
+{
+    return gcs_skip_throttle_arm_check(method);
+}
+
 // arm_checks - perform final checks before arming
 //  always called just before arming.  Return true if ok to arm
 //  has side-effect that logging is started
@@ -622,8 +642,8 @@ bool AP_Arming_Copter::arm_checks(AP_Arming::Method method)
 #else
         const char *rc_item = "Throttle";
 #endif
-        // check throttle is not too high - skips checks if arming from GCS/scripting in Guided,Guided_NoGPS or Auto 
-        if (!((AP_Arming::method_is_GCS(method) || method == AP_Arming::Method::SCRIPTING) && copter.flightmode->allows_GCS_or_SCR_arming_with_throttle_high())) {
+        // check throttle is not too high - skips checks if arming from GCS/scripting for one-tap takeoff or in Guided/Auto
+        if (!gcs_skip_throttle_arm_check(method)) {
             // above top of deadband is too always high
             if (copter.get_pilot_desired_climb_rate_ms() > 0.0f) {
                 check_failed(Check::RC, true, "%s too high", rc_item);

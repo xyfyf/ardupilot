@@ -121,6 +121,9 @@ public:
     // checks.  Those go here:
     virtual bool arm_checks(AP_Arming::Method method);
 
+    // vehicle may skip RC throttle neutral check (e.g. GCS one-tap takeoff with mid-stick throttle)
+    virtual bool skip_rc_throttle_neutral_check(AP_Arming::Method method) const { return false; }
+
     // get expected magnetic field strength
     uint16_t compass_magfield_expected() const;
 

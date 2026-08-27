@@ -410,6 +410,8 @@ AUTOTUNE_MIN_D 0.0005
 # Arming / disarm
 DISARM_DELAY 4
 PILOT_THR_BHV 6
+# bit0 Allow Arming in Auto, bit1 Allow Takeoff Without Raising Throttle (GCS one-tap takeoff skips RC3 arm check)
+AUTO_OPTIONS 3
 
 # Lua scripting (radar toggle script)
 SCR_ENABLE 1

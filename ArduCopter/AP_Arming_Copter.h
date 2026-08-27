@@ -32,6 +32,8 @@ protected:
 #endif
     bool arm_checks(AP_Arming::Method method) override;
 
+    bool skip_rc_throttle_neutral_check(AP_Arming::Method method) const override;
+
     // mandatory checks that cannot be bypassed.  This function will only be called if ARMING_CHECK is zero or arming forced
     bool mandatory_checks(bool display_failure) override;
 
@@ -57,6 +59,9 @@ protected:
     bool terrain_database_required() const override;
 
 private:
+
+    // GCS/scripting arm: skip throttle stick position checks (one-tap takeoff / AUTO takeoff)
+    bool gcs_skip_throttle_arm_check(AP_Arming::Method method) const;
 
     // actually contains the pre-arm checks.  This is wrapped so that
     // we can store away success/failure of the checks.
