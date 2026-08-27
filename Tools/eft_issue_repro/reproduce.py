@@ -330,7 +330,7 @@ def wait_armed(mon, wall_timeout=20):
     raise RuntimeError("等待解锁超时")
 
 
-def run_landing(mon):
+def run_landing(mon, release_alt_m=None, release_speed_cms=200):
     lat, lon = HOME[0], HOME[1]
     dn = 25.0 / 111319.5
     de = 25.0 / (111319.5 * math.cos(math.radians(lat)))
@@ -350,11 +350,51 @@ def run_landing(mon):
     prepare_for_arm(mon)
     mon.mav.arducopter_arm()
     wait_armed(mon)
-    wait_disarmed(mon, 120)
+
+    if release_alt_m is None:
+        wait_disarmed(mon, 120)
+    else:
+        # 复现 LNDS 缓降脚本的近地误判。
+        #
+        # 该脚本以「相对 Home 的 EKF 高度」判定近地：低于 LNDS_ALT_M 时把
+        # LAND_SPEED 等压到 LNDS_SLOW_MS，低于 LNDS_REL_M(0.15 m) 则锁存并
+        # **恢复基准速度**。问题在于 EKF 高度会漂——实机日志 220 中触地时
+        # 读数为 -0.74 ~ -1.13 m，也就是说飞机穿过 0.15 m 这条线时，距真实
+        # 地面还有约 1 m、还有约 2 秒才触地。限速于是在最后一米被提前放开。
+        #
+        # 这里直接按**真实离地高度**触发放开，等价地复现那一米的失速保护缺口。
+        # 用高度自身判断是否已经起飞，而不是 landed_state：后者依赖
+        # EXTENDED_SYS_STATE 的推送，实测在本场景下不足以作为触发门闩，
+        # 结果是整段注入从未执行而参数纹丝不动。
+        released = False
+        airborne = False
+        t0 = mon.sim_ms
+        while mon.sim_ms - t0 < 250000:
+            mon.recv()
+            if not mon.armed and mon.sim_ms - t0 > 20000:
+                break
+            if mon.local is None:
+                continue
+            height = -mon.local.z
+            if height > 3.0:
+                airborne = True
+            if airborne and not released and height < release_alt_m:
+                set_param(mon, "LAND_SPEED", release_speed_cms)
+                released = True
+                vz = mon.local.vz if hasattr(mon.local, "vz") else 0.0
+                print("  === 离地 %.2f m 放开限速 -> LAND_SPEED=%d cm/s（此刻下降率 %.2f m/s）==="
+                      % (height, release_speed_cms, vz))
+        if not released:
+            print("  警告：注入未触发（airborne=%s）" % airborne)
+        if mon.armed:
+            wait_disarmed(mon, 60)
+
     delay = None
     if mon.touch_ms is not None and mon.disarm_ms is not None:
         delay = (mon.disarm_ms - mon.touch_ms) / 1000.0
     return {
+        "release_alt_m": release_alt_m,
+        "release_speed_cms": release_speed_cms if release_alt_m is not None else None,
         "touch_speed_m_s_down": mon.touch_speed,
         "touch_to_disarm_s": delay,
         "max_first6_motor_spread_after_touch_pwm": mon.max_motor_spread_after_touch,
@@ -2054,6 +2094,10 @@ def main(argv=None):
                         help="打开基于转速的停转检测器，由它自己发现失效电机")
     parser.add_argument("--degrade", action="store_true",
                         help="失效同时写 MOT_FAIL_IDX，启用降级混控（剔除失效电机并放弃偏航）")
+    parser.add_argument("--release-alt", type=float, default=None,
+                        help="landing 场景：在离地这么高时放开限速，复现 LNDS 近地误判")
+    parser.add_argument("--release-speed", type=int, default=200,
+                        help="放开后的 LAND_SPEED，cm/s")
     parser.add_argument("--motor", type=int, default=3,
                         help="motor-fail 场景中停转的电机编号 1..6")
     parser.add_argument("--model-set", action="append", metavar="KEY=VALUE",
@@ -2102,7 +2146,7 @@ def main(argv=None):
     try:
         mon = connect(proc)
         if args.case == "landing":
-            result.update(run_landing(mon))
+            result.update(run_landing(mon, args.release_alt, args.release_speed))
         elif args.case == "circle":
             result.update(run_circle(mon))
         elif args.case == "loiter-circle":

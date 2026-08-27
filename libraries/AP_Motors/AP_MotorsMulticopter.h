@@ -184,6 +184,12 @@ protected:
     // fraction of yaw authority retained after a motor failure
     AP_Float        _fail_yaw_keep;
 
+    // also shut down the motor opposite the failed one
+    AP_Int8         _fail_stop_opposite;
+
+    // 0 = forward mixing, 1 = redistributed pseudoinverse after a failure
+    AP_Int8         _fail_alloc_mode;
+
     // rpm-based stopped-motor detection
     AP_Float        _fail_rpm_min;
     AP_Int16        _fail_time_ms;

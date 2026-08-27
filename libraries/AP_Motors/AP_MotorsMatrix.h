@@ -129,6 +129,38 @@ public:
     // motor removed by set_motor_failed(), or -1
     int8_t              get_failed_motor() const { return _failed_motor; }
 
+    // Redistributed-pseudoinverse control allocation.
+    //
+    // Solves for per-motor thrusts whose resulting moments come as close as
+    // possible to the demand, while respecting 0 <= thrust <= 1.  Iterates:
+    // pseudoinverse solve, clamp whatever left the limits, re-solve on the
+    // motors still free.
+    //
+    // The point is that the allocator *knows about the limits*.  The fixed
+    // forward mixing this class normally uses does not: it computes a linear
+    // combination, and anything that comes out negative is simply clipped -
+    // which silently destroys the moment balance the combination was built to
+    // produce.  With a rotor gone the hover solution sits right on that limit,
+    // so the clipping is not an edge case, it is the normal state.
+    //
+    // include_yaw selects whether heading is part of the demand at all.  On a
+    // hexacopter with a rotor gone it should be false: the hover trim then sits
+    // exactly on the lower thrust limit, where the motor pinned at zero can
+    // only be raised, never lowered - one direction of disturbance has no
+    // control authority left.  A solution exists, but the equilibrium is not
+    // controllable, which is the published result for this class of airframe.
+    // Dropping yaw from the demand frees that dimension and the remaining five
+    // motors regain margin for attitude.
+    //
+    // demand is [throttle, roll, pitch, yaw]; returns false if the geometry is
+    // degenerate.  See Durham, Bordignon & Beck, "Aircraft Control Allocation".
+    bool                allocate_redistributed(const float demand[4], bool include_yaw,
+                                               float thrust_out[AP_MOTORS_MAX_NUM_MOTORS]) const;
+
+    // Index of the motor diametrically opposite the given one - the one whose
+    // roll and pitch factors are both its negation - or -1 if there is none.
+    int8_t              find_opposite_motor(uint8_t motor_num) const;
+
     // Watch ESC rpm for a motor that has stopped, and degrade the mixer when
     // one is confirmed.  Detects a stopped motor only: a thrown propeller
     // leaves the motor spinning *faster* under no load, so it shows up as

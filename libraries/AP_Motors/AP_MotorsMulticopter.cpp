@@ -268,6 +268,20 @@ const AP_Param::GroupInfo AP_MotorsMulticopter::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("FAIL_YAW", 49, AP_MotorsMulticopter, _fail_yaw_keep, 0),
 
+    // @Param: FAIL_OPP
+    // @DisplayName: Stop the motor opposite a failed one
+    // @Description: When a motor is removed, also shut down the one diametrically opposite it. This does NOT turn a hexacopter into a quadcopter and is off for good reason: the four survivors are not laid out like a quad rotor set. Their yaw factors work out to -2x their roll factors, so the yaw column is a multiple of the roll column, the allocation drops to rank 3, and roll and yaw stop being independently commandable - the attainable roll moment with yaw held at zero is exactly zero. Motors that can only spin one way have no way to make that up, since thrust cannot go negative. Leave this off and keep all remaining motors running.
+    // @Values: 0:Disabled,1:Enabled
+    // @User: Advanced
+    AP_GROUPINFO("FAIL_OPP", 50, AP_MotorsMulticopter, _fail_stop_opposite, 0),
+
+    // @Param: FAIL_ALLOC
+    // @DisplayName: Control allocation after motor failure
+    // @Description: How to distribute the roll, pitch, yaw and throttle demands across the surviving motors. 0 keeps the fixed forward mixing used in normal flight. 1 switches to a redistributed pseudoinverse once a motor has been removed: it solves for thrusts that meet the demand as closely as possible while respecting the 0 to 1 thrust limits, clamping whatever leaves the range and re-solving on the rest. The difference matters because with a rotor gone the hover solution sits exactly on the lower limit - forward mixing computes a linear combination and simply clips what comes out negative, which destroys the moment balance it was built to produce, whereas the redistributing solver knows the limit is there and works around it. Measured in SITL on a hexacopter losing its worst-case motor: roll overshoot 15.1 to 6.6 degrees, steady roll error 1.2 to 0.1, drift 0.8 to 0.2 m/s, and with 4 m/s of wind the result is barely different from still air (7.0 degrees against 6.6). On by default - it only takes effect once a motor has already been removed, so normal flight is untouched.
+    // @Values: 0:Forward mixing,1:Redistributed pseudoinverse
+    // @User: Advanced
+    AP_GROUPINFO("FAIL_ALLOC", 51, AP_MotorsMulticopter, _fail_alloc_mode, 1),
+
     AP_GROUPEND
 };
 

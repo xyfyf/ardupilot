@@ -17,6 +17,7 @@
 #include "AP_MotorsMatrix.h"
 #include <GCS_MAVLink/GCS.h>
 #include <AP_ESC_Telem/AP_ESC_Telem.h>
+#include <AP_Math/AP_Math.h>
 #include <AP_Vehicle/AP_Vehicle_Type.h>
 
 extern const AP_HAL::HAL& hal;
@@ -404,9 +405,38 @@ void AP_MotorsMatrix::output_armed_stabilizing()
 
     // add scaled roll, pitch, constrained yaw and throttle for each motor
     const float throttle_thrust_best_plus_adj = throttle_thrust_best_rpy + thr_adj;
-    for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
-        if (motor_enabled[i]) {
-            _thrust_rpyt_out[i] = (throttle_thrust_best_plus_adj * _throttle_factor[i]) + (rpy_scale * _thrust_rpyt_out[i]);
+
+    // With a motor removed, redistribute instead of mixing forward.
+    //
+    // The forward path above builds a linear combination and then rescales or
+    // clips whatever falls outside the thrust limits.  That is fine while there
+    // is margin on both sides, but a hexacopter that has lost a rotor trims
+    // with one survivor sitting on the lower limit, so the clipping is the
+    // normal case rather than the exception - and clipping silently breaks the
+    // moment balance the combination was built to produce.  Solving with the
+    // limits as explicit constraints keeps the balance the solver can still
+    // reach, and gives up only what it cannot.
+    //
+    // Yaw is left out of the demand on purpose; see allocate_redistributed().
+    bool redistributed = false;
+    if (_failed_motor >= 0 && _fail_alloc_mode > 0) {
+        const float demand[4] = { throttle_thrust_best_plus_adj, roll_thrust, pitch_thrust, yaw_thrust };
+        float alloc[AP_MOTORS_MAX_NUM_MOTORS];
+        if (allocate_redistributed(demand, false, alloc)) {
+            for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
+                if (motor_enabled[i]) {
+                    _thrust_rpyt_out[i] = alloc[i];
+                }
+            }
+            redistributed = true;
+        }
+    }
+
+    if (!redistributed) {
+        for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
+            if (motor_enabled[i]) {
+                _thrust_rpyt_out[i] = (throttle_thrust_best_plus_adj * _throttle_factor[i]) + (rpy_scale * _thrust_rpyt_out[i]);
+            }
         }
     }
 
@@ -626,6 +656,127 @@ void AP_MotorsMatrix::update_failure_detection()
 #endif // HAL_WITH_ESC_TELEM
 }
 
+bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include_yaw,
+                                             float thrust_out[AP_MOTORS_MAX_NUM_MOTORS]) const
+{
+    const uint8_t rows = include_yaw ? 4 : 3;
+    // Effector matrix rows are [throttle, roll, pitch, yaw]; one column per
+    // enabled motor.
+    uint8_t idx[AP_MOTORS_MAX_NUM_MOTORS];
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
+        thrust_out[i] = 0.0f;
+        if (motor_enabled[i]) {
+            idx[n++] = i;
+        }
+    }
+    if (n < rows) {
+        // Fewer effectors than demands: nothing to redistribute between.
+        return false;
+    }
+
+    bool freed[AP_MOTORS_MAX_NUM_MOTORS];
+    float thrust[AP_MOTORS_MAX_NUM_MOTORS];
+    for (uint8_t k = 0; k < n; k++) {
+        freed[k] = true;
+        thrust[k] = 0.0f;
+    }
+
+    // At most one clamp per motor, so this terminates.
+    for (uint8_t pass = 0; pass <= n; pass++) {
+        // Demand still to be met by the motors that are free, after removing
+        // what the already-clamped ones contribute.
+        float rem[4];
+        for (uint8_t r = 0; r < rows; r++) {
+            rem[r] = demand[r];
+        }
+        for (uint8_t k = 0; k < n; k++) {
+            if (freed[k]) {
+                continue;
+            }
+            const uint8_t m = idx[k];
+            rem[0] -= thrust[k] * _throttle_factor[m];
+            rem[1] -= thrust[k] * _roll_factor[m];
+            rem[2] -= thrust[k] * _pitch_factor[m];
+            if (include_yaw) {
+                rem[3] -= thrust[k] * _yaw_factor[m];
+            }
+        }
+
+        // Minimum-norm solution on the free motors: T = B^T (B B^T)^-1 rem.
+        float bbt[16] = {};
+        for (uint8_t k = 0; k < n; k++) {
+            if (!freed[k]) {
+                continue;
+            }
+            const uint8_t m = idx[k];
+            const float col[4] = { _throttle_factor[m], _roll_factor[m],
+                                   _pitch_factor[m], _yaw_factor[m] };
+            for (uint8_t a = 0; a < rows; a++) {
+                for (uint8_t b = 0; b < rows; b++) {
+                    bbt[a * rows + b] += col[a] * col[b];
+                }
+            }
+        }
+        float bbt_inv[16];
+        if (!mat_inverse(bbt, bbt_inv, rows)) {
+            // Degenerate once enough motors are clamped - keep what we have.
+            break;
+        }
+        float lambda[4] = {};
+        for (uint8_t a = 0; a < rows; a++) {
+            for (uint8_t b = 0; b < rows; b++) {
+                lambda[a] += bbt_inv[a * rows + b] * rem[b];
+            }
+        }
+
+        bool clamped_any = false;
+        for (uint8_t k = 0; k < n; k++) {
+            if (!freed[k]) {
+                continue;
+            }
+            const uint8_t m = idx[k];
+            float t = _throttle_factor[m] * lambda[0] + _roll_factor[m] * lambda[1]
+                    + _pitch_factor[m] * lambda[2];
+            if (include_yaw) {
+                t += _yaw_factor[m] * lambda[3];
+            }
+            if (t < 0.0f || t > 1.0f) {
+                thrust[k] = constrain_float(t, 0.0f, 1.0f);
+                freed[k] = false;
+                clamped_any = true;
+            } else {
+                thrust[k] = t;
+            }
+        }
+        if (!clamped_any) {
+            break;
+        }
+    }
+
+    for (uint8_t k = 0; k < n; k++) {
+        thrust_out[idx[k]] = constrain_float(thrust[k], 0.0f, 1.0f);
+    }
+    return true;
+}
+
+int8_t AP_MotorsMatrix::find_opposite_motor(uint8_t motor_num) const
+{
+    if (motor_num >= AP_MOTORS_MAX_NUM_MOTORS || !motor_enabled[motor_num]) {
+        return -1;
+    }
+    for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
+        if (i == motor_num || !motor_enabled[i]) {
+            continue;
+        }
+        if (fabsf(_roll_factor[i] + _roll_factor[motor_num]) < 0.01f &&
+            fabsf(_pitch_factor[i] + _pitch_factor[motor_num]) < 0.01f) {
+            return int8_t(i);
+        }
+    }
+    return -1;
+}
+
 bool AP_MotorsMatrix::set_motor_failed(uint8_t motor_num, bool surrender_yaw)
 {
     if (motor_num >= AP_MOTORS_MAX_NUM_MOTORS || !motor_enabled[motor_num]) {
@@ -633,6 +784,26 @@ bool AP_MotorsMatrix::set_motor_failed(uint8_t motor_num, bool surrender_yaw)
     }
 
     remove_motor(motor_num);
+
+    // Optionally shut down the motor opposite the failed one as well.
+    //
+    // On a hexacopter this restores a symmetric four-rotor layout: the four
+    // survivors are two counter-rotating pairs again, and the hover solution
+    // spreads thrust evenly across them instead of driving one to zero, which
+    // is what the five-motor solution does.  Even thrust means every motor
+    // keeps its full range of adjustment.
+    //
+    // What it costs is an axis.  Those four rotors have yaw factors equal to
+    // -2x their roll factors, so the yaw column is a multiple of the roll
+    // column and the allocation drops to rank 3: roll and yaw can no longer be
+    // commanded independently.  Rolling produces yaw whether or not it is
+    // asked for.
+    if (_fail_stop_opposite) {
+        const int8_t opposite = find_opposite_motor(motor_num);
+        if (opposite >= 0) {
+            remove_motor(opposite);
+        }
+    }
 
     if (surrender_yaw) {
         // Scale every yaw factor, not just the failed motor's.
