@@ -2,6 +2,8 @@
 #include <AP_Math/AP_Math.h>
 #include <AP_Terrain/AP_Terrain.h>
 #include "AC_Circle.h"
+#include <AP_Math/control.h>
+#include <AC_AttitudeControl/AC_AttitudeControl.h>
 
 #include <AP_Logger/AP_Logger.h>
 
@@ -340,8 +342,45 @@ void AC_Circle::calc_velocities(bool init_velocity)
         _angular_vel_max_rads = _rotation_rate_max_rads;
         _angular_accel_radss = MAX(fabsf(_angular_vel_max_rads), radians(AC_CIRCLE_ANGULAR_ACCEL_MIN));  // reach maximum yaw velocity in 1 second
     }else{
+        // Acceleration actually available for turning.
+        //
+        // Holding a circle of radius r at speed v needs a centripetal
+        // acceleration of v^2/r, and that has to fit inside *two* limits: the
+        // position controller's acceleration limit, and what the lean angle
+        // limit can physically produce (a = g*tan(theta)).  Only the first was
+        // being used here, but it is a parameter while the second is the
+        // airframe.  Set the parameter above the airframe - WPNAV_ACCEL of
+        // 3.0 m/s/s against the 2.63 m/s/s that 15 degrees of lean can make -
+        // and the speed limit computed from it exceeds what the vehicle can
+        // actually fly, so the circle is entered with the lean angle pinned at
+        // its limit and the radius blows out.
+        //
+        // AC_PosControl already limits its own acceleration this way; taking
+        // the smaller of the two here makes the circle's speed limit agree with
+        // the same boundary rather than sitting outside it.
+        //
+        // Two lean limits apply and they mean different things.  PSC_ANGLE_MAX
+        // is the configured ceiling; the attitude controller's althold limit is
+        // computed from the thrust margin actually left, so it tightens on its
+        // own when the vehicle is heavy or the battery is low.  Take whichever
+        // is smaller - a speed limit derived from a lean angle the vehicle
+        // cannot currently hold is no limit at all.
+        //
+        // Note what this does *not* cover: ANGLE_MAX is applied elsewhere in
+        // the attitude path and is not visible here, so a circle can still be
+        // sized against PSC_ANGLE_MAX while ANGLE_MAX is tighter.  On this
+        // airframe that gap is 20 degrees against 15.
+        float lean_max_rad = _pos_control.get_lean_angle_max_rad();
+        const AC_AttitudeControl *attitude_control = AC_AttitudeControl::get_singleton();
+        if (attitude_control != nullptr) {
+            lean_max_rad = MIN(lean_max_rad, attitude_control->get_althold_lean_angle_max_rad());
+        }
+        const float accel_from_tilt_mss = angle_rad_to_accel_mss(lean_max_rad);
+        const float accel_avail_mss = MIN(_pos_control.get_max_accel_NE_mss(), accel_from_tilt_mss);
+
         // Limit max horizontal speed based on radius and available acceleration
-        float vel_max_ms = MIN(_pos_control.get_max_speed_NE_ms(), safe_sqrt(0.5f*_pos_control.get_max_accel_NE_mss()*_radius_m));
+        float vel_max_ms = MIN(_pos_control.get_max_speed_NE_ms(),
+                               safe_sqrt(AC_CIRCLE_ACCEL_MARGIN * accel_avail_mss * _radius_m));
 
         // Convert linear speed to angular velocity (rad/s)
         _angular_vel_max_rads = vel_max_ms/_radius_m;
@@ -350,7 +389,7 @@ void AC_Circle::calc_velocities(bool init_velocity)
         _angular_vel_max_rads = constrain_float(_rotation_rate_max_rads, -_angular_vel_max_rads, _angular_vel_max_rads);
 
         // Derive maximum angular acceleration
-        _angular_accel_radss = MAX(_pos_control.get_max_accel_NE_mss() / _radius_m, radians(AC_CIRCLE_ANGULAR_ACCEL_MIN));
+        _angular_accel_radss = MAX(accel_avail_mss / _radius_m, radians(AC_CIRCLE_ANGULAR_ACCEL_MIN));
     }
 
     // Reset angular velocity to zero at initialization if requested

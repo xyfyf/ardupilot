@@ -9,6 +9,12 @@
 #define AC_CIRCLE_RADIUS_DEFAULT     1000.0f   // Default circle radius in cm (10 meters).
 #define AC_CIRCLE_RATE_DEFAULT       20.0f     // Default circle turn rate in degrees per second. Positive = clockwise, negative = counter-clockwise.
 #define AC_CIRCLE_ANGULAR_ACCEL_MIN  2.0f      // Minimum angular acceleration in deg/s² (used to avoid sluggish yaw transitions).
+
+// Fraction of the available turning acceleration a circle is allowed to use.
+// The remainder is headroom: entering the circle, holding it against wind and
+// correcting position error all draw on the same acceleration, so committing
+// all of it to the steady turn leaves nothing to fly with.
+#define AC_CIRCLE_ACCEL_MARGIN          0.5f
 #define AC_CIRCLE_RADIUS_MAX_M       2000.0    // Maximum allowed circle radius in meters (2000 m = 2 km).
 
 class AC_Circle
