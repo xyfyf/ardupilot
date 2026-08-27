@@ -225,7 +225,8 @@ float Motor::pwm_to_command(float pwm) const
 float Motor::calc_thrust(float command, float air_density, float velocity_in, float voltage_scale, float descent_velocity) const
 {
     float velocity_out = voltage_scale * max_outflow_velocity * sqrtf((1-mot_expo)*command + mot_expo*sq(command));
-    float ret = 0.5 * air_density * effective_prop_area * (sq(velocity_out) - sq(velocity_in));
+    float ret = 0.5 * air_density * effective_prop_area * (sq(velocity_out) - sq(velocity_in))
+                * thrust_scale;
 
     // Vortex ring state.  A rotor descending into its own wake recirculates
     // that wake through the disc instead of convecting it away, and thrust

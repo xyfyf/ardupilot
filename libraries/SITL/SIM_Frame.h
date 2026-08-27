@@ -160,6 +160,16 @@ private:
         // parameter, and reported as zero when that is off).
         float max_rpm = 0.0;
 
+        // Per-motor thrust scale, 1.0 for nominal.  Zero means "not specified"
+        // and is treated as 1.0, so existing models are unaffected.
+        //
+        // Real powertrains are not identical: motor and ESC tolerance, prop
+        // pitch scatter and mounting-angle error all leave each arm producing
+        // slightly different thrust for the same command.  That mismatch is
+        // P08's subject, and it also decides how smooth a failure transition
+        // can be - with identical motors the reallocation is pure arithmetic.
+        float motor_thrust_scale[SIM_FRAME_MAX_ACTUATORS] {};
+
         // Vortex ring state.  Zero disables it, which is the default so that
         // existing models keep their behaviour; set vrs_gain to switch the
         // descent regime on.  See Motor::calc_thrust for the model.

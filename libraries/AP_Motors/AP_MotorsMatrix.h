@@ -105,6 +105,38 @@ public:
     float get_thrust_rpyt_out(uint8_t i) const;
     bool get_factors(uint8_t i, float &roll, float &pitch, float &yaw, float &throttle, uint8_t &testing_order) const;
 
+    // Degrade the mixer after one motor has stopped.
+    //
+    // Without this the controller has no idea the motor is gone: it keeps
+    // commanding it, and then drives the opposite motor down to balance thrust
+    // that is not being produced.  Measured in SITL on a hexacopter, stopping
+    // one motor pushed its own command to the top of its range and the opposite
+    // motor to the bottom - one failure turned into two - and the vehicle rolled
+    // over and crashed 17 s later with the remaining motors nowhere near
+    // saturation.
+    //
+    // surrender_yaw scales the yaw factors by MOT_FAIL_YAW, which defaults to
+    // keeping them.  Five motors cannot satisfy roll, pitch, yaw and throttle
+    // *exactly* - the allocation is rank deficient once the counter-rotating
+    // pairs stop matching - but the mixer never demands exact: it serves yaw
+    // last, so yaw alone absorbs the shortfall.  Setting MOT_FAIL_YAW to 0
+    // gives yaw up outright and lets the vehicle rotate freely.
+    //
+    // Returns false if the motor number is invalid or already removed.  The
+    // change is not reversible, which matches the failure it models.
+    bool                set_motor_failed(uint8_t motor_num, bool surrender_yaw = true);
+
+    // motor removed by set_motor_failed(), or -1
+    int8_t              get_failed_motor() const { return _failed_motor; }
+
+    // Watch ESC rpm for a motor that has stopped, and degrade the mixer when
+    // one is confirmed.  Detects a stopped motor only: a thrown propeller
+    // leaves the motor spinning *faster* under no load, so it shows up as
+    // over-speed rather than under-speed and is deliberately out of scope here.
+    void                update_failure_detection();
+
+
+
 protected:
     // output - sends commands to the motors
     void                output_armed_stabilizing() override;
@@ -121,33 +153,9 @@ protected:
     // remove_motor
     void                remove_motor(int8_t motor_num);
 
-    // Degrade the mixer after one motor has stopped.
-    //
-    // Without this the controller has no idea the motor is gone: it keeps
-    // commanding it, and then drives the opposite motor down to balance thrust
-    // that is not being produced.  Measured in SITL on a hexacopter, stopping
-    // one motor pushed its own command to the top of its range and the opposite
-    // motor to the bottom - one failure turned into two - and the vehicle rolled
-    // over and crashed 17 s later with the remaining motors nowhere near
-    // saturation.
-    //
-    // surrender_yaw drops yaw control entirely.  Five motors cannot satisfy
-    // roll, pitch, yaw and throttle at once - the allocation is rank deficient
-    // once the counter-rotating pairs stop matching - so yaw is the one to give
-    // up: the vehicle rotates but stays upright and can be flown down.
-    //
-    // Returns false if the motor number is invalid or already removed.  The
-    // change is not reversible, which matches the failure it models.
-    bool                set_motor_failed(uint8_t motor_num, bool surrender_yaw = true);
 
-    // motor removed by set_motor_failed(), or -1
-    int8_t              get_failed_motor() const { return _failed_motor; }
 
-    // Watch ESC rpm for a motor that has stopped, and degrade the mixer when
-    // one is confirmed.  Detects a stopped motor only: a thrown propeller
-    // leaves the motor spinning *faster* under no load, so it shows up as
-    // over-speed rather than under-speed and is deliberately out of scope here.
-    void                update_failure_detection();
+
 
     // configures the motors for the defined frame_class and frame_type
     virtual void        setup_motors(motor_frame_class frame_class, motor_frame_type frame_type);

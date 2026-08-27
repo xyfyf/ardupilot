@@ -223,7 +223,7 @@ void AP_MotorsMatrix::output_armed_stabilizing()
     if (fail_idx > 0 && _failed_motor < 0) {
         if (set_motor_failed(uint8_t(fail_idx - 1))) {
             gcs().send_text(MAV_SEVERITY_CRITICAL,
-                            "Motor %d failed: yaw surrendered", int(fail_idx));
+                            "Motor %d failed: mixer degraded", int(fail_idx));
         }
     }
 
@@ -613,7 +613,7 @@ void AP_MotorsMatrix::update_failure_detection()
     if (suspect_count == 1) {
         if (set_motor_failed(uint8_t(suspect))) {
             gcs().send_text(MAV_SEVERITY_CRITICAL,
-                            "Motor %d stopped: yaw surrendered", int(suspect) + 1);
+                            "Motor %d stopped: mixer degraded", int(suspect) + 1);
         }
     } else if (suspect_count > 1) {
         // Several motors reading stopped at once is far more likely to be the
@@ -635,13 +635,39 @@ bool AP_MotorsMatrix::set_motor_failed(uint8_t motor_num, bool surrender_yaw)
     remove_motor(motor_num);
 
     if (surrender_yaw) {
-        // Zero every yaw factor, not just the failed motor's.  Leaving the
-        // others in place would have the mixer keep trying to produce a yaw
-        // moment it can no longer balance, and it would pay for that attempt
-        // out of the roll and pitch authority that is keeping the vehicle
-        // upright.
+        // Scale every yaw factor, not just the failed motor's.
+        //
+        // Holding yaw *exactly* is degenerate, and worth understanding before
+        // reading the default.  Solve the hover constraints for a hexacopter
+        // with one rotor gone - total thrust, zero roll, zero pitch, zero yaw -
+        // and the roll and yaw rows together force the motor opposite the
+        // failed one to exactly zero thrust.  That costs a second motor, and
+        // since thrust cannot go negative it leaves that motor unable to trim
+        // downward either: four motors for four constraints, nothing spare to
+        // make control moments with.
+        //
+        // The mixer is never asked for an exact solution, though.  It serves
+        // throttle, roll and pitch before yaw, so yaw is squeezed on its own,
+        // exactly as far as the remaining authority requires - the same
+        // priority order PX4 applies in its sequential desaturation, where yaw
+        // is likewise the first axis given up.  In still air that is enough to
+        // buy most of the heading back: about 2 deg/s of residual rotation
+        // instead of 23, for roll error rising from 15 to 20 degrees.
+        //
+        // It does not survive wind.  The authority spent holding heading is the
+        // same authority needed to trim against a crosswind, and one rotor down
+        // there is not enough for both: measured on the worst-case motor with
+        // 2 m/s of wind, keeping yaw drove roll overshoot to 68 degrees and the
+        // vehicle crashed, while giving yaw up held roll to 2.4 degrees and it
+        // landed.  At 4 m/s the same split held - 100 degrees against 3.6.
+        //
+        // So the default gives yaw up.  Attitude is the axis that has to be
+        // held; heading is the one that can be spent.  MOT_FAIL_YAW exists for
+        // an airframe with margin to spare, and should only be raised with wind
+        // in the test.
+        const float keep = constrain_float(_fail_yaw_keep, 0.0f, 1.0f);
         for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
-            _yaw_factor[i] = 0.0f;
+            _yaw_factor[i] *= keep;
         }
     }
 
@@ -649,6 +675,17 @@ bool AP_MotorsMatrix::set_motor_failed(uint8_t motor_num, bool surrender_yaw)
     // surviving factors no longer span the same range, and without this the
     // effective roll and pitch gains change underneath the attitude controller.
     normalise_rpy_factors();
+
+    // Deliberately *not* touching the rate integrators here.  It is tempting to
+    // - the mixing matrix just changed, so the accumulated trim looks stale -
+    // but the integrators hold a demand in generalised moments, not in motor
+    // commands: how much roll, pitch and yaw torque this airframe needs to stay
+    // balanced against gravity, centre-of-mass offset and mounting-angle error.
+    // None of that changes when a rotor is removed; only the mapping from
+    // torque to motors does, and normalise_rpy_factors() has just fixed that.
+    // Relaxing them measurably made things worse: roll overshoot 20 -> 48 deg
+    // and the vehicle crashed, because the trim it had already built was thrown
+    // away and had to be rebuilt at the worst possible moment.
 
     _failed_motor = motor_num;
     return true;

@@ -181,6 +181,9 @@ protected:
     // AP_MotorsMatrix::set_motor_failed().
     AP_Int8         _fail_motor_idx;
 
+    // fraction of yaw authority retained after a motor failure
+    AP_Float        _fail_yaw_keep;
+
     // rpm-based stopped-motor detection
     AP_Float        _fail_rpm_min;
     AP_Int16        _fail_time_ms;

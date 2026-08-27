@@ -261,6 +261,13 @@ const AP_Param::GroupInfo AP_MotorsMulticopter::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("FAIL_THST", 48, AP_MotorsMulticopter, _fail_thrust_min, 0.15),
 
+    // @Param: FAIL_YAW
+    // @DisplayName: Yaw authority retained after motor failure
+    // @Description: Fraction of the yaw mixer factors kept after a motor is removed. The default of 0 gives yaw up entirely: the vehicle rotates, but the authority that would have gone into holding heading stays available for roll and pitch, which is what keeps it upright. Raising this buys heading back and works in still air - measured in SITL on a hexacopter losing its worst-case motor, keeping yaw held rotation to about 2 deg/s instead of 23 - but it costs the margin needed to trim against wind: with the same airframe and only 2 m/s of wind, keeping yaw drove roll overshoot to 68 degrees and crashed, while giving it up held roll to 2.4 degrees and landed. One rotor down, the remaining authority is enough to hold attitude or heading, not both, and attitude is the one that has to be held. Raise this only for an airframe with margin to spare, and only with wind in the test.
+    // @Range: 0 1
+    // @User: Advanced
+    AP_GROUPINFO("FAIL_YAW", 49, AP_MotorsMulticopter, _fail_yaw_keep, 0),
+
     AP_GROUPEND
 };
 

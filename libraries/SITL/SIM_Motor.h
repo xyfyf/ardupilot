@@ -105,6 +105,9 @@ public:
     float pwm_to_command(float pwm) const;
 
     // setup motor key parameters
+    // Per-motor thrust scale, 1.0 nominal.  See Frame::Model.
+    void set_thrust_scale(float scale) { thrust_scale = scale; }
+
     void set_vrs_params(float gain, float peak, float width) {
         vrs_gain = gain; vrs_peak = peak; vrs_width = width;
     }
@@ -146,6 +149,7 @@ private:
     // loss is modelled as a bell in the non-dimensional descent rate
     // eta = -V_climb / v_hover, which is the parameter the published VRS
     // envelopes are all drawn against.  Set vrs_gain to zero to disable.
+    float thrust_scale = 1.0f;  // per-motor thrust mismatch
     float vrs_gain = 0.0f;      // peak fractional thrust loss
     float vrs_peak = 1.1f;      // eta at which the loss peaks
     float vrs_width = 0.6f;     // half-width of the bell in eta

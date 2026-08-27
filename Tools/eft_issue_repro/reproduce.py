@@ -1359,6 +1359,43 @@ def run_mag_align(mon, leg=60.0, alt=25.0):
     return {"square_leg_m": leg, "alt_m": alt}
 
 
+def summarise_arc_window(path):
+    """按 ARCN 的 progress 界定弧内稳态段，重算掉速与航向误差。
+
+    场景脚本里的 speed_dip_pct 用的是采样序列的 15%~85% 粗窗口，会把入弧、
+    出弧过渡段乃至弧结束后的减速一并算进去——同一条 R=12 m / 5 m/s 的弧，
+    粗窗口给 38%，而按 progress 界定只有 1.7%。**量错窗口比量错量更隐蔽**，
+    因为得到的数字看上去总是「合理」的。
+
+    这里用 ARCN 自己报的 Prog 作边界：那是生成器对自身进度的判断，不依赖
+    任何对起止时刻的猜测。
+    """
+    if not path or not os.path.exists(path):
+        return {}
+    from pymavlink import DFReader
+    m = DFReader.DFReader_binary(path)
+    arc = []
+    while True:
+        msg = m.recv_match(type="ARCN")
+        if msg is None:
+            break
+        arc.append(msg)
+    if not arc:
+        return {}
+    win = [x for x in arc if 0.02 <= x.Prog <= 0.98]
+    if len(win) < 20:
+        return {}
+    tgt = win[0].Tgt
+    spd = [x.Spd for x in win]
+    hdg = [abs(x.HdgE) for x in win]
+    return {"arc_speed_dip_pct": round(100 * (1 - min(spd) / max(tgt, 1e-6)), 2),
+            "arc_speed_min_m_s": round(min(spd), 3),
+            "arc_hdg_err_mean_deg": round(sum(hdg) / len(hdg), 2),
+            "arc_hdg_err_max_deg": round(max(hdg), 2),
+            "arc_spiral_m": round(arc[0].Spir, 2),
+            "arc_duration_s": round((arc[-1].TimeUS - arc[0].TimeUS) / 1e6, 2)}
+
+
 def summarise_mag_align(path, declination_deg=None):
     """从日志分离磁罗盘的**安装偏差**与**磁干扰**。
 
@@ -1642,7 +1679,8 @@ def estimate_mag_yaw_offset_gps(path, declination_deg=None):
             "mag_gps_samples": len(rows)}
 
 
-def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False, detect=False):
+def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False, detect=False,
+                   land_on_fail=False):
     """P04：单个电机停转后的可控性。
 
     注入用 `SIM_ENGINE_FAIL` + `SIM_ENGINE_MUL=0`，它缩放的是 servo PWM
@@ -1686,6 +1724,16 @@ def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False, detect=F
         set_param(mon, "MOT_FAIL_IDX", motor)
     print("  === 电机 %d 停转注入于 t=%.1fs ===" % (motor, fail_ms / 1000.0))
 
+    if land_on_fail:
+        # 失效后不再试图定点。位置保持要靠倾斜抗风，而失效后倾角权限本就不足，
+        # 两者叠加会把姿态推到失控——实测无风时可控，2 m/s 风即坠毁。
+        # 适航条款要的是「受控应急着陆」，并不要求定点：放弃位置、随风漂移、
+        # 保住姿态与高度并下降，才是这一档声明的实际含义。
+        t_l = mon.sim_ms
+        while mon.sim_ms - t_l < 1000:
+            mon.recv()
+        set_mode_wait(mon, "LAND", 10)
+
     samples = []
     while mon.sim_ms - fail_ms < watch_s * 1000:
         mon.recv()
@@ -1696,7 +1744,7 @@ def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False, detect=F
         if not mon.armed:
             break
 
-    res = {"failed_motor": motor, "alt_m": alt, "degraded_mixer": bool(degrade), "detector_on": bool(detect),
+    res = {"failed_motor": motor, "alt_m": alt, "degraded_mixer": bool(degrade), "detector_on": bool(detect), "land_on_fail": bool(land_on_fail),
            "fail_time_ms": fail_ms,
            "alt_before_m": sum(pre) / len(pre) if pre else None,
            "still_armed_after_watch": bool(mon.armed)}
@@ -1705,7 +1753,7 @@ def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False, detect=F
         res["alt_end_m"] = samples[-1][1]
         res["horiz_drift_max_m_s"] = max(s[2] for s in samples)
     # 失效后不再尝试正常降落：此时的可控性正是被测对象，强行切模式会掩盖结果
-    if mon.armed:
+    if mon.armed and not land_on_fail:
         set_mode_wait(mon, "LAND")
         wait_disarmed(mon, 120)
     print("  掉高 %.1f m，水平漂移峰值 %.1f m/s，%s"
@@ -1729,7 +1777,8 @@ def summarise_motor_fail(path, fail_time_ms=None):
         t = msg.TimeUS * 1e-6
         typ = msg.get_type()
         if typ == "ATT":
-            att.append((t, msg.Roll, msg.Pitch, msg.Yaw, msg.DesRoll, msg.DesPitch))
+            att.append((t, msg.Roll, msg.Pitch, msg.Yaw, msg.DesRoll, msg.DesPitch,
+                        msg.DesYaw))
         elif typ == "RATE":
             rate.append((t, msg.Y))
         elif typ == "RCOU":
@@ -1756,6 +1805,43 @@ def summarise_motor_fail(path, fail_time_ms=None):
 
     roll_err = [abs(a[1] - a[4]) for a in win]
     pitch_err = [abs(a[2] - a[5]) for a in win]
+
+    # 航向**角**是否稳定，而不只是角速率是否小：1.6 deg/s 的残余自旋听起来
+    # 微不足道，持续 20 秒就是 32 度的航向漂移，喷幅方向与前视避障早已失准。
+    # 判据必须落在角度上。
+    def _wrap180(d):
+        while d > 180:
+            d -= 360
+        while d < -180:
+            d += 360
+        return d
+    yaw_err = [abs(_wrap180(a[3] - a[6])) for a in win]
+    # 相对失效瞬间的累计漂移，用来区分「稳在一个偏值上」与「一直在转」
+    yaw0 = win[0][3]
+    yaw_drift = [abs(_wrap180(a[3] - yaw0)) for a in win]
+
+    # 切换到降级混控是一次控制结构的突变，必然有过渡过程。把它和稳态分开
+    # 评价，否则一个数字同时背着「超调多大」和「最后稳在哪」两件事，两边
+    # 都说不清：实测航向误差峰值 24 度而末值 12 度，前者是过渡超调，后者才
+    # 是稳态偏差，用峰值判稳态会误判，用末值判过渡则会漏掉超调。
+    def _profile(series, band, tail_s=5.0):
+        t = [a[0] for a in win]
+        n = len(series)
+        overshoot = max(series)
+        # 调节时间：误差首次进入 band 且此后不再越出
+        settle = None
+        for i in range(n):
+            if all(v <= band for v in series[i:]):
+                settle = t[i] - t[0]
+                break
+        tail = [series[i] for i in range(n) if t[i] >= t[-1] - tail_s] or series[-1:]
+        return {"overshoot_deg": round(overshoot, 2),
+                "settle_s": round(settle, 2) if settle is not None else None,
+                "steady_deg": round(sum(tail) / len(tail), 2),
+                "steady_osc_deg": round(max(tail) - min(tail), 2)}
+
+    yaw_prof = _profile(yaw_err, band=15.0)
+    roll_prof = _profile(roll_err, band=10.0)
     yr = [abs(r[1]) for r in rate if t_fail <= r[0] <= t_fail + 20]
     ch_win = [c for t, c in rcou if t_fail <= t <= t_fail + 20]
     sat = 0
@@ -1766,7 +1852,9 @@ def summarise_motor_fail(path, fail_time_ms=None):
     # 内置推力丢失检测的触发延迟
     det = None
     for t, s in msgs:
-        if "Thrust Loss" in s and t >= t_fail:
+        # 兼容内置检测与本项目检测器两种提示语
+        if t >= t_fail and ("Thrust Loss" in s or
+                            ("Motor" in s and ("stopped" in s or "degraded" in s))):
             det = t - t_fail
             break
 
@@ -1774,6 +1862,17 @@ def summarise_motor_fail(path, fail_time_ms=None):
             "detect_delay_s": round(det, 2) if det is not None else None,
             "roll_err_max_deg": round(max(roll_err), 2),
             "pitch_err_max_deg": round(max(pitch_err), 2),
+            "yaw_err_max_deg": round(max(yaw_err), 2),
+            "yaw_err_end_deg": round(yaw_err[-1], 2),
+            "yaw_drift_max_deg": round(max(yaw_drift), 2),
+            "yaw_overshoot_deg": yaw_prof["overshoot_deg"],
+            "yaw_settle_s": yaw_prof["settle_s"],
+            "yaw_steady_deg": yaw_prof["steady_deg"],
+            "yaw_steady_osc_deg": yaw_prof["steady_osc_deg"],
+            "roll_overshoot_deg": roll_prof["overshoot_deg"],
+            "roll_settle_s": roll_prof["settle_s"],
+            "roll_steady_deg": roll_prof["steady_deg"],
+            "roll_steady_osc_deg": roll_prof["steady_osc_deg"],
             "yaw_rate_max_degs": round(max(yr), 1) if yr else None,
             "yaw_rate_mean_degs": round(sum(yr) / len(yr), 1) if yr else None,
             "motor_saturation_frac": round(sat, 3)}
@@ -1949,6 +2048,8 @@ def main(argv=None):
     parser.add_argument("--variant", help="结果里记录的变体名，例如 baseline-algo / candidate-algo")
     parser.add_argument("--turn-offset", type=float, default=ROUTE_TURN_OFFSET_M,
                         help="route 场景的掉头连接段长度（米），用于分辨掉速是几何还是限幅所致")
+    parser.add_argument("--land-on-fail", action="store_true",
+                        help="失效后切 LAND，放弃定点——受控应急着陆不要求定点")
     parser.add_argument("--detect", action="store_true",
                         help="打开基于转速的停转检测器，由它自己发现失效电机")
     parser.add_argument("--degrade", action="store_true",
@@ -2011,7 +2112,8 @@ def main(argv=None):
         elif args.case == "uturn-auto":
             result.update(run_uturn_auto(mon, args.swath, turns=args.turns))
         elif args.case == "motor-fail":
-            result.update(run_motor_fail(mon, args.motor, degrade=args.degrade, detect=args.detect))
+            result.update(run_motor_fail(mon, args.motor, degrade=args.degrade, detect=args.detect,
+                                         land_on_fail=args.land_on_fail))
         elif args.case == "mag-align":
             result.update(run_mag_align(mon))
         elif args.case == "yaw-step":
@@ -2039,6 +2141,8 @@ def main(argv=None):
     result["metrics"] = summarise_log(result["dataflash_log"])
     if args.case == "yaw-step":
         result["metrics"].update(summarise_yaw_step(result["dataflash_log"]))
+    if args.case in ("uturn-arcnav", "uturn-auto", "uturn-guided"):
+        result["metrics"].update(summarise_arc_window(result["dataflash_log"]))
     if args.case == "motor-fail":
         result["metrics"].update(summarise_motor_fail(result["dataflash_log"],
                                                      result.get("fail_time_ms")))

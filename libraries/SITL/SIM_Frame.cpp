@@ -509,6 +509,7 @@ void Frame::load_frame_params(const char *model_json)
         {"position", &model.motor_pos, VarType::VECTOR3F},
         {"vector", &model.motor_thrust_vec, VarType::VECTOR3F},
         {"yaw", &model.yaw_factor, VarType::FLOAT},
+        {"thrust_scale", &model.motor_thrust_scale, VarType::FLOAT},
     };
     char label_name[20];
     for (uint8_t i=0; i<ARRAY_SIZE(per_motor_vars); i++) {
@@ -605,6 +606,9 @@ void Frame::init(const char *frame_str, Battery *_battery)
 
     for (uint8_t i=0; i<num_motors; i++) {
         motors[i].set_vrs_params(model.vrs_gain, model.vrs_peak, model.vrs_width);
+        // zero means unspecified, so a model that predates this keeps nominal thrust
+        motors[i].set_thrust_scale(is_positive(model.motor_thrust_scale[i]) ?
+                                   model.motor_thrust_scale[i] : 1.0f);
         motors[i].setup_params(model.pwmMin, model.pwmMax, model.spin_min, model.spin_max, model.propExpo, model.slew_max,
                                model.diagonal_size, power_factor, model.maxVoltage, effective_prop_area, velocity_max,
                                model.motor_pos[i], model.motor_thrust_vec[i], model.yaw_factor[i], true_prop_area,
