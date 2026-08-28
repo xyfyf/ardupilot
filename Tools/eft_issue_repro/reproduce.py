@@ -225,7 +225,7 @@ def connect(process):
 MISSION_TYPE_MISSION = 0     # MAV_MISSION_TYPE_MISSION
 
 
-def upload_fence(mon, radius_m, lat, lon, sides=0):
+def upload_fence(mon, radius_m, lat, lon, sides=0, rotate_deg=0.0):
     """上传 polyfence 包含区。sides=0 给包含圆，>=3 给外接半径 radius_m 的正多边形。
 
     两种形状不能混用，因为路径规划器对它们的支持不同：
@@ -236,8 +236,11 @@ def upload_fence(mon, radius_m, lat, lon, sides=0):
     """
     items = []
     if sides >= 3:
+        # rotate_deg 决定正南方向撞到的是顶点还是边心——两者几何不同：
+        # 顶点处到围栏的距离是外接半径 R，边心处只有 R·cos(pi/N)。
+        # AC_Avoid 对多边形走的是与圆形不同的代码路径，冲角比冲边更难，必须分开测。
         for k in range(sides):
-            th = 2.0 * math.pi * k / sides
+            th = 2.0 * math.pi * k / sides + math.radians(rotate_deg)
             la, lo = ne_to_latlon(lat, lon,
                                   radius_m * math.cos(th), radius_m * math.sin(th))
             items.append((mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION,
@@ -2249,6 +2252,8 @@ def main(argv=None):
                         help="上传一个以 Home 为心的 polyfence 包含圆（米）。"
                              "路径规划器只认 polyfence，不认 FENCE_RADIUS 参数式围栏，"
                              "要验证 AUTO 下的围控必须走这条路")
+    parser.add_argument("--polyfence-rotate", type=float, default=0.0, metavar="DEG",
+                        help="多边形围栏旋转角，用于选择正南撞到顶点还是边心")
     parser.add_argument("--fence-mode", default="LOITER", metavar="MODE",
                         help="fence 场景中被测的飞行模式（LOITER/POSHOLD/ALT_HOLD/SPORT/…）")
     parser.add_argument("--polyfence-sides", type=int, default=0, metavar="N",
@@ -2315,7 +2320,8 @@ def main(argv=None):
             # 必须在任务之前上传：路径规划器在任务开始时读取围栏，
             # 中途上传不会重新规划已经在飞的航段。
             upload_fence(mon, args.polyfence_radius, HOME[0], HOME[1],
-                         sides=args.polyfence_sides)
+                         sides=args.polyfence_sides,
+                         rotate_deg=args.polyfence_rotate)
             result["polyfence_radius_m"] = args.polyfence_radius
             result["polyfence_sides"] = args.polyfence_sides
         if args.case == "landing":

@@ -132,6 +132,27 @@ SUITE = [
             "超出说明刹车链路坏了，低于 40 m 则说明测试没真正逼近围栏",
     ),
     dict(
+        # 更严的一档：改用 polyfence（路径规划器唯一认的形式）且余量压到 2 m。
+        # LOITER 的接近速度上限由倾角决定——实测指令顶到 PSC_ANGLE_MAX=20° 时
+        # 速度峰值 6.33 m/s，再设高的 LOIT_SPEED 也上不去，故本项即全速度包线。
+        pid="P05", name="围栏-LOITER严格档", case="fence",
+        args=["--fence-mode", "LOITER", "--polyfence-radius", "60",
+              "--set", "FENCE_ENABLE=1", "--set", "FENCE_TYPE=4",
+              "--set", "FENCE_MARGIN=2", "--set", "FENCE_ACTION=0"],
+        metrics=lambda r: {
+            "最深进入": "%.2f m" % max((s.get("closest_radius_m", 0)
+                                    for s in r.get("steps", [])), default=-1),
+            "最小栏内余量": "%.2f m" % (60.0 - max((s.get("closest_radius_m", 0)
+                                              for s in r.get("steps", [])), default=99)),
+            "越界档数": str(sum(1 for s in r.get("steps", []) if s.get("breached")))},
+        check=lambda r: (len(r.get("steps", [])) >= 4
+                         and all(not s.get("breached") for s in r.get("steps", []))
+                         and max((s.get("closest_radius_m", 99)
+                                  for s in r.get("steps", [])), default=99) < 60.0),
+        why="LOITER 是唯一有主动围控的手动模式，也是作业期间的推荐模式。"
+            "余量压到 2 m 仍不得越界；越界说明避障链路坏了",
+    ),
+    dict(
         pid="P05", name="电子围栏边界-LOITER", case="fence", args=[],
         metrics=lambda r: {
             "最小实际余量": "%.2f m" % min((s.get("margin_achieved_m", 9)
