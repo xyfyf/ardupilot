@@ -222,6 +222,85 @@ def connect(process):
     raise RuntimeError("45 秒内未获得有效 GPS/EKF 位置")
 
 
+MISSION_TYPE_MISSION = 0     # MAV_MISSION_TYPE_MISSION
+
+
+def upload_fence(mon, radius_m, lat, lon, sides=0):
+    """上传 polyfence 包含区。sides=0 给包含圆，>=3 给外接半径 radius_m 的正多边形。
+
+    两种形状不能混用，因为路径规划器对它们的支持不同：
+      AP_OADijkstra    只认包含**多边形**（_inclusion_polygon_pts），不认包含圆
+      AP_OABendyRuler  两者都认
+      AC_Avoid         两者都认（LOITER/GUIDED 用的就是它）
+    而三者**都不认** FENCE_RADIUS 那个参数式圆形围栏。
+    """
+    items = []
+    if sides >= 3:
+        for k in range(sides):
+            th = 2.0 * math.pi * k / sides
+            la, lo = ne_to_latlon(lat, lon,
+                                  radius_m * math.cos(th), radius_m * math.sin(th))
+            items.append((mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION,
+                          float(sides), la, lo))
+        label = "包含多边形 %d 边 外接半径 %.1f m" % (sides, radius_m)
+    else:
+        items.append((mavutil.mavlink.MAV_CMD_NAV_FENCE_CIRCLE_INCLUSION,
+                      float(radius_m), lat, lon))
+        label = "包含圆 半径 %.1f m" % radius_m
+    _upload_fence_items(mon, items, label)
+
+
+def _upload_fence_items(mon, items, label):
+    """上传一个 polyfence 包含圆（MAV_MISSION_TYPE_FENCE 通道）。
+
+    为什么不能用 FENCE_RADIUS 那个参数式圆形围栏：三个路径规划器
+    （AP_OADijkstra / AP_OABendyRuler / AC_Avoid 的多边形分支）读的都是
+    polyfence 存储，**不认参数式圆形围栏**。也就是说想让 AUTO 下的围控
+    真正生效，围栏必须走这条上传通道。
+    """
+    mav = mon.mav
+    mav.mav.mission_clear_all_send(
+        mav.target_system, mav.target_component,
+        mavutil.mavlink.MAV_MISSION_TYPE_FENCE)
+    mav.mav.mission_count_send(
+        mav.target_system, mav.target_component, len(items),
+        mavutil.mavlink.MAV_MISSION_TYPE_FENCE)
+    deadline = time.monotonic() + 20
+    acked = False
+    sent = set()
+    while time.monotonic() < deadline and not acked:
+        msg = mon.recv()
+        if msg is None:
+            continue
+        typ = msg.get_type()
+        if typ in ("MISSION_REQUEST", "MISSION_REQUEST_INT"):
+            if getattr(msg, "mission_type", 0) != mavutil.mavlink.MAV_MISSION_TYPE_FENCE:
+                continue
+            sent.add(msg.seq)
+            cmd, p1, ilat, ilon = items[msg.seq]
+            mav.mav.mission_item_int_send(
+                mav.target_system, mav.target_component, msg.seq,
+                mavutil.mavlink.MAV_FRAME_GLOBAL,
+                cmd, 0, 1,
+                float(p1), 0.0, 0.0, 0.0,
+                int(ilat * 1e7), int(ilon * 1e7), 0.0,
+                mavutil.mavlink.MAV_MISSION_TYPE_FENCE)
+        elif typ == "MISSION_ACK":
+            if getattr(msg, "mission_type", 0) != mavutil.mavlink.MAV_MISSION_TYPE_FENCE:
+                continue
+            # mission_clear_all 自己也会回一条 ACK。在发出任何一项之前收到的
+            # ACK 是那一条，不是上传结果——照单全收就会「上传成功」却什么都没写，
+            # 飞控侧随后打印 Fence upload timeout，而脚本这边毫无察觉。
+            if not sent:
+                continue
+            if msg.type != mavutil.mavlink.MAV_MISSION_ACCEPTED:
+                raise RuntimeError("围栏上传被拒: %s" % msg.type)
+            acked = True
+    if not acked:
+        raise RuntimeError("围栏上传超时")
+    print("  已上传 polyfence %s（飞控已确认 %d 项）" % (label, len(sent)))
+
+
 def upload_mission(mon, items):
     mav = mon.mav
     mav.mav.mission_clear_all_send(
@@ -237,6 +316,12 @@ def upload_mission(mon, items):
         if msg is None:
             continue
         typ = msg.get_type()
+        # 必须按 mission_type 过滤。任务、围栏、集结点共用同一套 MISSION_*
+        # 消息，只靠 mission_type 区分；不过滤的话，前一次围栏上传留下的那条
+        # FENCE 型 MISSION_ACK 会被当成本次任务的 ACK 收下，于是刚发出第一项
+        # 就判定「上传完成」，报「只上传了 1/7 项」。
+        if getattr(msg, "mission_type", MISSION_TYPE_MISSION) != MISSION_TYPE_MISSION:
+            continue
         if typ in ("MISSION_REQUEST", "MISSION_REQUEST_INT"):
             seq = msg.seq
             item = items[seq]
@@ -387,7 +472,7 @@ def run_landing(mon, release_alt_m=None, release_speed_cms=200):
         if not released:
             print("  警告：注入未触发（airborne=%s）" % airborne)
         if mon.armed:
-            wait_disarmed(mon, 60)
+            wait_disarmed(mon, 180)
 
     delay = None
     if mon.touch_ms is not None and mon.disarm_ms is not None:
@@ -2127,6 +2212,12 @@ def main(argv=None):
                         help="打开基于转速的停转检测器，由它自己发现失效电机")
     parser.add_argument("--degrade", action="store_true",
                         help="失效同时写 MOT_FAIL_IDX，启用降级混控（剔除失效电机并放弃偏航）")
+    parser.add_argument("--polyfence-radius", type=float, default=None, metavar="M",
+                        help="上传一个以 Home 为心的 polyfence 包含圆（米）。"
+                             "路径规划器只认 polyfence，不认 FENCE_RADIUS 参数式围栏，"
+                             "要验证 AUTO 下的围控必须走这条路")
+    parser.add_argument("--polyfence-sides", type=int, default=0, metavar="N",
+                        help="0 给包含圆；>=3 给正多边形。Dijkstra 只认多边形")
     parser.add_argument("--fail-alt", type=float, default=None,
                         help="motor-fail 场景中注入失效时的高度 m（默认沿用航线高度）。"
                              "适航「不超出限制区域」的判据落在失效点起算的水平位移上，"
@@ -2182,6 +2273,13 @@ def main(argv=None):
               "param_overrides": overrides}
     try:
         mon = connect(proc)
+        if args.polyfence_radius:
+            # 必须在任务之前上传：路径规划器在任务开始时读取围栏，
+            # 中途上传不会重新规划已经在飞的航段。
+            upload_fence(mon, args.polyfence_radius, HOME[0], HOME[1],
+                         sides=args.polyfence_sides)
+            result["polyfence_radius_m"] = args.polyfence_radius
+            result["polyfence_sides"] = args.polyfence_sides
         if args.case == "landing":
             result.update(run_landing(mon, args.release_alt, args.release_speed))
         elif args.case == "circle":
