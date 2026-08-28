@@ -690,6 +690,18 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
         for (uint8_t r = 0; r < rows; r++) {
             rem[r] = demand[r];
         }
+        // The throttle demand is per motor, not a total to divide up: forward
+        // mixing gives every motor throttle_thrust * _throttle_factor[i].  The
+        // rows here form a linear system whose throttle row *sums* the motors,
+        // so the demand has to be scaled by how many there are or the solve
+        // delivers 1/n of the lift that was asked for.  Getting this wrong is
+        // not subtle in the air but is easy to miss on paper: with six motors
+        // trimmed at 0.161 and one gone, each survivor needs 0.193, the solver
+        // handed out 0.039, and the vehicle sank at 2.5 m/s with the throttle
+        // pinned at 1.0 - which still hovers, because 1.0/5 = 0.2 lands just
+        // above 0.193, so it read as a controlled hover at a lower altitude
+        // rather than as a thrust shortfall.
+        rem[0] *= (float)n;
         for (uint8_t k = 0; k < n; k++) {
             if (freed[k]) {
                 continue;

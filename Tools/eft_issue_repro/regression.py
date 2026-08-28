@@ -58,12 +58,14 @@ SUITE = [
         metrics=lambda r: {"检测延迟": "%.2f s" % _detect_delay(r),
                            "滚转误差峰值": "%.1f°" % (_m(r, "roll_err_max_deg") or -1),
                            "滚转稳态": "%.1f°" % (_m(r, "roll_steady_deg") or -1),
-                           "水平漂移": "%.1f m/s" % (_m(r, "horiz_drift_max_m_s") or -1)},
+                           "水平漂移": "%.1f m/s" % (_m(r, "horiz_drift_max_m_s") or -1),
+                           "掉高": "%.2f m" % _alt_loss(r)},
         # 6 号为最不利失效位置（正右，滚转力臂最大）
         # 判据落在**姿态**上。航向在单发失效后是被放弃的那一维——权限只够
         # 保姿态或保航向，不能兼得，实测保航向在 2 m/s 风下即坠毁。
         check=lambda r: (bool(_m(r, "still_armed_after_watch")) and _detect_delay(r) < 0.5
-                         and abs(_m(r, "roll_steady_deg") or 999) < 10.0),
+                         and abs(_m(r, "roll_steady_deg") or 999) < 10.0)
+                        and _alt_loss(r) < 2.0,
         why="4 m/s 风下失效后须保持姿态可控、检测在 0.5 s 内；不降级的基线是 16.8 s 后坠毁",
     ),
     dict(
@@ -145,6 +147,17 @@ SUITE = [
         why="LOITER 有主动避障，四档接近都不该越界；越界或冲入余量线超 0.5 m 说明避障链路坏了",
     ),
 ]
+
+
+def _alt_loss(r):
+    """失效后的掉高。判据必须看这一项：曾经有一个混控量纲错误让飞机从 15 m
+    一路掉到地面、触地后靠满油门浮在 1.9 m，而当时所有判据——姿态、漂移、
+    是否仍解锁——**全部通过**。姿态好看是因为它当时正稳稳地往下掉。"""
+    before = r.get("alt_before_m")
+    lowest = r.get("alt_min_after_fail_m")
+    if before is None or lowest is None:
+        return float("inf")     # 拿不到高度就不能算通过
+    return before - lowest
 
 
 def _detect_delay(r):

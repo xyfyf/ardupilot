@@ -1771,14 +1771,32 @@ def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False, detect=F
     print("  === 电机 %d 停转注入于 t=%.1fs ===" % (motor, fail_ms / 1000.0))
 
     if land_on_fail:
-        # 失效后不再试图定点。位置保持要靠倾斜抗风，而失效后倾角权限本就不足，
-        # 两者叠加会把姿态推到失控——实测无风时可控，2 m/s 风即坠毁。
-        # 适航条款要的是「受控应急着陆」，并不要求定点：放弃位置、随风漂移、
-        # 保住姿态与高度并下降，才是这一档声明的实际含义。
+        # 切 LAND 让它尽快下来，而不是继续悬停等着。
+        #
+        # 这段的理由已经变了，记录一下免得后人照旧注释理解：早先没有降级重分配
+        # 时，失效后维持定点悬停要靠倾斜抗风，而倾角权限本就不足，两者叠加会把
+        # 姿态推到失控——无风勉强可控，2 m/s 风即坠毁，所以当时的说法是「放弃
+        # 位置、随风漂移」。MOT_FAIL_ALLOC 的重分配伪逆做出来之后这条不再成立：
+        # 8 m/s 风下悬停也能存活，且 LAND 本身是带水平位置控制的，实测从 15 m
+        # 降到地面全程水平位移不超过 0.3 m。
+        #
+        # 现在切 LAND 的理由是另外两条：一是适航条款要的就是「受控应急着陆」，
+        # 二是下降本身能压低偏航转速（总推力降下来，寄生偏航力矩随之下降，
+        # 实测平均转速 -27%）。
         t_l = mon.sim_ms
         while mon.sim_ms - t_l < 1000:
             mon.recv()
         set_mode_wait(mon, "LAND", 10)
+
+    # 失效瞬间的水平位置。适航条文两档都要求「不超出限制区域」，而判据落在
+    # **从失效点算起的水平位移**上，不是落在速度上：飞机放弃位置保持后随风漂移，
+    # 漂多远决定了围栏半径必须比限制区域边界内缩多少。
+    fail_xy = (mon.local.x, mon.local.y) if mon.local is not None else (0.0, 0.0)
+
+    # 要落地的科目必须看到触地。默认 35 s 只够看住悬停段的过渡与稳态，
+    # 从数十米降到地面要更久，窗口不够会在半空截断，量出的水平位移偏小。
+    if land_on_fail and watch_s < 150.0:
+        watch_s = 150.0
 
     samples = []
     while mon.sim_ms - fail_ms < watch_s * 1000:
@@ -1786,7 +1804,8 @@ def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False, detect=F
         if mon.local is None:
             continue
         samples.append(((mon.sim_ms - fail_ms) / 1000.0, -mon.local.z,
-                        math.hypot(mon.local.vx, mon.local.vy)))
+                        math.hypot(mon.local.vx, mon.local.vy),
+                        mon.local.x, mon.local.y))
         if not mon.armed:
             break
 
@@ -1798,6 +1817,14 @@ def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False, detect=F
         res["alt_min_after_fail_m"] = min(s[1] for s in samples)
         res["alt_end_m"] = samples[-1][1]
         res["horiz_drift_max_m_s"] = max(s[2] for s in samples)
+        # 自失效点起的水平位移：峰值与末值。末值是落地/观察结束时的偏离，
+        # 峰值覆盖中途荡出去又荡回来的情形——围栏要按峰值留裕度。
+        res["horiz_excursion_max_m"] = max(
+            math.hypot(s[3] - fail_xy[0], s[4] - fail_xy[1]) for s in samples)
+        res["horiz_excursion_end_m"] = math.hypot(
+            samples[-1][3] - fail_xy[0], samples[-1][4] - fail_xy[1])
+        res["watch_end_alt_m"] = samples[-1][1]
+        res["landed_within_watch"] = not mon.armed
     # 失效后不再尝试正常降落：此时的可控性正是被测对象，强行切模式会掩盖结果
     if mon.armed and not land_on_fail:
         set_mode_wait(mon, "LAND")
@@ -2100,6 +2127,10 @@ def main(argv=None):
                         help="打开基于转速的停转检测器，由它自己发现失效电机")
     parser.add_argument("--degrade", action="store_true",
                         help="失效同时写 MOT_FAIL_IDX，启用降级混控（剔除失效电机并放弃偏航）")
+    parser.add_argument("--fail-alt", type=float, default=None,
+                        help="motor-fail 场景中注入失效时的高度 m（默认沿用航线高度）。"
+                             "适航「不超出限制区域」的判据落在失效点起算的水平位移上，"
+                             "而位移随下降耗时增长，故须按拟运行高度分别验证")
     parser.add_argument("--release-alt", type=float, default=None,
                         help="landing 场景：在离地这么高时放开限速，复现 LNDS 近地误判")
     parser.add_argument("--release-speed", type=int, default=200,
@@ -2163,7 +2194,8 @@ def main(argv=None):
             result.update(run_uturn_auto(mon, args.swath, turns=args.turns))
         elif args.case == "motor-fail":
             result.update(run_motor_fail(mon, args.motor, degrade=args.degrade, detect=args.detect,
-                                         land_on_fail=args.land_on_fail))
+                                         land_on_fail=args.land_on_fail,
+                                         alt=args.fail_alt))
         elif args.case == "mag-align":
             result.update(run_mag_align(mon))
         elif args.case == "yaw-step":
