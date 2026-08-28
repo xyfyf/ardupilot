@@ -154,6 +154,12 @@ public:
     //
     // demand is [throttle, roll, pitch, yaw]; returns false if the geometry is
     // degenerate.  See Durham, Bordignon & Beck, "Aircraft Control Allocation".
+    // Yaw factors as the airframe's geometry gives them, captured when a motor
+    // is removed and before surrender_yaw scales the live ones toward zero.
+    // The mixer stops *commanding* yaw, but the rotors keep *producing* it, so
+    // the suppression term in allocate_redistributed() has to work from these.
+    float               _yaw_geom[AP_MOTORS_MAX_NUM_MOTORS];
+
     bool                allocate_redistributed(const float demand[4], bool include_yaw,
                                                float thrust_out[AP_MOTORS_MAX_NUM_MOTORS]) const;
 

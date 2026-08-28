@@ -189,6 +189,7 @@ protected:
 
     // 0 = forward mixing, 1 = redistributed pseudoinverse after a failure
     AP_Int8         _fail_alloc_mode;
+    AP_Float        _fail_yaw_suppress;
 
     // rpm-based stopped-motor detection
     AP_Float        _fail_rpm_min;

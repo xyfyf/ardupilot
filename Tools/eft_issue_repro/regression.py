@@ -115,11 +115,34 @@ SUITE = [
         why="偏航能力是协调转弯的硬约束，掉了说明偏航通道被改坏",
     ),
     dict(
-        pid="P05", name="电子围栏边界", case="fence", args=[],
-        metrics=lambda r: {k: str(v) for k, v in list(r.items())[:2]
-                           if k not in ("case", "variant")},
-        check=lambda r: True,   # 判据待 P05 现象刻画清楚后补
-        why="P05 尚未刻画出具体现象，此处仅确保场景可跑通",
+        # AUTO 下围栏不拦飞机，只在越界后触发动作——这是 ArduPilot 的设计，
+        # 不是缺陷。本项不判「不许越界」（那必然失败），而是盯**刹车动作还管不管用**：
+        # 实测 FENCE_ACTION=4 从越界到停住耗 5.8 m，判据留到 10 m。
+        # 航线自然最远约 61 m，围栏设 40 m，必然越界。
+        pid="P05", name="围栏-AUTO刹车动作", case="route",
+        args=["--set", "FENCE_ENABLE=1", "--set", "FENCE_TYPE=2",
+              "--set", "FENCE_RADIUS=40", "--set", "FENCE_MARGIN=5",
+              "--set", "FENCE_ACTION=4"],
+        metrics=lambda r: {"距Home最远": "%.1f m" % (r.get("max_radius_m") or -1),
+                           "越界量": "%.1f m" % ((r.get("max_radius_m") or 0) - 40.0)},
+        check=lambda r: 40.0 < (r.get("max_radius_m") or 0) < 50.0,
+        why="AUTO 下必然越界（水平航迹不过避障）；但 Brake 动作须在 10 m 内刹住，"
+            "超出说明刹车链路坏了，低于 40 m 则说明测试没真正逼近围栏",
+    ),
+    dict(
+        pid="P05", name="电子围栏边界-LOITER", case="fence", args=[],
+        metrics=lambda r: {
+            "最小实际余量": "%.2f m" % min((s.get("margin_achieved_m", 9)
+                                       for s in r.get("steps", [])), default=-1),
+            "最大冲入余量线": "%.3f m" % max((s.get("margin_overshoot_m", -9)
+                                        for s in r.get("steps", [])), default=-1),
+            "越界档数": str(sum(1 for s in r.get("steps", []) if s.get("breached")))},
+        # LOITER 下主动避障生效，四档接近都应停在余量线内不越界。
+        # 这一项只覆盖 LOITER；AUTO 下围栏不拦飞机（见基线文档第 7 节），
+        # 那条由下面的 P05-AUTO 项单独盯。
+        check=lambda r: all(not s.get("breached") for s in r.get("steps", []))
+                        and all(s.get("margin_overshoot_m", 9) < 0.5 for s in r.get("steps", [])),
+        why="LOITER 有主动避障，四档接近都不该越界；越界或冲入余量线超 0.5 m 说明避障链路坏了",
     ),
 ]
 

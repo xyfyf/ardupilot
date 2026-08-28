@@ -863,9 +863,15 @@ def run_route(mon, turn_offset=ROUTE_TURN_OFFSET_M, turn_deg=90.0):
             break
 
     wait_disarmed(mon, 60)
+    # 距 Home 的最远距离。围栏场景要用：AUTO 的水平航迹**不过避障**
+    # （mode_auto.cpp 里只有 get_avoidance_adjusted_climbrate_ms，管爬升率），
+    # 所以围栏在 AUTO 下只是越界后的触发器，冲出量必须实测而不能假定为零。
+    max_radius_m = max((math.hypot(sx, sy) for _, _, sx, sy, _ in samples),
+                       default=0.0)
     return {"waypoints_ne_m": ROUTE_WPS,
             "turn_offset_m": turn_offset,
             "turn_deg": turn_deg,
+            "max_radius_m": max_radius_m,
             "segments": summarise_route(samples)}
 
 

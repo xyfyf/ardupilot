@@ -704,6 +704,25 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
         }
 
         // Minimum-norm solution on the free motors: T = B^T (B B^T)^-1 rem.
+        //
+        // With yaw out of the demand there are more free motors than rows, so
+        // the solution is not unique - a null space is left over, and every
+        // point in it delivers the same throttle, roll and pitch. Minimum norm
+        // picks one of them without regard to how much yaw moment it leaves
+        // behind, and on a hexacopter down one motor that choice is a poor one:
+        // it lands on a part of the trade-off that is strictly dominated, with
+        // both more residual yaw and less roll authority than a neighbouring
+        // solution. MOT_FAIL_YSUP steers the pick by minimising
+        //   |T|^2 + ysup * (yaw moment)^2
+        // over that same null space, which by Sherman-Morrison is the plain
+        // minimum-norm solve with (I - alpha*y*y^T) folded in.
+        //
+        // Note this suppresses the *parasitic* yaw moment - the target is zero,
+        // not the pilot's yaw demand. It is not MOT_FAIL_YAW, which puts yaw
+        // back into the demand and asks the controller to chase it.
+        const float ysup = (rows == 3) ? constrain_float(_fail_yaw_suppress, 0.0f, 1.0f) : 0.0f;
+        uint8_t n_free = 0;
+        float syaw[4] = {};     // s_a = sum over free motors of B[a][j] * yaw_j
         float bbt[16] = {};
         for (uint8_t k = 0; k < n; k++) {
             if (!freed[k]) {
@@ -712,9 +731,20 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
             const uint8_t m = idx[k];
             const float col[4] = { _throttle_factor[m], _roll_factor[m],
                                    _pitch_factor[m], _yaw_factor[m] };
+            n_free++;
             for (uint8_t a = 0; a < rows; a++) {
+                syaw[a] += col[a] * _yaw_geom[m];
                 for (uint8_t b = 0; b < rows; b++) {
                     bbt[a * rows + b] += col[a] * col[b];
+                }
+            }
+        }
+        // Yaw factors are +-1, so y^T y is just the number of free motors.
+        const float alpha = (is_positive(ysup) && n_free > 0) ? ysup / (float)n_free : 0.0f;
+        if (is_positive(alpha)) {
+            for (uint8_t a = 0; a < rows; a++) {
+                for (uint8_t b = 0; b < rows; b++) {
+                    bbt[a * rows + b] -= alpha * syaw[a] * syaw[b];
                 }
             }
         }
@@ -730,6 +760,13 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
             }
         }
 
+        float slam = 0.0f;
+        if (is_positive(alpha)) {
+            for (uint8_t a = 0; a < rows; a++) {
+                slam += syaw[a] * lambda[a];
+            }
+        }
+
         bool clamped_any = false;
         for (uint8_t k = 0; k < n; k++) {
             if (!freed[k]) {
@@ -741,6 +778,7 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
             if (include_yaw) {
                 t += _yaw_factor[m] * lambda[3];
             }
+            t -= alpha * _yaw_geom[m] * slam;
             if (t < 0.0f || t > 1.0f) {
                 thrust[k] = constrain_float(t, 0.0f, 1.0f);
                 freed[k] = false;
@@ -803,6 +841,13 @@ bool AP_MotorsMatrix::set_motor_failed(uint8_t motor_num, bool surrender_yaw)
         if (opposite >= 0) {
             remove_motor(opposite);
         }
+    }
+
+    // Snapshot the geometric yaw factors before surrender_yaw scales them.
+    // Zeroing _yaw_factor stops the mixer asking for yaw; it does not stop the
+    // remaining rotors from making it.  MOT_FAIL_YSUP needs the real geometry.
+    for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
+        _yaw_geom[i] = motor_enabled[i] ? _yaw_factor[i] : 0.0f;
     }
 
     if (surrender_yaw) {
