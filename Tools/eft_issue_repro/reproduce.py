@@ -513,7 +513,7 @@ def hold_stick_until(mon, pitch_pwm, predicate, max_sim_s, samples=None):
 
 def run_reverse(mon):
     command_takeoff(mon, 10.0)
-    set_mode_wait(mon, "LOITER")
+    set_mode_wait(mon, mode if mode in ("LOITER", "ALT_HOLD") else "LOITER")
     for _ in range(50):
         rc_override(mon)
         mon.recv()
@@ -574,9 +574,24 @@ CIRCLE_LAPS = 2
 LOITER_ANGLE_MAX_DEG = 15.0
 
 
+# 命令行 --set 指定过的参数名。场景内部的 set_param 会跳过它们。
+#
+# 不这样做的话，场景里硬编码的 set_param 会**静默覆盖**命令行的值，而结果看上去
+# 完全正常——只是测的不是你以为的那个配置。围栏场景上已栽过两次：
+# --set FENCE_ACTION=4 被场景内的 set_param(...,0) 覆盖，得出「开了刹车动作仍
+# 冲出 842 m」的错误结论；--set FENCE_MARGIN=2 同样被覆盖，两组本该不同的数据
+# 逐档相同。两次的表象都是「数字合理」，没有任何报错。
+CLI_OVERRIDDEN = set()
+
+
 def set_param(mon, name, value, timeout_ms=8000):
     """设参数并等飞控回读确认。CIRCLE_RATE 只在模式 init 时读取，所以调用方
-    必须退出 CIRCLE 再重进，否则改了不生效。"""
+    必须退出 CIRCLE 再重进，否则改了不生效。
+
+    命令行 --set 指定过的参数不再被场景内部覆盖，见 CLI_OVERRIDDEN。"""
+    if name in CLI_OVERRIDDEN:
+        print("  [跳过] %s 由命令行 --set 指定，场景内部不覆盖" % name)
+        return
     mon.mav.mav.param_set_send(mon.mav.target_system, mon.mav.target_component,
                                name.encode(), float(value),
                                mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
@@ -785,15 +800,29 @@ def horiz_radius(mon):
     return math.hypot(mon.local.x, mon.local.y)
 
 
-def run_fence(mon):
+def run_fence(mon, mode="LOITER", skip_param_fence=False):
+    """满杆冲向围栏，量各模式的实际围控能力。
+
+    mode 决定被测的是哪条链路——这正是问题所在，不同模式的水平围控**机制不同**：
+      LOITER / POSHOLD / ZIGZAG   走 loiter_nav->update()，AC_Loiter 默认带避障
+      GUIDED                       avoid.adjust_velocity + 目标点校验
+      AUTO / RTL / SMART_RTL       走 wp_nav，**需要 OA_TYPE**，默认关
+      CIRCLE / BRAKE               直驱 pos_control，**没有**水平避障
+      ALT_HOLD / STABILIZE / SPORT 无位置控制，**原理上无法**主动围控
+    对最后两类，唯一的防线是 FENCE_ACTION——越界之后才动作。
+
+    skip_param_fence=True 时不设 FENCE_RADIUS，改用外部上传的 polyfence，
+    因为路径规划器只认后者。
+    """
     command_takeoff(mon, 15.0)
     set_mode_wait(mon, "LOITER")
     for _ in range(60):
         rc_override(mon)
         mon.recv()
 
-    set_param(mon, "FENCE_TYPE", 2)          # 只留圆形围栏，隔离变量
-    set_param(mon, "FENCE_RADIUS", FENCE_RADIUS_M)
+    if not skip_param_fence:
+        set_param(mon, "FENCE_TYPE", 2)      # 只留圆形围栏，隔离变量
+        set_param(mon, "FENCE_RADIUS", FENCE_RADIUS_M)
     set_param(mon, "FENCE_ACTION", 0)        # 只报告，不触发 RTL，才能观察避障本身
     set_param(mon, "FENCE_ENABLE", 1)
     # 圆形围栏避障用的是 FENCE_MARGIN 而不是 AVOID_MARGIN
@@ -810,8 +839,12 @@ def run_fence(mon):
     for speed in FENCE_APPROACH_SPEEDS_MS:
         # LOIT_SPEED 在 AC_Loiter::init() 读取，必须退出再进 LOITER 才生效
         set_param(mon, "LOIT_SPEED", speed * 100.0)
+        # 先退到 ALT_HOLD 再进被测模式：LOIT_SPEED 只在 AC_Loiter::init() 读取，
+        # 不退出重进不生效。被测模式必须是**最后**切的那个——早先版本把它切在
+        # 这之后又跟了一句切回 LOITER，结果四个模式测的全是 LOITER，
+        # 四档结果精确相同（55.07 m），差点当成「各模式都拦得住」的结论。
         set_mode_wait(mon, "ALT_HOLD", 15)
-        set_mode_wait(mon, "LOITER", 15)
+        set_mode_wait(mon, mode, 15)
 
         # 固定时长跑满：2 m/s 走完 60 m 需 30 s，留足余量。不要用「半径不再增长」
         # 当停止判据——起飞点 r≈0、速度≈0 时它会立刻误触发。
@@ -2216,6 +2249,8 @@ def main(argv=None):
                         help="上传一个以 Home 为心的 polyfence 包含圆（米）。"
                              "路径规划器只认 polyfence，不认 FENCE_RADIUS 参数式围栏，"
                              "要验证 AUTO 下的围控必须走这条路")
+    parser.add_argument("--fence-mode", default="LOITER", metavar="MODE",
+                        help="fence 场景中被测的飞行模式（LOITER/POSHOLD/ALT_HOLD/SPORT/…）")
     parser.add_argument("--polyfence-sides", type=int, default=0, metavar="N",
                         help="0 给包含圆；>=3 给正多边形。Dijkstra 只认多边形")
     parser.add_argument("--fail-alt", type=float, default=None,
@@ -2253,6 +2288,9 @@ def main(argv=None):
         except ValueError:
             raise SystemExit("--set 的值必须是数字，收到 %r" % item)
 
+    # 命令行指定的参数不允许被场景内部的 set_param 覆盖。见 CLI_OVERRIDDEN。
+    CLI_OVERRIDDEN.update(overrides.keys())
+
     if not os.path.exists(SITL_BIN):
         raise SystemExit("缺少 %s；先在仓库根目录执行 ./waf configure --board sitl && ./waf copter" % SITL_BIN)
     model_overrides = {}
@@ -2287,7 +2325,8 @@ def main(argv=None):
         elif args.case == "loiter-circle":
             result.update(run_loiter_circle(mon))
         elif args.case == "fence":
-            result.update(run_fence(mon))
+            result.update(run_fence(mon, args.fence_mode,
+                                    skip_param_fence=bool(args.polyfence_radius)))
         elif args.case == "uturn-auto":
             result.update(run_uturn_auto(mon, args.swath, turns=args.turns))
         elif args.case == "motor-fail":
