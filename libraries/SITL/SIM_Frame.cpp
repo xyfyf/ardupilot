@@ -486,6 +486,7 @@ void Frame::load_frame_params(const char *model_json)
         FRAME_VAR(vrs_peak),
         FRAME_VAR(vrs_width),
         {"velocity_torque_gain", &model.velocity_torque_gain, VarType::VECTOR3F},
+        {"yaw_torque_arm_m", &model.yaw_torque_arm_m, VarType::FLOAT},
         {"moment_inertia", &model.moment_of_inertia, VarType::VECTOR3F},
         FRAME_VAR(num_motors),
     };
@@ -695,6 +696,12 @@ void Frame::calculate_forces(const Aircraft &aircraft,
     torque.x += model.velocity_torque_gain.x * vel_air_bf.y;
     torque.y += model.velocity_torque_gain.y * vel_air_bf.x;
     torque.z += model.velocity_torque_gain.z * vel_air_bf.y;
+
+    // P08: standing yaw moment from mount tilt / prop mismatch / frame twist.
+    // Scales with total thrust, not constant - see Model::yaw_torque_arm_m.
+    if (!is_zero(model.yaw_torque_arm_m)) {
+        torque.z += model.yaw_torque_arm_m * thrust.length();
+    }
 
     // calculate total rotational acceleration
     rot_accel.x = torque.x / model.moment_of_inertia.x;

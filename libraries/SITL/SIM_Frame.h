@@ -183,6 +183,20 @@ private:
         // blade flapping can make the first two terms significant.
         Vector3f velocity_torque_gain;
 
+        // P08: a standing yaw moment proportional to total thrust, expressed as
+        // an effective moment arm in metres (yaw torque = this * total thrust).
+        //
+        // The three candidate causes on a real airframe - motor mounts tilted
+        // off the arm axis, CW and CCW props that are not matched, a twisted
+        // frame - all come out the same way: a yaw moment that scales with
+        // thrust rather than a constant one, because every one of them turns a
+        // fraction of each rotor's lift or drag into yaw.  So one parameter
+        // covers all three, and the field can convert back: sin(mount tilt) =
+        // this / arm radius.  The attitude controller trims it out and holds
+        // heading, at the cost of a permanent yaw output, which is exactly the
+        // signature seen in the real logs.
+        float yaw_torque_arm_m = 0.0;
+
         // if zero value will be estimated from mass
         Vector3f moment_of_inertia;
 
