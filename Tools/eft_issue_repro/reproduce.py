@@ -225,7 +225,7 @@ def connect(process):
 MISSION_TYPE_MISSION = 0     # MAV_MISSION_TYPE_MISSION
 
 
-def upload_fence(mon, radius_m, lat, lon, sides=0, rotate_deg=0.0):
+def upload_fence(mon, radius_m, lat, lon, sides=0, rotate_deg=0.0, points=None):
     """上传 polyfence 包含区。sides=0 给包含圆，>=3 给外接半径 radius_m 的正多边形。
 
     两种形状不能混用，因为路径规划器对它们的支持不同：
@@ -235,7 +235,16 @@ def upload_fence(mon, radius_m, lat, lon, sides=0, rotate_deg=0.0):
     而三者**都不认** FENCE_RADIUS 那个参数式圆形围栏。
     """
     items = []
-    if sides >= 3:
+    if points:
+        # 任意顶点（北,东 偏移，米）。真实田块边界既不规则也可能内凹，而**凹角**
+        # 是围栏避障最难的几何：凹角处两条边的外法向张开大于 180°，
+        # 「离边界多远」在角点附近不再由单条边决定。
+        for n, e in points:
+            la, lo = ne_to_latlon(lat, lon, n, e)
+            items.append((mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION,
+                          float(len(points)), la, lo))
+        label = "不规则包含多边形 %d 顶点" % len(points)
+    elif sides >= 3:
         # rotate_deg 决定正南方向撞到的是顶点还是边心——两者几何不同：
         # 顶点处到围栏的距离是外接半径 R，边心处只有 R·cos(pi/N)。
         # AC_Avoid 对多边形走的是与圆形不同的代码路径，冲角比冲边更难，必须分开测。
@@ -2252,6 +2261,9 @@ def main(argv=None):
                         help="上传一个以 Home 为心的 polyfence 包含圆（米）。"
                              "路径规划器只认 polyfence，不认 FENCE_RADIUS 参数式围栏，"
                              "要验证 AUTO 下的围控必须走这条路")
+    parser.add_argument("--polyfence-points", default=None, metavar="N,E;N,E;...",
+                        help="任意多边形顶点，相对 Home 的北/东偏移（米），分号分隔。"
+                             "给出时忽略 --polyfence-sides/--polyfence-radius 的形状")
     parser.add_argument("--polyfence-rotate", type=float, default=0.0, metavar="DEG",
                         help="多边形围栏旋转角，用于选择正南撞到顶点还是边心")
     parser.add_argument("--fence-mode", default="LOITER", metavar="MODE",
@@ -2316,12 +2328,17 @@ def main(argv=None):
               "param_overrides": overrides}
     try:
         mon = connect(proc)
-        if args.polyfence_radius:
+        if args.polyfence_radius or args.polyfence_points:
             # 必须在任务之前上传：路径规划器在任务开始时读取围栏，
             # 中途上传不会重新规划已经在飞的航段。
-            upload_fence(mon, args.polyfence_radius, HOME[0], HOME[1],
+            pts = None
+            if args.polyfence_points:
+                pts = [tuple(float(v) for v in seg.split(","))
+                       for seg in args.polyfence_points.split(";") if seg.strip()]
+            upload_fence(mon, args.polyfence_radius or 0.0, HOME[0], HOME[1],
                          sides=args.polyfence_sides,
-                         rotate_deg=args.polyfence_rotate)
+                         rotate_deg=args.polyfence_rotate, points=pts)
+            result["polyfence_points"] = pts
             result["polyfence_radius_m"] = args.polyfence_radius
             result["polyfence_sides"] = args.polyfence_sides
         if args.case == "landing":
