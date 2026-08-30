@@ -506,6 +506,37 @@ def rc_override(mon, roll=1500, pitch=1500, throttle=1500, yaw=1500):
         roll, pitch, throttle, yaw, 65535, 65535, 65535, 65535)
 
 
+def turn_to_heading(mon, target_deg, tol_deg=3.0, max_sim_s=25.0):
+    """用偏航杆把机头转到指定方位（度，0=北）。
+
+    为什么不用 MAV_CMD_CONDITION_YAW：它只设 auto_yaw，而 LOITER 用的是飞手
+    偏航杆输入，`auto_yaw` 在该模式下没人读。
+
+    为什么必须定死航向：`rc_override(pitch=…)` 是**机体系**满杆前推，实际飞行
+    方位取决于机头朝向。不设航向时实测各架次方位在 176°~217° 之间随机漂移，
+    于是「把某个几何特征放到飞机会经过的位置」这件事根本无从谈起——围栏一改，
+    航路就跟着变。围栏凹角的三次测试都栽在这上面。
+    """
+    start = mon.sim_ms
+    while mon.sim_ms - start < max_sim_s * 1000:
+        mon.recv()
+        if mon.att is None:
+            continue
+        err = (target_deg - math.degrees(mon.att.yaw) + 540.0) % 360.0 - 180.0
+        if abs(err) < tol_deg and abs(mon.att.yawspeed) < 0.05:
+            break
+        # 比例给杆，限幅 ±400 PWM；接近目标时自动减小，避免过冲来回摆
+        cmd = 1500 + int(max(-400, min(400, err * 8.0)))
+        rc_override(mon, yaw=cmd)
+    rc_override(mon)               # 回中，让它稳住这个航向
+    hold = mon.sim_ms
+    while mon.sim_ms - hold < 2000:
+        mon.recv()
+    final = math.degrees(mon.att.yaw) % 360.0 if mon.att else -1
+    print("  航向已定：目标 %.0f°，实际 %.1f°" % (target_deg, final))
+    return final
+
+
 def hold_stick_until(mon, pitch_pwm, predicate, max_sim_s, samples=None):
     start = mon.sim_ms
     while mon.sim_ms - start < max_sim_s * 1000:
@@ -812,7 +843,7 @@ def horiz_radius(mon):
     return math.hypot(mon.local.x, mon.local.y)
 
 
-def run_fence(mon, mode="LOITER", skip_param_fence=False):
+def run_fence(mon, mode="LOITER", skip_param_fence=False, fence_heading=None):
     """满杆冲向围栏，量各模式的实际围控能力。
 
     mode 决定被测的是哪条链路——这正是问题所在，不同模式的水平围控**机制不同**：
@@ -835,6 +866,14 @@ def run_fence(mon, mode="LOITER", skip_param_fence=False):
     if not skip_param_fence:
         set_param(mon, "FENCE_TYPE", 2)      # 只留圆形围栏，隔离变量
         set_param(mon, "FENCE_RADIUS", FENCE_RADIUS_M)
+    else:
+        # 用的是上传的 polyfence。**下面所有「最近半径 / 实际余量 / 越界」都是按
+        # FENCE_RADIUS 的圆形算的径向距离，对多边形没有意义**——多边形的正确度量
+        # 是到边界的法向距离，必须用 tools/fence_margin.py 从日志重算。
+        # 曾经据这些数字报出 3 档「越界」，而真实多边形距离是 +4.90~+5.01 m，
+        # 一次都没越界。
+        print("  【注意】使用上传的 polyfence：以下余量/越界数字按圆形 %.0f m 计算，"
+              "对多边形无效，请用 tools/fence_margin.py 重算" % FENCE_RADIUS_M)
     set_param(mon, "FENCE_ACTION", 0)        # 只报告，不触发 RTL，才能观察避障本身
     set_param(mon, "FENCE_ENABLE", 1)
     # 圆形围栏避障用的是 FENCE_MARGIN 而不是 AVOID_MARGIN
@@ -857,6 +896,8 @@ def run_fence(mon, mode="LOITER", skip_param_fence=False):
         # 四档结果精确相同（55.07 m），差点当成「各模式都拦得住」的结论。
         set_mode_wait(mon, "ALT_HOLD", 15)
         set_mode_wait(mon, mode, 15)
+        if fence_heading is not None:
+            turn_to_heading(mon, fence_heading)
 
         # 固定时长跑满：2 m/s 走完 60 m 需 30 s，留足余量。不要用「半径不再增长」
         # 当停止判据——起飞点 r≈0、速度≈0 时它会立刻误触发。
@@ -2261,6 +2302,9 @@ def main(argv=None):
                         help="上传一个以 Home 为心的 polyfence 包含圆（米）。"
                              "路径规划器只认 polyfence，不认 FENCE_RADIUS 参数式围栏，"
                              "要验证 AUTO 下的围控必须走这条路")
+    parser.add_argument("--fence-heading", type=float, default=None, metavar="DEG",
+                        help="接近段之前把机头转到该方位（度，0=北）。不给则航向自由——"
+                             "而自由航向下各架次飞行方位会随机漂移，几何相关的测试无法成立")
     parser.add_argument("--polyfence-points", default=None, metavar="N,E;N,E;...",
                         help="任意多边形顶点，相对 Home 的北/东偏移（米），分号分隔。"
                              "给出时忽略 --polyfence-sides/--polyfence-radius 的形状")
@@ -2349,7 +2393,8 @@ def main(argv=None):
             result.update(run_loiter_circle(mon))
         elif args.case == "fence":
             result.update(run_fence(mon, args.fence_mode,
-                                    skip_param_fence=bool(args.polyfence_radius)))
+                                    skip_param_fence=bool(args.polyfence_radius or args.polyfence_points),
+                                    fence_heading=args.fence_heading))
         elif args.case == "uturn-auto":
             result.update(run_uturn_auto(mon, args.swath, turns=args.turns))
         elif args.case == "motor-fail":
