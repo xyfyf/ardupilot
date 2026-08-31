@@ -546,6 +546,57 @@ void AC_Avoid::adjust_lean_for_fence_rad(float &roll_rad, float &pitch_rad,
     adjust_velocity_fence(kP, AC_AVOID_ACCEL_CMSS_MAX, desired_vel_cms,
                           backup_vel_cms, 0.0f, 0.0f, dt);
 
+    // Fold in the backup velocity.
+    //
+    // adjust_velocity_fence() reports, separately from the limit it applies,
+    // the inward velocity needed to get back out of the margin band.  Dropping
+    // it leaves a pure velocity-damping law: the allowed acceleration comes out
+    // at -v/T, so against a steady disturbance the vehicle settles wherever
+    // a_disturbance*T of outward drift balances, and walks through the margin
+    // at that constant speed without the limiter ever seeing an error to null.
+    //
+    // Measured in SITL on a 60 m hexagonal fence with 5 m of margin: still air
+    // held station 4.78 m off the boundary, while 6 m/s of wind crept in to
+    // 0.49 m over about 1.6 s at a steady 0.8 m/s and then crossed.  Once
+    // outside, the limiter does not apply at all, so the pilot's full stick
+    // took the vehicle away at its 20-degree terminal speed - 2 km before the
+    // run ended.  LOITER does not do this because its position controller
+    // integrates the disturbance out; the attitude modes have nothing that does.
+    //
+    // The velocity-layer callers already fold this in - see adjust_velocity().
+    // Cap the backup by what the vehicle can actually produce, not by
+    // AVOID_BACKUP_SPD.
+    //
+    // The equilibrium drift under a steady disturbance works out at
+    // a_disturbance*T - v_backup, so a fixed cap only shifts the problem to
+    // whatever wind exceeds it: measured at 0.75 m/s (the AVOID_BACKUP_SPD
+    // default), 2 m/s of wind was fully held but 6 m/s left 0.05 m/s of creep,
+    // which still walked through 5 m of margin inside the 70 s run.  The cap
+    // that belongs here is the airframe's: the command is clamped to
+    // veh_angle_max_rad a few lines below anyway, so any velocity limit tighter
+    // than the lean can deliver weakens the response without bounding anything
+    // that was not already bounded.  AVOID_BACKUP_SPD stays as it is for the
+    // position-control modes it was written for.
+    Vector2f backup_ne_cms;
+    const float max_back_cms = tanf(veh_angle_max_rad) * GRAVITY_MSS
+                               * AC_AVOID_LEAN_HORIZON_S * 100.0f;
+    if (!backup_vel_cms.xy().is_zero() && is_positive(max_back_cms)) {
+        backup_ne_cms = backup_vel_cms.xy();
+        backup_ne_cms.limit_length(max_back_cms);
+        // Per axis, and direction-sensitive: a pilot already backing away
+        // faster than this keeps their command.
+        if (!is_zero(backup_ne_cms.x)) {
+            desired_vel_cms.x = is_positive(backup_ne_cms.x)
+                                ? MAX(desired_vel_cms.x, backup_ne_cms.x)
+                                : MIN(desired_vel_cms.x, backup_ne_cms.x);
+        }
+        if (!is_zero(backup_ne_cms.y)) {
+            desired_vel_cms.y = is_positive(backup_ne_cms.y)
+                                ? MAX(desired_vel_cms.y, backup_ne_cms.y)
+                                : MIN(desired_vel_cms.y, backup_ne_cms.y);
+        }
+    }
+
     // Back out the acceleration the fence will still allow.  If the vehicle is
     // already riding the limit this comes out at zero outward; if it is over
     // the limit it comes out negative, i.e. braking.
@@ -592,7 +643,17 @@ void AC_Avoid::adjust_lean_for_fence_rad(float &roll_rad, float &pitch_rad,
     if (len > pilot_len) {
         const Vector2f vel_ne_ms{vel_neu_cms.x * 0.01f, vel_neu_cms.y * 0.01f};
         const bool braking = (allowed_ne_mss * vel_ne_ms) < 0.0f;
-        if (!braking) {
+        // Backing out of the margin band counts as well.  The braking test is a
+        // projection on velocity, and a vehicle being pushed across the margin
+        // by wind is barely moving - the dot product sits near zero, the test
+        // fails, and the backup gets clamped to the pilot's magnitude, which
+        // with centred sticks is zero.  That removes the backup at precisely
+        // the moment it is the only thing acting.  Moving along the commanded
+        // backup direction is the fence's command, not a manoeuvre the vehicle
+        // invented, so it is allowed on the same grounds as braking.
+        const bool backing = !backup_ne_cms.is_zero()
+                             && (allowed_ne_mss * backup_ne_cms) > 0.0f;
+        if (!braking && !backing) {
             if (is_positive(len)) {
                 rp *= pilot_len / len;
             } else {
