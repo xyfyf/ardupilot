@@ -235,6 +235,7 @@ def upload_fence(mon, radius_m, lat, lon, sides=0, rotate_deg=0.0, points=None):
     而三者**都不认** FENCE_RADIUS 那个参数式圆形围栏。
     """
     items = []
+    poly_ne = None
     if points:
         # 任意顶点（北,东 偏移，米）。真实田块边界既不规则也可能内凹，而**凹角**
         # 是围栏避障最难的几何：凹角处两条边的外法向张开大于 180°，
@@ -243,6 +244,7 @@ def upload_fence(mon, radius_m, lat, lon, sides=0, rotate_deg=0.0, points=None):
             la, lo = ne_to_latlon(lat, lon, n, e)
             items.append((mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION,
                           float(len(points)), la, lo))
+        poly_ne = [(float(n), float(e)) for n, e in points]
         label = "不规则包含多边形 %d 顶点" % len(points)
     elif sides >= 3:
         # rotate_deg 决定正南方向撞到的是顶点还是边心——两者几何不同：
@@ -254,12 +256,16 @@ def upload_fence(mon, radius_m, lat, lon, sides=0, rotate_deg=0.0, points=None):
                                   radius_m * math.cos(th), radius_m * math.sin(th))
             items.append((mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION,
                           float(sides), la, lo))
+        poly_ne = [(radius_m * math.cos(2.0 * math.pi * k / sides + math.radians(rotate_deg)),
+                    radius_m * math.sin(2.0 * math.pi * k / sides + math.radians(rotate_deg)))
+                   for k in range(sides)]
         label = "包含多边形 %d 边 外接半径 %.1f m" % (sides, radius_m)
     else:
         items.append((mavutil.mavlink.MAV_CMD_NAV_FENCE_CIRCLE_INCLUSION,
                       float(radius_m), lat, lon))
         label = "包含圆 半径 %.1f m" % radius_m
     _upload_fence_items(mon, items, label)
+    return poly_ne
 
 
 def _upload_fence_items(mon, items, label):
@@ -837,6 +843,45 @@ FENCE_RADIUS_M = 60.0
 FENCE_APPROACH_SPEEDS_MS = (2.0, 5.0, 8.0, 12.0)
 
 
+def _seg_dist(p, a, b):
+    """点到线段的距离。"""
+    (px, py), (ax, ay), (bx, by) = p, a, b
+    dx, dy = bx - ax, by - ay
+    L = dx * dx + dy * dy
+    t = 0.0 if L == 0.0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def _point_in_poly(p, verts):
+    """射线法。顶点顺逆时针皆可。"""
+    px, py = p
+    inside = False
+    n = len(verts)
+    for i in range(n):
+        (ax, ay), (bx, by) = verts[i], verts[(i + 1) % n]
+        if (ay > py) != (by > py):
+            xin = ax + (py - ay) * (bx - ax) / (by - ay)
+            if px < xin:
+                inside = not inside
+    return inside
+
+
+def poly_signed_dist(p, verts):
+    """点到多边形边界的距离，内部为正、外部为负。
+
+    对多边形围栏，「到起飞点的径向距离」不是「到边界的距离」：正 N 边形的边心距
+    只有外接半径的 cos(pi/N) 倍，六边形是 0.866。用径向距离既算错余量也会漏判
+    越界——外接半径 60 m 的六边形，边心距只有 51.96 m，径向 55 m 的点若靠近边
+    中点其实已经在围栏外，而 r > 60 这个判据说它没越界。
+
+    实测对照：某次六边形试跑，径向法报「实际余量 6.33 m、过冲 -1.33 m」，法向
+    距离算出来是精确的 5.00 m —— 那个过冲是度量方式的假象。
+    """
+    n = len(verts)
+    d = min(_seg_dist(p, verts[i], verts[(i + 1) % n]) for i in range(n))
+    return d if _point_in_poly(p, verts) else -d
+
+
 def horiz_radius(mon):
     if mon.local is None:
         return None
@@ -844,7 +889,7 @@ def horiz_radius(mon):
 
 
 def run_fence(mon, mode="LOITER", skip_param_fence=False, fence_heading=None,
-              release_at_r=None, fence_throttle=1500):
+              release_at_r=None, fence_throttle=1500, fence_poly=None):
     """满杆冲向围栏，量各模式的实际围控能力。
 
     mode 决定被测的是哪条链路——这正是问题所在，不同模式的水平围控**机制不同**：
@@ -903,7 +948,10 @@ def run_fence(mon, mode="LOITER", skip_param_fence=False, fence_heading=None,
         # 固定时长跑满：2 m/s 走完 60 m 需 30 s，留足余量。不要用「半径不再增长」
         # 当停止判据——起飞点 r≈0、速度≈0 时它会立刻误触发。
         start = mon.sim_ms
-        r_max, v_at_max, samples = 0.0, 0.0, []
+        r_max, samples = 0.0, []
+        # 到围栏边界的最近距离。多边形用法向距离，圆形退回半径差——两者含义相同，
+        # 但对多边形，半径差既不是余量也判不出越界，见 poly_signed_dist()。
+        d_min, v_at_dmin = float("inf"), 0.0
         released = False
         while mon.sim_ms - start < 70000:
             # release_at_r：半径超过它就松杆，用于检验「推杆冲栏后松手、飞机靠惯性
@@ -925,28 +973,37 @@ def run_fence(mon, mode="LOITER", skip_param_fence=False, fence_heading=None,
             if r is None or vel is None:
                 continue
             sp = math.hypot(vel[0], vel[1])
-            samples.append((mon.sim_ms - start, r, sp))
+            if fence_poly:
+                d = poly_signed_dist((mon.local.x, mon.local.y), fence_poly)
+            else:
+                d = FENCE_RADIUS_M - r
+            samples.append((mon.sim_ms - start, r, sp, d))
             if r > r_max:
-                r_max, v_at_max = r, sp
+                r_max = r
+            if d < d_min:
+                d_min, v_at_dmin = d, sp
 
         # 末段持续顶住围栏，看是否在边界上振荡
-        osc = [r for t, r, _ in samples if t >= 55000]
+        osc = [r for t, r, _, _ in samples if t >= 55000]
+        osc_d = [d for t, _, _, d in samples if t >= 55000]
 
-        margin_min = FENCE_RADIUS_M - r_max
+        margin_min = d_min
         step = {
             "target_speed_m_s": speed,
             "fence_radius_m": FENCE_RADIUS_M,
             "fence_margin_m": margin,
+            "fence_shape": "polygon-%d" % len(fence_poly) if fence_poly else "circle",
             "closest_radius_m": r_max,
             "margin_achieved_m": margin_min,
             "margin_overshoot_m": margin - margin_min,
-            "breached": r_max > FENCE_RADIUS_M,
-            "speed_at_closest_m_s": v_at_max,
+            "breached": d_min < 0.0,
+            "speed_at_closest_m_s": v_at_dmin,
         }
         if osc:
             step["hold_radius_mean_m"] = sum(osc) / len(osc)
             step["hold_radius_pp_m"] = max(osc) - min(osc)
-            step["hold_margin_mean_m"] = FENCE_RADIUS_M - step["hold_radius_mean_m"]
+            step["hold_margin_mean_m"] = sum(osc_d) / len(osc_d)
+            step["hold_margin_pp_m"] = max(osc_d) - min(osc_d)
         # 制动峰值：接近段速度的最大下降率
         decel = 0.0
         for a, b in zip(samples, samples[1:]):
@@ -955,7 +1012,7 @@ def run_fence(mon, mode="LOITER", skip_param_fence=False, fence_heading=None,
                 decel = max(decel, (a[2] - b[2]) / dt)
         step["peak_decel_m_s2"] = decel
         steps.append(step)
-        print("  %.1f m/s: 最近半径 %.2f m，实际余量 %.2f m（设定 %.0f，冲出 %.2f）%s，"
+        print("  %.1f m/s: 最近半径 %.2f m，到边界 %.2f m（设定余量 %.0f，差 %.2f）%s，"
               "制动峰值 %.2f m/s²，停稳后半径峰峰 %.2f m"
               % (speed, r_max, margin_min, margin, step["margin_overshoot_m"],
                  "  ** 越界 **" if step["breached"] else "",
@@ -2391,6 +2448,7 @@ def main(argv=None):
               "param_overrides": overrides}
     try:
         mon = connect(proc)
+        fence_poly = None
         if args.polyfence_radius or args.polyfence_points:
             # 必须在任务之前上传：路径规划器在任务开始时读取围栏，
             # 中途上传不会重新规划已经在飞的航段。
@@ -2398,9 +2456,10 @@ def main(argv=None):
             if args.polyfence_points:
                 pts = [tuple(float(v) for v in seg.split(","))
                        for seg in args.polyfence_points.split(";") if seg.strip()]
-            upload_fence(mon, args.polyfence_radius or 0.0, HOME[0], HOME[1],
-                         sides=args.polyfence_sides,
-                         rotate_deg=args.polyfence_rotate, points=pts)
+            fence_poly = upload_fence(mon, args.polyfence_radius or 0.0, HOME[0], HOME[1],
+                                      sides=args.polyfence_sides,
+                                      rotate_deg=args.polyfence_rotate, points=pts)
+            result["polyfence_ne"] = fence_poly
             result["polyfence_points"] = pts
             result["polyfence_radius_m"] = args.polyfence_radius
             result["polyfence_sides"] = args.polyfence_sides
@@ -2415,7 +2474,8 @@ def main(argv=None):
                                     skip_param_fence=bool(args.polyfence_radius or args.polyfence_points),
                                     fence_heading=args.fence_heading,
                                     release_at_r=args.release_at_r,
-                                    fence_throttle=args.fence_throttle))
+                                    fence_throttle=args.fence_throttle,
+                                    fence_poly=fence_poly))
         elif args.case == "uturn-auto":
             result.update(run_uturn_auto(mon, args.swath, turns=args.turns))
         elif args.case == "motor-fail":

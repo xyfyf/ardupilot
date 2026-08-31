@@ -139,16 +139,19 @@ SUITE = [
         args=["--fence-mode", "LOITER", "--polyfence-radius", "60",
               "--set", "FENCE_ENABLE=1", "--set", "FENCE_TYPE=4",
               "--set", "FENCE_MARGIN=2", "--set", "FENCE_ACTION=0"],
+        # 判据用 margin_achieved_m 与 breached，两者都是到边界的**法向**距离，
+        # 圆形与多边形通用。不要退回 closest_radius_m —— 那是到起飞点的径向距离，
+        # 只对圆形围栏等价，对多边形既算错余量也漏判越界。
         metrics=lambda r: {
             "最深进入": "%.2f m" % max((s.get("closest_radius_m", 0)
                                     for s in r.get("steps", [])), default=-1),
-            "最小栏内余量": "%.2f m" % (60.0 - max((s.get("closest_radius_m", 0)
-                                              for s in r.get("steps", [])), default=99)),
+            "最小栏内余量": "%.2f m" % min((s.get("margin_achieved_m", 99)
+                                       for s in r.get("steps", [])), default=-1),
             "越界档数": str(sum(1 for s in r.get("steps", []) if s.get("breached")))},
         check=lambda r: (len(r.get("steps", [])) >= 4
                          and all(not s.get("breached") for s in r.get("steps", []))
-                         and max((s.get("closest_radius_m", 99)
-                                  for s in r.get("steps", [])), default=99) < 60.0),
+                         and min((s.get("margin_achieved_m", -99)
+                                  for s in r.get("steps", [])), default=-99) > 0.0),
         why="LOITER 是唯一有主动围控的手动模式，也是作业期间的推荐模式。"
             "余量压到 2 m 仍不得越界；越界说明避障链路坏了",
     ),
