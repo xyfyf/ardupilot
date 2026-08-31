@@ -656,6 +656,10 @@ void AP_MotorsMatrix::update_failure_detection()
 #endif // HAL_WITH_ESC_TELEM
 }
 
+// Relative residual (squared) above which a solve is treated as too
+// ill-conditioned to use.  1e-4 = 1% relative error.
+#define AP_MOTORS_ALLOC_RESIDUAL_REL_SQ 1.0e-4f
+
 bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include_yaw,
                                              float thrust_out[AP_MOTORS_MAX_NUM_MOTORS]) const
 {
@@ -681,6 +685,11 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
         freed[k] = true;
         thrust[k] = 0.0f;
     }
+    // Whether any pass has produced and verified a complete assignment.  Every
+    // exit below is a `break`, and thrust[] starts at zero, so without this the
+    // failure of the very first solve is indistinguishable from success and
+    // hands the caller six zeroed motors as a valid answer.
+    bool have_solution = false;
 
     // At most one clamp per motor, so this terminates.
     for (uint8_t pass = 0; pass <= n; pass++) {
@@ -760,9 +769,11 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
                 }
             }
         }
+        // Rank test.  B B^T is singular exactly when the free columns of B are
+        // rank deficient, so this is the real check; counting motors above only
+        // rules out the trivially impossible.
         float bbt_inv[16];
         if (!mat_inverse(bbt, bbt_inv, rows)) {
-            // Degenerate once enough motors are clamped - keep what we have.
             break;
         }
         float lambda[4] = {};
@@ -779,8 +790,24 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
             }
         }
 
-        bool clamped_any = false;
-        for (uint8_t k = 0; k < n; k++) {
+        // Stage the solution, then check it before committing.
+        //
+        // inverse3x3()/inverse4x4() reject only an exactly zero determinant
+        // (is_zero(), i.e. below FLT_EPSILON), so a merely ill-conditioned
+        // matrix is inverted happily and yields entries of order 1/det.  The
+        // resulting thrusts are nonsense but finite, every one of them clamps,
+        // and the result reads as a valid degraded allocation.
+        //
+        // The cheap honest test is to substitute back.  t = B^T*lambda -
+        // alpha*y*(s^T*lambda) satisfies B*t == rem identically: expanding it
+        // gives (B B^T - alpha*s*s^T)*lambda, which is the very system that was
+        // solved.  That holds whether or not yaw suppression is active and
+        // regardless of what the clamping does afterwards, so any real
+        // discrepancy is the conditioning showing through and nothing else.
+        float t_raw[AP_MOTORS_MAX_NUM_MOTORS];
+        float check[4] = {};
+        bool finite = true;
+        for (uint8_t k = 0; k < n && finite; k++) {
             if (!freed[k]) {
                 continue;
             }
@@ -791,6 +818,42 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
                 t += _yaw_factor[m] * lambda[3];
             }
             t -= alpha * _yaw_geom[m] * slam;
+            if (!isfinite(t)) {
+                // constrain_float() turns a NaN into (low+high)/2, i.e. half
+                // throttle on every motor - louder than zero and just as wrong.
+                finite = false;
+                break;
+            }
+            t_raw[k] = t;
+            const float col[4] = { _throttle_factor[m], _roll_factor[m],
+                                   _pitch_factor[m], _yaw_factor[m] };
+            for (uint8_t r = 0; r < rows; r++) {
+                check[r] += col[r] * t;
+            }
+        }
+        if (!finite) {
+            break;
+        }
+        float err2 = 0.0f, mag2 = 0.0f;
+        for (uint8_t r = 0; r < rows; r++) {
+            const float d = check[r] - rem[r];
+            err2 += d * d;
+            mag2 += rem[r] * rem[r];
+        }
+        // Deliberately loose - a well-conditioned solve lands many orders of
+        // magnitude inside this, while rejecting a good solve would drop the
+        // vehicle back to forward mixing, which is the failure this allocator
+        // exists to avoid.
+        if (err2 > AP_MOTORS_ALLOC_RESIDUAL_REL_SQ * MAX(mag2, 1.0f)) {
+            break;
+        }
+
+        bool clamped_any = false;
+        for (uint8_t k = 0; k < n; k++) {
+            if (!freed[k]) {
+                continue;
+            }
+            const float t = t_raw[k];
             if (t < 0.0f || t > 1.0f) {
                 thrust[k] = constrain_float(t, 0.0f, 1.0f);
                 freed[k] = false;
@@ -799,9 +862,18 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
                 thrust[k] = t;
             }
         }
+        have_solution = true;
         if (!clamped_any) {
             break;
         }
+    }
+
+    if (!have_solution) {
+        // Never verified a solve.  thrust_out[] is still the zeroed array from
+        // the top; reporting success on it commanded zero thrust on every motor
+        // and dropped the vehicle.  Say so instead and let the caller fall back
+        // to forward mixing, which at least flies.
+        return false;
     }
 
     for (uint8_t k = 0; k < n; k++) {
