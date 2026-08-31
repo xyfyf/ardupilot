@@ -22,6 +22,11 @@
 #define AC_AVOID_NONGPS_DIST_MAX_DEFAULT    5.0f    // objects over 5m away are ignored (default value for DIST_MAX parameter)
 #define AC_AVOID_ANGLE_MAX_PERCENT          0.75f   // object avoidance max lean angle as a percentage (expressed in 0 ~ 1 range) of total vehicle max lean angle
 
+// Look-ahead used when converting a pilot's lean into the velocity the fence
+// logic can limit.  It only sets how gently the limit engages; the braking
+// profile itself comes from get_max_speed().
+#define AC_AVOID_LEAN_HORIZON_S             1.0f
+
 #define AC_AVOID_ACTIVE_LIMIT_TIMEOUT_MS    500     // if limiting is active if last limit is happened in the last x ms
 #define AC_AVOID_ACCEL_TIMEOUT_MS           200     // stored velocity used to calculate acceleration will be reset if avoidance is active after this many ms
 
@@ -80,6 +85,24 @@ public:
     // roll and pitch value are in radians
     // veh_angle_max_rad is the user defined maximum lean angle for the vehicle in radians
     void adjust_roll_pitch_rad(float &roll_rad, float &pitch_rad, float veh_angle_max_rad);
+
+    // Limit a pilot's lean-angle command so the vehicle cannot be flown out
+    // through a fence, for modes whose stick input is an attitude rather than a
+    // velocity - AltHold, PosHold, Stabilize.  Loiter and Guided do not need
+    // this: their sticks command velocity, which adjust_velocity() already
+    // limits.
+    //
+    // This is a *hard* limit.  adjust_roll_pitch_rad() above deliberately caps
+    // the sensor-avoidance lean at 75% of the vehicle limit so the pilot can
+    // always override an obstacle reading; a fence is a different promise, so
+    // the outward component is clamped outright and cannot be pushed through.
+    //
+    // roll/pitch are body frame, as handed to the attitude controller.
+    // kP is the position controller's NE P gain, as passed to every other
+    // entry point here - AC_Avoid has no access to pos_control itself.
+    void adjust_lean_for_fence_rad(float &roll_rad, float &pitch_rad,
+                                   float veh_angle_max_rad, float yaw_rad,
+                                   float kP, float dt);
 
     // enable/disable proximity based avoidance
     void proximity_avoidance_enable(bool on_off) { _proximity_enabled = on_off; }

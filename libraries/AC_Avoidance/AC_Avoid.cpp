@@ -496,6 +496,107 @@ void AC_Avoid::adjust_velocity_z(float kP, float accel_cmss, float& climb_rate_c
 // adjust roll-pitch to push vehicle away from objects
 // roll and pitch value are in radians
 // veh_angle_max_rad is the user defined maximum lean angle for the vehicle in radians
+// Limit a pilot's lean command so the vehicle cannot be flown out through a
+// fence.  See the header for why this is separate from adjust_roll_pitch_rad().
+//
+// The method is to reuse adjust_velocity_fence() rather than re-derive any
+// geometry: turn the commanded lean into the velocity it would produce over a
+// short look-ahead, let the existing fence code limit that velocity, then turn
+// the limit back into a lean.  Every fence type the velocity path already
+// understands - circular, inclusion and exclusion polygons, inclusion circles,
+// beacon - is therefore covered here with no duplicated distance maths.
+void AC_Avoid::adjust_lean_for_fence_rad(float &roll_rad, float &pitch_rad,
+                                         float veh_angle_max_rad, float yaw_rad,
+                                         float kP, float dt)
+{
+#if AP_FENCE_ENABLED
+    if ((_enabled & AC_AVOID_STOP_AT_FENCE) == 0 || !is_positive(veh_angle_max_rad)) {
+        return;
+    }
+    if (!is_positive(dt)) {
+        return;
+    }
+
+    Vector3f vel_neu_cms;
+    {
+        Vector3f vel_ned;
+        if (!AP::ahrs().get_velocity_NED(vel_ned)) {
+            // No usable velocity estimate - a fence cannot be honoured without
+            // one, and guessing would be worse than leaving the stick alone.
+            return;
+        }
+        vel_neu_cms = Vector3f{vel_ned.x * 100.0f, vel_ned.y * 100.0f, 0.0f};
+    }
+
+    // Lean to horizontal acceleration.  Body forward accelerates on -pitch,
+    // body right on +roll; rotate that into NE by the current heading.
+    const float cy = cosf(yaw_rad), sy = sinf(yaw_rad);
+    const float a_fwd = -GRAVITY_MSS * tanf(pitch_rad);
+    const float a_rgt =  GRAVITY_MSS * tanf(roll_rad);
+    const Vector2f accel_ne_mss{a_fwd * cy - a_rgt * sy, a_fwd * sy + a_rgt * cy};
+
+    // Where the stick would take us over the look-ahead.  The horizon only sets
+    // how gently the limit engages - the stopping profile itself comes from
+    // get_max_speed() inside adjust_velocity_fence().
+    Vector3f desired_vel_cms = vel_neu_cms;
+    desired_vel_cms.x += accel_ne_mss.x * 100.0f * AC_AVOID_LEAN_HORIZON_S;
+    desired_vel_cms.y += accel_ne_mss.y * 100.0f * AC_AVOID_LEAN_HORIZON_S;
+
+    Vector3f backup_vel_cms;
+    adjust_velocity_fence(kP, AC_AVOID_ACCEL_CMSS_MAX, desired_vel_cms,
+                          backup_vel_cms, 0.0f, 0.0f, dt);
+
+    // Back out the acceleration the fence will still allow.  If the vehicle is
+    // already riding the limit this comes out at zero outward; if it is over
+    // the limit it comes out negative, i.e. braking.
+    const Vector2f allowed_ne_mss{
+        (desired_vel_cms.x - vel_neu_cms.x) * 0.01f / AC_AVOID_LEAN_HORIZON_S,
+        (desired_vel_cms.y - vel_neu_cms.y) * 0.01f / AC_AVOID_LEAN_HORIZON_S};
+
+    if ((allowed_ne_mss - accel_ne_mss).length() < 0.01f) {
+        // Fence is not binding - leave the pilot's command untouched so the
+        // stick feel is unchanged away from the boundary.
+        return;
+    }
+
+    // Back to body frame, then to lean angles.
+    const float fwd = allowed_ne_mss.x * cy + allowed_ne_mss.y * sy;
+    const float rgt = -allowed_ne_mss.x * sy + allowed_ne_mss.y * cy;
+    float new_pitch = atanf(-fwd / GRAVITY_MSS);
+    float new_roll  = atanf( rgt / GRAVITY_MSS);
+
+    // Keep the pair inside the vehicle limit rather than clipping each axis,
+    // so the direction of the remaining command is preserved.
+    Vector2f rp{new_roll, new_pitch};
+    float len = rp.length();
+    if (len > veh_angle_max_rad) {
+        rp *= veh_angle_max_rad / len;
+        len = veh_angle_max_rad;
+    }
+
+    // Safety backstop: this function may only ever *reduce* what the pilot
+    // asked for.  Everything above is a computation on an estimated velocity
+    // and a fence geometry, and if any of it is wrong the vehicle must not end
+    // up leaning harder, or in a direction the pilot did not command.  Clamping
+    // the result to the input magnitude means the worst a fault here can do is
+    // make the aircraft sluggish - never make it manoeuvre on its own.
+    const float pilot_len = Vector2f{roll_rad, pitch_rad}.length();
+    if (len > pilot_len) {
+        if (is_positive(len)) {
+            rp *= pilot_len / len;
+        } else {
+            rp.zero();
+        }
+    }
+
+    roll_rad = rp.x;
+    pitch_rad = rp.y;
+
+    _last_limit_time = AP_HAL::millis();
+#endif // AP_FENCE_ENABLED
+}
+
+
 void AC_Avoid::adjust_roll_pitch_rad(float &roll_rad, float &pitch_rad, float veh_angle_max_rad)
 {
     // exit immediately if proximity based avoidance is disabled

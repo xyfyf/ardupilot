@@ -84,6 +84,16 @@ void ModePosHold::run()
     // convert pilot input to lean angles
     float target_roll_rad, target_pitch_rad;
     get_pilot_desired_lean_angles_rad(target_roll_rad, target_pitch_rad, attitude_control->lean_angle_max_rad(), attitude_control->get_althold_lean_angle_max_rad());
+#if AP_AVOIDANCE_ENABLED
+    // Hard fence limit on the pilot's lean.  This mode's stick commands an
+    // attitude, not a velocity, so adjust_velocity() never sees it and the
+    // fence would otherwise do nothing until after a breach.
+    copter.avoid.adjust_lean_for_fence_rad(target_roll_rad, target_pitch_rad,
+                           attitude_control->lean_angle_max_rad(),
+                           ahrs.get_yaw_rad(),
+                           pos_control->get_pos_NE_p().kP(), G_Dt);
+#endif
+
 
     // pilot desired yaw rate already rad/s
     float target_yaw_rate_rads = get_pilot_desired_yaw_rate_rads();

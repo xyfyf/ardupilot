@@ -82,6 +82,13 @@ void ModeAltHold::run()
 #if AP_AVOIDANCE_ENABLED
         // apply avoidance
         copter.avoid.adjust_roll_pitch_rad(target_roll_rad, target_pitch_rad, attitude_control->lean_angle_max_rad());
+        // Hard fence limit on the pilot's lean.  adjust_roll_pitch_rad() above
+        // only reads proximity sensors; without this the fence does nothing in
+        // this mode until after a breach.
+        copter.avoid.adjust_lean_for_fence_rad(target_roll_rad, target_pitch_rad,
+                                               attitude_control->lean_angle_max_rad(),
+                                               ahrs.get_yaw_rad(),
+                                               pos_control->get_pos_NE_p().kP(), G_Dt);
 #endif
 
         // get avoidance adjusted climb rate
