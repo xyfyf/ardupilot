@@ -574,18 +574,30 @@ void AC_Avoid::adjust_lean_for_fence_rad(float &roll_rad, float &pitch_rad,
         len = veh_angle_max_rad;
     }
 
-    // Safety backstop: this function may only ever *reduce* what the pilot
-    // asked for.  Everything above is a computation on an estimated velocity
-    // and a fence geometry, and if any of it is wrong the vehicle must not end
-    // up leaning harder, or in a direction the pilot did not command.  Clamping
-    // the result to the input magnitude means the worst a fault here can do is
-    // make the aircraft sluggish - never make it manoeuvre on its own.
+    // Safety backstop.  Everything above is a computation on an estimated
+    // velocity and a fence geometry; if any of it is wrong the vehicle must not
+    // manoeuvre on its own.  But the test cannot simply be "never lean harder
+    // than the pilot did": with the sticks centred that clamps the braking
+    // command to zero, and in these modes centred sticks do not decelerate at
+    // all - the aircraft coasts.  Measured in SITL with an earlier version that
+    // did clamp on magnitude alone: releasing the stick while still accelerating
+    // at the boundary let it carry on 856 m past the fence, i.e. the guard
+    // created a worse hazard than the one it prevented.
+    //
+    // The property actually wanted is "never a manoeuvre of its own", and lean
+    // that opposes the current velocity is by definition braking, not a
+    // manoeuvre.  So exceeding the pilot's magnitude is allowed only while the
+    // resulting acceleration has a negative projection on the velocity.
     const float pilot_len = Vector2f{roll_rad, pitch_rad}.length();
     if (len > pilot_len) {
-        if (is_positive(len)) {
-            rp *= pilot_len / len;
-        } else {
-            rp.zero();
+        const Vector2f vel_ne_ms{vel_neu_cms.x * 0.01f, vel_neu_cms.y * 0.01f};
+        const bool braking = (allowed_ne_mss * vel_ne_ms) < 0.0f;
+        if (!braking) {
+            if (is_positive(len)) {
+                rp *= pilot_len / len;
+            } else {
+                rp.zero();
+            }
         }
     }
 

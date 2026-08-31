@@ -843,7 +843,8 @@ def horiz_radius(mon):
     return math.hypot(mon.local.x, mon.local.y)
 
 
-def run_fence(mon, mode="LOITER", skip_param_fence=False, fence_heading=None):
+def run_fence(mon, mode="LOITER", skip_param_fence=False, fence_heading=None,
+              release_at_r=None, fence_throttle=1500):
     """满杆冲向围栏，量各模式的实际围控能力。
 
     mode 决定被测的是哪条链路——这正是问题所在，不同模式的水平围控**机制不同**：
@@ -903,8 +904,21 @@ def run_fence(mon, mode="LOITER", skip_param_fence=False, fence_heading=None):
         # 当停止判据——起飞点 r≈0、速度≈0 时它会立刻误触发。
         start = mon.sim_ms
         r_max, v_at_max, samples = 0.0, 0.0, []
+        released = False
         while mon.sim_ms - start < 70000:
-            rc_override(mon, pitch=2000)     # 满杆向前（机头朝北，即 +X 向外）
+            # release_at_r：半径超过它就松杆，用于检验「推杆冲栏后松手、飞机靠惯性
+            # 继续冲」这一情形。姿态层模式松杆只是回平、没有主动减速，而围栏限制里
+            # 的安全兜底会在飞手指令为零时把刹车角度一并夹成零——这一条必须实测。
+            if release_at_r is not None and horiz_radius(mon) is not None \
+                    and horiz_radius(mon) > release_at_r:
+                released = True
+            # STABILIZE 是手动油门，中位杆量在本模型上稳不住高度——实测全程贴地
+            # 1.9 m，速度虽到 6.4 m/s，但地效与随时触地让围栏结论不可信。
+            # fence_throttle 用于把它顶到与其他模式相当的高度再测。
+            if released:
+                rc_override(mon, throttle=fence_throttle)
+            else:
+                rc_override(mon, pitch=2000, throttle=fence_throttle)
             mon.recv()
             r = horiz_radius(mon)
             vel = mon.body_velocity()
@@ -2302,6 +2316,11 @@ def main(argv=None):
                         help="上传一个以 Home 为心的 polyfence 包含圆（米）。"
                              "路径规划器只认 polyfence，不认 FENCE_RADIUS 参数式围栏，"
                              "要验证 AUTO 下的围控必须走这条路")
+    parser.add_argument("--fence-throttle", type=int, default=1500, metavar="PWM",
+                        help="冲栏时的油门杆量。STABILIZE 是手动油门，1500 在本模型上"
+                             "稳不住高度（实测贴地 1.9 m），需调高才能测到有效高度")
+    parser.add_argument("--release-at-r", type=float, default=None, metavar="M",
+                        help="半径超过该值即松杆，检验松杆后靠惯性冲栏的情形")
     parser.add_argument("--fence-heading", type=float, default=None, metavar="DEG",
                         help="接近段之前把机头转到该方位（度，0=北）。不给则航向自由——"
                              "而自由航向下各架次飞行方位会随机漂移，几何相关的测试无法成立")
@@ -2394,7 +2413,9 @@ def main(argv=None):
         elif args.case == "fence":
             result.update(run_fence(mon, args.fence_mode,
                                     skip_param_fence=bool(args.polyfence_radius or args.polyfence_points),
-                                    fence_heading=args.fence_heading))
+                                    fence_heading=args.fence_heading,
+                                    release_at_r=args.release_at_r,
+                                    fence_throttle=args.fence_throttle))
         elif args.case == "uturn-auto":
             result.update(run_uturn_auto(mon, args.swath, turns=args.turns))
         elif args.case == "motor-fail":
