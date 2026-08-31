@@ -57,7 +57,7 @@ define HAL_LED_ON 1
 define AP_NOTIFY_GPIO_LED_RGB_ENABLED 1
 
 # Protect SPI Sensors by pulling CS pins HIGH in bootloader
-PE12 ICM42605_CS CS
+PE12 ICM42670_CS CS
 
 # SD Card support for firmware update from SD
 PC8  SDMMC1_D0  SDMMC1
