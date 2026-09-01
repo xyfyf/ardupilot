@@ -26,6 +26,10 @@
 // logic can limit.  It only sets how gently the limit engages; the braking
 // profile itself comes from get_max_speed().
 #define AC_AVOID_LEAN_HORIZON_S             1.0f
+// Fraction of the airframe's lean authority the stopping profile is built on.
+// Below 1 on purpose: the profile decides how early the limit engages, and the
+// remainder is the headroom the command needs to pull an overspeed back.
+#define AC_AVOID_FENCE_PROFILE_FRAC     0.4f
 
 #define AC_AVOID_ACTIVE_LIMIT_TIMEOUT_MS    500     // if limiting is active if last limit is happened in the last x ms
 #define AC_AVOID_ACCEL_TIMEOUT_MS           200     // stored velocity used to calculate acceleration will be reset if avoidance is active after this many ms

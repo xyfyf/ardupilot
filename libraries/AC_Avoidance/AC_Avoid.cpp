@@ -542,8 +542,22 @@ void AC_Avoid::adjust_lean_for_fence_rad(float &roll_rad, float &pitch_rad,
     desired_vel_cms.x += accel_ne_mss.x * 100.0f * AC_AVOID_LEAN_HORIZON_S;
     desired_vel_cms.y += accel_ne_mss.y * 100.0f * AC_AVOID_LEAN_HORIZON_S;
 
+    // What the airframe can actually deliver, and the deliberately smaller
+    // figure the stopping profile is built on.
+    //
+    // AC_AVOID_ACCEL_CMSS_MAX is a fixed 1.0 m/s/s.  On this airframe
+    // (ANGLE_MAX 15 degrees, 2.63 m/s/s) that happens to be a sane 40%, but it
+    // is an absolute constant, so on a machine with a different lean limit the
+    // safety factor is whatever it happens to be.  Tie it to the airframe
+    // instead.  Keeping the profile below the capability is the point: it makes
+    // the limit engage early and leaves headroom to correct with.  The
+    // capability itself is what the *command* may use - see below.
+    const float accel_cap_mss = GRAVITY_MSS * tanf(veh_angle_max_rad);
+    const float accel_profile_mss = accel_cap_mss * AC_AVOID_FENCE_PROFILE_FRAC;
+
+    const Vector3f desired_pre_cms = desired_vel_cms;
     Vector3f backup_vel_cms;
-    adjust_velocity_fence(kP, AC_AVOID_ACCEL_CMSS_MAX, desired_vel_cms,
+    adjust_velocity_fence(kP, accel_profile_mss * 100.0f, desired_vel_cms,
                           backup_vel_cms, 0.0f, 0.0f, dt);
 
     // Fold in the backup velocity.
@@ -597,18 +611,64 @@ void AC_Avoid::adjust_lean_for_fence_rad(float &roll_rad, float &pitch_rad,
         }
     }
 
-    // Back out the acceleration the fence will still allow.  If the vehicle is
-    // already riding the limit this comes out at zero outward; if it is over
-    // the limit it comes out negative, i.e. braking.
-    const Vector2f allowed_ne_mss{
-        (desired_vel_cms.x - vel_neu_cms.x) * 0.01f / AC_AVOID_LEAN_HORIZON_S,
-        (desired_vel_cms.y - vel_neu_cms.y) * 0.01f / AC_AVOID_LEAN_HORIZON_S};
-
-    if ((allowed_ne_mss - accel_ne_mss).length() < 0.01f) {
+    // Direction the fence pushed back on, and whether it pushed at all.
+    Vector2f clip_ne_cms{desired_pre_cms.x - desired_vel_cms.x,
+                         desired_pre_cms.y - desired_vel_cms.y};
+    if (clip_ne_cms.length() < 1.0f && backup_ne_cms.is_zero()) {
         // Fence is not binding - leave the pilot's command untouched so the
         // stick feel is unchanged away from the boundary.
         return;
     }
+    Vector2f out_dir = clip_ne_cms.is_zero() ? -backup_ne_cms : clip_ne_cms;
+    if (out_dir.is_zero()) {
+        return;
+    }
+    out_dir.normalize();
+
+    // Command the deceleration the situation actually requires.
+    //
+    // This used to be (v_allowed - v)/T.  That is zero exactly *on* the
+    // profile, but the profile v(s)=sqrt(2*a*s) has dv/dt = v*dv/ds = a, so
+    // staying on it costs a full a of deceleration.  With no feed-forward of
+    // that, the vehicle had to drift above the profile before any command
+    // appeared, and then settled wherever excess/T happened to equal the
+    // deceleration required - a permanent overspeed that grows as the profile
+    // steepens near the boundary.
+    //
+    // The field log of 2026-08-31 is exactly this: coming in on the downwind
+    // side from 22 m with the stick hard over, the vehicle ran 0.7 to 1.6 m/s
+    // above the allowed speed the whole way, the commanded lean sat at 5.6 to
+    // 7.3 degrees while 15 degrees (2.63 m/s/s) was available, and full braking
+    // arrived only in the last half second - by which time it was on the line.
+    // Six breaches that sortie, the deepest 18.6 m.
+    //
+    // Invert the profile instead.  v_allow = sqrt(2*a_prof*s) gives
+    // s = v_allow^2/(2*a_prof), and stopping from v_out inside s needs
+    //     a_req = v_out^2/(2*s) = a_prof * (v_out/v_allow)^2.
+    // On the profile that is a_prof, which is what tracking costs; above it, it
+    // grows with the square of the overspeed; at the margin, where v_allow goes
+    // to zero, it saturates at what the airframe can give.  No horizon constant
+    // decides the strength any more.
+    const Vector2f vel_ne_ms{vel_neu_cms.x * 0.01f, vel_neu_cms.y * 0.01f};
+    const float v_out = vel_ne_ms * out_dir;
+    const float v_allow = (Vector2f{desired_vel_cms.x, desired_vel_cms.y} * out_dir) * 0.01f;
+    float a_req_mss;
+    if (!is_positive(v_out)) {
+        a_req_mss = 0.0f;                       // already moving inward
+    } else if (v_allow < 0.05f) {
+        a_req_mss = accel_cap_mss;              // no outward speed permitted at all
+    } else {
+        const float ratio = v_out / v_allow;
+        a_req_mss = accel_profile_mss * ratio * ratio;
+    }
+    a_req_mss = MIN(a_req_mss, accel_cap_mss);
+
+    // Keep the pilot's authority along the fence; replace only the component
+    // normal to it.  Turning away is theirs to command, and taking the whole
+    // vector would also remove that.
+    const float pilot_out = accel_ne_mss * out_dir;
+    const Vector2f pilot_tan = accel_ne_mss - out_dir * pilot_out;
+    const Vector2f allowed_ne_mss = pilot_tan - out_dir * a_req_mss;
 
     // Back to body frame, then to lean angles.
     const float fwd = allowed_ne_mss.x * cy + allowed_ne_mss.y * sy;
@@ -641,7 +701,6 @@ void AC_Avoid::adjust_lean_for_fence_rad(float &roll_rad, float &pitch_rad,
     // resulting acceleration has a negative projection on the velocity.
     const float pilot_len = Vector2f{roll_rad, pitch_rad}.length();
     if (len > pilot_len) {
-        const Vector2f vel_ne_ms{vel_neu_cms.x * 0.01f, vel_neu_cms.y * 0.01f};
         const bool braking = (allowed_ne_mss * vel_ne_ms) < 0.0f;
         // Backing out of the margin band counts as well.  The braking test is a
         // projection on velocity, and a vehicle being pushed across the margin
