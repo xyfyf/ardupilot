@@ -54,11 +54,19 @@ def _rev_check(r):
     ev = r.get("reversals", [])
     m = r.get("metrics", {})
     # 护栏而非达标线：P02 尚未关闭，只保证不比现基线更差。
-    # 现基线（2026-09-01）：峰值俯仰速率 118 °/s、峰值俯仰误差 2.98°、I 项跨度 0.040。
+    #
+    # **基线必须取自默认配置**，这一条踩过坑：门槛最初按 pitch_i_span < 0.08 设，
+    # 数字是从 runs/…-audit_P02_vff0088 里读的——那份开了 ATC_VFF_PIT=0.0088，
+    # i_span 0.0397；而回归跑的是默认配置（VFF=0），实测 0.1213，于是护栏第一次
+    # 运行就误报。VFF 把 I 项负担降 67%（0.1213 -> 0.0397）正是 P02 候选方案的
+    # 效果，不是基线。
+    #
+    # 默认配置基线（2026-09-01，两次独立运行一致）：
+    #   峰值俯仰速率 118 °/s、峰值俯仰误差 3.51°、pitch_i_span 0.1213
     return (len(ev) >= 3
             and max((e.get("peak_pitch_rate_deg_s", 0) for e in ev), default=999) < 150.0
-            and max((e.get("peak_pitch_error_deg", 0) for e in ev), default=999) < 5.0
-            and m.get("pitch_i_span", 999) < 0.08)
+            and max((e.get("peak_pitch_error_deg", 0) for e in ev), default=999) < 5.5
+            and m.get("pitch_i_span", 999) < 0.18)
 
 
 def _circle_metrics(r):
