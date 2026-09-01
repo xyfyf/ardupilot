@@ -150,7 +150,7 @@ SUITE = [
         # 更严的一档：改用 polyfence（路径规划器唯一认的形式）且余量压到 2 m。
         # LOITER 的接近速度上限由倾角决定——实测指令顶到 PSC_ANGLE_MAX=20° 时
         # 速度峰值 6.33 m/s，再设高的 LOIT_SPEED 也上不去，故本项即全速度包线。
-        pid="P05", name="围栏-LOITER严格档", case="fence",
+        pid="P05", name="围栏-LOITER严格档", tag="fence_loiter_strict", case="fence",
         args=["--fence-mode", "LOITER", "--polyfence-radius", "60",
               "--set", "FENCE_ENABLE=1", "--set", "FENCE_TYPE=4",
               "--set", "FENCE_MARGIN=2", "--set", "FENCE_ACTION=0"],
@@ -182,7 +182,7 @@ SUITE = [
     # 方位无关。刻意不固定 --fence-heading：turn_to_heading() 的机体系方向约定尚未
     # 定论（见 TODO.md P2），依赖它反而会引入不可信的重复性。
     dict(
-        pid="P05", name="姿态层围栏-ALT_HOLD-无风", case="fence",
+        pid="P05", name="姿态层围栏-ALT_HOLD-无风", tag="fence_althold_calm", case="fence",
         args=["--fence-mode", "ALT_HOLD", "--polyfence-radius", "60",
               "--polyfence-sides", "6", "--fence-throttle", "1650",
               "--set", "FENCE_MARGIN=5", "--set", "FENCE_ACTION=0"],
@@ -191,7 +191,7 @@ SUITE = [
         why="姿态层硬限的无风基线。飞手满杆冲栏不得越界",
     ),
     dict(
-        pid="P05", name="姿态层围栏-ALT_HOLD-2m/s风", case="fence",
+        pid="P05", name="姿态层围栏-ALT_HOLD-2m/s风", tag="fence_althold_w2", case="fence",
         args=["--fence-mode", "ALT_HOLD", "--polyfence-radius", "60",
               "--polyfence-sides", "6", "--fence-throttle", "1650",
               "--set", "FENCE_MARGIN=5", "--set", "FENCE_ACTION=0",
@@ -202,7 +202,7 @@ SUITE = [
             "被推穿余量——这一条就是为守住那个修复而设",
     ),
     dict(
-        pid="P05", name="姿态层围栏-POSHOLD-2m/s风", case="fence",
+        pid="P05", name="姿态层围栏-POSHOLD-2m/s风", tag="fence_poshold_w2", case="fence",
         args=["--fence-mode", "POSHOLD", "--polyfence-radius", "60",
               "--polyfence-sides", "6", "--fence-throttle", "1650",
               "--set", "FENCE_MARGIN=5", "--set", "FENCE_ACTION=0",
@@ -212,7 +212,7 @@ SUITE = [
         why="POSHOLD 打杆段走姿态链路，与 ALT_HOLD 同一条代码路径",
     ),
     dict(
-        pid="P05", name="姿态层围栏-STABILIZE-2m/s风", case="fence",
+        pid="P05", name="姿态层围栏-STABILIZE-2m/s风", tag="fence_stabilize_w2", case="fence",
         args=["--fence-mode", "STABILIZE", "--polyfence-radius", "60",
               "--polyfence-sides", "6", "--fence-throttle", "1650",
               "--set", "FENCE_MARGIN=5", "--set", "FENCE_ACTION=0",
@@ -223,7 +223,7 @@ SUITE = [
             "否则贴地飞行的围栏结论不可信",
     ),
     dict(
-        pid="P05", name="姿态层围栏-DRIFT-2m/s风", case="fence",
+        pid="P05", name="姿态层围栏-DRIFT-2m/s风", tag="fence_drift_w2", case="fence",
         args=["--fence-mode", "DRIFT", "--polyfence-radius", "60",
               "--polyfence-sides", "6", "--fence-throttle", "1650",
               "--set", "FENCE_MARGIN=5", "--set", "FENCE_ACTION=0",
@@ -235,7 +235,7 @@ SUITE = [
             "限制器必须接在送进姿态控制器之前",
     ),
     dict(
-        pid="P05", name="电子围栏边界-LOITER", case="fence", args=[],
+        pid="P05", name="电子围栏边界-LOITER", tag="fence_loiter_edge", case="fence", args=[],
         metrics=lambda r: {
             "最小实际余量": "%.2f m" % min((s.get("margin_achieved_m", 9)
                                        for s in r.get("steps", [])), default=-1),
@@ -275,6 +275,17 @@ def _motor_msgs(r):
     return sum(1 for _, s in r.get("statustext", []) if "Motor" in s and ("stopped" in s or "degraded" in s))
 
 
+def _check_unique_variants():
+    """重名会让日志互相覆盖、结果目录分不清是哪一条——启动即报，别等跑完才发现。"""
+    seen = {}
+    for it in SUITE:
+        v = "reg_%s_%s" % (it["pid"], it.get("tag") or it["case"])
+        if v in seen:
+            raise SystemExit("变体名重复: %s\n  %s\n  %s\n请给其中一条加 tag=" 
+                             % (v, seen[v], it["name"]))
+        seen[v] = it["name"]
+
+
 def run_one(item, outdir, timeout_s):
     """跑一条并读**本次**产生的结果。
 
@@ -285,7 +296,9 @@ def run_one(item, outdir, timeout_s):
          字典序即时间序，所以取到的是**历史上最新**的一次，不是刚跑的这一次。
     本次运行没产生结果时，第 3 条会安静地读上一次的 result.json 交上去。
     """
-    variant = "reg_%s_%s" % (item["pid"], item["case"])
+    # tag 而不是 case：同一 case 可以有多条目（fence 就有七条），全都叫
+    # reg_P05_fence 会让 <variant>.log 互相覆盖、runs/ 目录也分不出是哪一条。
+    variant = "reg_%s_%s" % (item["pid"], item.get("tag") or item["case"])
     cmd = [sys.executable, REPRO, item["case"], "--variant", variant] + item["args"]
     log_path = os.path.join(outdir, "%s.log" % variant)
     started = time.time()
@@ -326,6 +339,7 @@ def run_one(item, outdir, timeout_s):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    _check_unique_variants()
     ap.add_argument("--only", nargs="*", help="只跑这些问题编号，如 P04 P06")
     ap.add_argument("--list", action="store_true", help="列出条目不执行")
     ap.add_argument("--timeout", type=int, default=900, help="单条超时秒数")
