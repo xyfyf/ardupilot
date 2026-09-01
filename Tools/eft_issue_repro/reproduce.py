@@ -17,6 +17,7 @@
 
 import argparse
 import datetime
+import fcntl
 import json
 import math
 import os
@@ -42,6 +43,23 @@ MODEL = os.path.join(HERE, "eft_hexa.json")
 HOME = (35.363261, 149.165230, 584.0, 0.0)
 ON_GROUND = mavutil.mavlink.MAV_LANDED_STATE_ON_GROUND
 IN_AIR = mavutil.mavlink.MAV_LANDED_STATE_IN_AIR
+SITL_LOCK = "/tmp/ardupilot-eft-issue-repro-sitl.lock"
+
+
+def acquire_sitl_lock():
+    """Refuse concurrent runs because all scenarios use the same SITL ports."""
+    lock = open(SITL_LOCK, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.seek(0)
+        owner = lock.read().strip() or "unknown"
+        raise SystemExit("已有 EFT SITL 场景占用固定端口（进程 %s）" % owner)
+    lock.seek(0)
+    lock.truncate()
+    lock.write(str(os.getpid()))
+    lock.flush()
+    return lock
 
 
 def wrap_pi(v):
@@ -560,7 +578,9 @@ def hold_stick_until(mon, pitch_pwm, predicate, max_sim_s, samples=None):
     raise RuntimeError("打杆阶段 %.1f s 仿真时间内未达到目标" % max_sim_s)
 
 
-def run_reverse(mon):
+def run_reverse(mon, mode="LOITER"):
+    # mode 此前是自由变量，每次调用都 NameError——该场景从未跑通过，
+    # 这也是 P02 的气流力矩前馈至今没有任何自动化覆盖的原因。
     command_takeoff(mon, 10.0)
     set_mode_wait(mon, mode if mode in ("LOITER", "ALT_HOLD") else "LOITER")
     for _ in range(50):
@@ -2512,6 +2532,11 @@ def main(argv=None):
 
     if not os.path.exists(SITL_BIN):
         raise SystemExit("缺少 %s；先在仓库根目录执行 ./waf configure --board sitl && ./waf copter" % SITL_BIN)
+    # Every scenario uses SERIAL0=5760 (plus the same auxiliary ports).  Keep the
+    # lock open for this process lifetime so two regressions cannot connect to
+    # each other's SITL instances and turn an infrastructure collision into a
+    # false algorithm failure.
+    _sitl_lock = acquire_sitl_lock()  # keep the descriptor alive until main() returns
     model_overrides = {}
     for item in args.model_set or []:
         if "=" not in item:
