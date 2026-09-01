@@ -507,10 +507,23 @@ void AC_AttitudeControl_Multi::rate_controller_run_dt(const Vector3f& gyro_rads,
 // feedforward rather than something the integrator should be left to handle.
 void AC_AttitudeControl_Multi::update_velocity_feedforward(float dt)
 {
-    // Disabled, or no velocity estimate: contribute nothing and drop the filter
-    // history so re-enabling cannot dump a stale value into the rate loop.
+    // Disabled, not flying, or no velocity estimate: contribute nothing and drop
+    // the filter history so re-enabling cannot dump a stale value into the rate
+    // loop.
+    //
+    // The "not flying" half is the one that is easy to leave out.  This term is
+    // added downstream of the rate PID, which puts it outside
+    // landed_gain_reduction() - the only mechanism the vehicle has for not
+    // fighting the ground.  Without a gate here the feedforward would keep
+    // commanding lean from whatever horizontal velocity the EKF reports while
+    // the aircraft sits on its skids: GPS noise, being carried to the pad, or a
+    // gust rocking the airframe.  Up to ATC_VFF_MAX of normalised torque applied
+    // while spooling up on a slope is a tip-over, and no amount of landed gain
+    // reduction downstream can take it back.
     Vector3f vel_ned;
     if ((is_zero(_vel_ff_rll) && is_zero(_vel_ff_pit)) ||
+        !_motors.armed() ||
+        _motors.get_spool_state() != AP_Motors::SpoolState::THROTTLE_UNLIMITED ||
         !_ahrs.get_velocity_NED(vel_ned)) {
         _vel_ff.zero();
         _vel_ff_input.zero();
@@ -531,11 +544,19 @@ void AC_AttitudeControl_Multi::update_velocity_feedforward(float dt)
     const Vector3f vel_body = _ahrs.get_rotation_body_to_ned().mul_transpose(vel_ned);
     _vel_ff_input = _vel_ff_filter.apply(Vector2f{vel_body.x, vel_body.y}, dt);
 
+    // Fade with the same ratio landed_gain_reduction() applies to the PID gains.
+    // THROTTLE_UNLIMITED is reached while still on the ground - it only means the
+    // start-up procedure has stopped constraining throttle - so the spool gate
+    // above opens before the vehicle actually leaves the pad.  Riding the landed
+    // ratio hands the feedforward in over the same time constant the rest of the
+    // controller uses, instead of stepping to full authority at that boundary.
+    const float fly_scale = 1.0f - constrain_float(_landed_gain_ratio, 0.0f, 1.0f);
+
     // Roll responds to sideways airflow, pitch to forward airflow.  Each gain carries
     // its own sign so it can be lifted straight from a log regression.
     const float lim = MAX(_vel_ff_max.get(), 0.0f);
-    _vel_ff.x = constrain_float(_vel_ff_rll * _vel_ff_input.y, -lim, lim);
-    _vel_ff.y = constrain_float(_vel_ff_pit * _vel_ff_input.x, -lim, lim);
+    _vel_ff.x = constrain_float(_vel_ff_rll * _vel_ff_input.y, -lim, lim) * fly_scale;
+    _vel_ff.y = constrain_float(_vel_ff_pit * _vel_ff_input.x, -lim, lim) * fly_scale;
 }
 
 // reset the rate controller target loop updates

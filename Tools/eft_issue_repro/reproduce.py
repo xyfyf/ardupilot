@@ -560,7 +560,9 @@ def hold_stick_until(mon, pitch_pwm, predicate, max_sim_s, samples=None):
     raise RuntimeError("打杆阶段 %.1f s 仿真时间内未达到目标" % max_sim_s)
 
 
-def run_reverse(mon):
+def run_reverse(mon, mode="LOITER"):
+    # mode 此前是自由变量，每次调用都 NameError——该场景从未跑通过，
+    # 这也是 P02 的气流力矩前馈至今没有任何自动化覆盖的原因。
     command_takeoff(mon, 10.0)
     set_mode_wait(mon, mode if mode in ("LOITER", "ALT_HOLD") else "LOITER")
     for _ in range(50):
