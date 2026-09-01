@@ -184,7 +184,7 @@ SUITE = [
     dict(
         pid="P05", name="姿态层围栏-ALT_HOLD-无风", tag="fence_althold_calm", case="fence",
         args=["--fence-mode", "ALT_HOLD", "--polyfence-radius", "60",
-              "--polyfence-sides", "6", "--fence-throttle", "1650",
+              "--polyfence-sides", "6",
               "--set", "FENCE_MARGIN=5", "--set", "FENCE_ACTION=0"],
         metrics=_fence_metrics,
         check=_fence_check,
@@ -193,7 +193,7 @@ SUITE = [
     dict(
         pid="P05", name="姿态层围栏-ALT_HOLD-2m/s风", tag="fence_althold_w2", case="fence",
         args=["--fence-mode", "ALT_HOLD", "--polyfence-radius", "60",
-              "--polyfence-sides", "6", "--fence-throttle", "1650",
+              "--polyfence-sides", "6",
               "--set", "FENCE_MARGIN=5", "--set", "FENCE_ACTION=0",
               "--set", "SIM_WIND_SPD=2", "--set", "SIM_WIND_DIR=0"],
         metrics=_fence_metrics,
@@ -204,7 +204,7 @@ SUITE = [
     dict(
         pid="P05", name="姿态层围栏-POSHOLD-2m/s风", tag="fence_poshold_w2", case="fence",
         args=["--fence-mode", "POSHOLD", "--polyfence-radius", "60",
-              "--polyfence-sides", "6", "--fence-throttle", "1650",
+              "--polyfence-sides", "6",
               "--set", "FENCE_MARGIN=5", "--set", "FENCE_ACTION=0",
               "--set", "SIM_WIND_SPD=2", "--set", "SIM_WIND_DIR=0"],
         metrics=_fence_metrics,
@@ -214,7 +214,7 @@ SUITE = [
     dict(
         pid="P05", name="姿态层围栏-STABILIZE-2m/s风", tag="fence_stabilize_w2", case="fence",
         args=["--fence-mode", "STABILIZE", "--polyfence-radius", "60",
-              "--polyfence-sides", "6", "--fence-throttle", "1650",
+              "--polyfence-sides", "6",
               "--set", "FENCE_MARGIN=5", "--set", "FENCE_ACTION=0",
               "--set", "SIM_WIND_SPD=2", "--set", "SIM_WIND_DIR=0"],
         metrics=_fence_metrics,
@@ -225,7 +225,7 @@ SUITE = [
     dict(
         pid="P05", name="姿态层围栏-DRIFT-2m/s风", tag="fence_drift_w2", case="fence",
         args=["--fence-mode", "DRIFT", "--polyfence-radius", "60",
-              "--polyfence-sides", "6", "--fence-throttle", "1650",
+              "--polyfence-sides", "6",
               "--set", "FENCE_MARGIN=5", "--set", "FENCE_ACTION=0",
               "--set", "SIM_WIND_SPD=2", "--set", "SIM_WIND_DIR=0"],
         metrics=_fence_metrics,

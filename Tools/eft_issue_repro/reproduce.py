@@ -888,6 +888,33 @@ def horiz_radius(mon):
     return math.hypot(mon.local.x, mon.local.y)
 
 
+FENCE_TEST_ALT_M = 15.0
+
+
+def hold_alt_throttle(mon, target_alt_m=FENCE_TEST_ALT_M, base_pwm=1500,
+                      kp=40.0, kd=60.0, lo=1250, hi=1750):
+    """围栏测试期间的油门：闭一个简易定高环，返回该给的 PWM。
+
+    此前给的是固定 PWM（--fence-throttle 1650）。在没有定高环的模式里，固定油门
+    就是固定爬升率：STABILIZE 跑完四档 280 s 爬到 1927 m，DRIFT 到 471 m；
+    ALT_HOLD/POSHOLD 因为高于中位的杆量本身就是爬升指令，一路顶到
+    FENCE_ALT_MAX=100 才停在 95 m。水平围栏的数字照常打印，看不出工况已经跑偏。
+
+    高度不对不只是「不像作业场景」。油门长期顶高会吃掉推力裕度，而
+    get_althold_lean_angle_max_rad() 正是限制器的 veh_angle_max_rad 入参——
+    限制器的可用权限被这条测试自己改变了。
+
+    中位 1500 在这几个模式里都对应「保持当前高度」（手动油门模式经 THR_MID 映射到
+    悬停油门），所以偏离中位即升降指令，同一套增益对四个模式都成立。
+    """
+    if mon.local is None:
+        return base_pwm
+    alt_m = -mon.local.z
+    climb_ms = -mon.local.vz
+    pwm = base_pwm + kp * (target_alt_m - alt_m) - kd * climb_ms
+    return int(max(lo, min(hi, pwm)))
+
+
 def return_to_centre(mon, mode, alt_m, timeout_ms=60000, accept_r_m=8.0):
     """用位置控制模式回到围栏圆心，回来后切回被测模式。返回是否真的回到了。
 
@@ -990,13 +1017,16 @@ def run_fence(mon, mode="LOITER", skip_param_fence=False, fence_heading=None,
             if release_at_r is not None and horiz_radius(mon) is not None \
                     and horiz_radius(mon) > release_at_r:
                 released = True
-            # STABILIZE 是手动油门，中位杆量在本模型上稳不住高度——实测全程贴地
-            # 1.9 m，速度虽到 6.4 m/s，但地效与随时触地让围栏结论不可信。
-            # fence_throttle 用于把它顶到与其他模式相当的高度再测。
+            # 油门交给定高环。这里踩过两次坑，方向相反：先是 STABILIZE 用中位杆量
+            # 稳不住高度、全程贴地 1.9 m，地效与随时触地让围栏结论不可信；改成固定
+            # 高油门之后又反过来，四档 280 s 一路爬到 1927 m。两次的共同点是高度
+            # 从来没被测量过，而错的高度会经推力裕度改变 lean_angle_max，把限制器
+            # 自己的权限也一起改掉。见 hold_alt_throttle()。
+            thr = hold_alt_throttle(mon)
             if released:
-                rc_override(mon, throttle=fence_throttle)
+                rc_override(mon, throttle=thr)
             else:
-                rc_override(mon, pitch=2000, throttle=fence_throttle)
+                rc_override(mon, pitch=2000, throttle=thr)
             mon.recv()
             r = horiz_radius(mon)
             vel = mon.body_velocity()
@@ -2405,6 +2435,8 @@ def main(argv=None):
                              "路径规划器只认 polyfence，不认 FENCE_RADIUS 参数式围栏，"
                              "要验证 AUTO 下的围控必须走这条路")
     parser.add_argument("--fence-throttle", type=int, default=1500, metavar="PWM",
+                        # 已废弃：油门改由 hold_alt_throttle() 的定高环给出。
+                        # 保留只为不让既有命令行报错，传了也不起作用。
                         help="冲栏时的油门杆量。STABILIZE 是手动油门，1500 在本模型上"
                              "稳不住高度（实测贴地 1.9 m），需调高才能测到有效高度")
     parser.add_argument("--release-at-r", type=float, default=None, metavar="M",
