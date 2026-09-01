@@ -115,8 +115,10 @@ public:
     /// start_ne_m     where the turn begins; its bearing from the centre sets
     ///                the start tangent, and its distance is expected to match
     ///                radius_m
-    /// sweep_rad      total heading change, positive for counter-clockwise seen
-    ///                from above; +/-PI gives the half circle used by a U-turn
+    /// sweep_rad      total heading change, positive for CLOCKWISE seen from
+    ///                above; +/-PI gives the half circle used by a U-turn.
+    ///                Heading here is the NE bearing atan2(East, North), which
+    ///                increases N->E->S->W, i.e. clockwise on a map.
     /// speed_ms       tangential speed to hold for the whole turn
     /// alt_u_m        altitude to hold, metres up in the EKF origin frame
     ///
@@ -300,7 +302,7 @@ private:
     Vector2f _centre_ne_m;
     float    _radius_m = 0.0f;
     float    _sweep_rad = 0.0f;         // magnitude of the total heading change
-    float    _direction = 1.0f;         // +1 counter-clockwise, -1 clockwise
+    float    _direction = 1.0f;         // +1 clockwise, -1 counter-clockwise
     float    _speed_ms = 0.0f;
     float    _alt_u_m = 0.0f;
     float    _required_lean_rad = 0.0f;

@@ -230,8 +230,9 @@ bool ModeGuided::set_arc_destination(const Location& centre, float radius_m,
     if (!is_positive(speed_ms)) {
         speed_ms = wp_nav->get_default_speed_NE_ms();
     }
-    // Negative radius selects a clockwise arc, matching CIRCLE_RATE's sign
-    // convention.  turns is in revolutions: 0.5 is the half circle of a U-turn.
+    // Positive radius selects a clockwise arc, matching CIRCLE_RATE's sign
+    // convention ("Positive to turn clockwise").  turns is in revolutions:
+    // 0.5 is the half circle of a U-turn.
     const float sweep_rad = radians(360.0f) * turns * (is_negative(radius_m) ? -1.0f : 1.0f);
 
     // The arc holds a constant tangential speed from its first step, so it must
