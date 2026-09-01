@@ -507,10 +507,22 @@ void AC_AttitudeControl_Multi::rate_controller_run_dt(const Vector3f& gyro_rads,
 // feedforward rather than something the integrator should be left to handle.
 void AC_AttitudeControl_Multi::update_velocity_feedforward(float dt)
 {
-    // Disabled, or no velocity estimate: contribute nothing and drop the filter
-    // history so re-enabling cannot dump a stale value into the rate loop.
+    // Disabled, no velocity estimate, or not actually flying: contribute nothing
+    // and drop the filter history so re-enabling cannot dump a stale value into
+    // the rate loop.
+    //
+    // The flight-state gate matters because this term is added *after* the rate
+    // PID (see set_roll/set_pitch below) and so sits outside everything that
+    // normally tames the controller near the ground.  On the deck the EKF still
+    // reports horizontal velocity - GPS noise, the aircraft being carried, the
+    // airframe rocking in wind - and without this the feedforward would answer
+    // it with a steady roll or pitch moment of up to ATC_VFF_MAX straight into
+    // the mixer, while disarmed or spooling up.  That is the direction a machine
+    // tips over in.
     Vector3f vel_ned;
     if ((is_zero(_vel_ff_rll) && is_zero(_vel_ff_pit)) ||
+        !_motors.armed() ||
+        _motors.get_spool_state() != AP_Motors::SpoolState::THROTTLE_UNLIMITED ||
         !_ahrs.get_velocity_NED(vel_ned)) {
         _vel_ff.zero();
         _vel_ff_input.zero();
@@ -536,6 +548,17 @@ void AC_AttitudeControl_Multi::update_velocity_feedforward(float dt)
     const float lim = MAX(_vel_ff_max.get(), 0.0f);
     _vel_ff.x = constrain_float(_vel_ff_rll * _vel_ff_input.y, -lim, lim);
     _vel_ff.y = constrain_float(_vel_ff_pit * _vel_ff_input.x, -lim, lim);
+
+    // Fade out with the landing gain reduction.
+    //
+    // landed_gain_reduction() is the vehicle's one mechanism for not fighting
+    // the ground, and it works by scaling the PID gains - which this term, being
+    // downstream of the PID, would otherwise escape entirely.  Reusing its ratio
+    // rather than a second switch keeps the fade on the same time constant as
+    // everything else that backs off on touchdown, instead of stepping to zero
+    // at a threshold the rest of the controller does not share.
+    const float fly = 1.0f - constrain_float(_landed_gain_ratio, 0.0f, 1.0f);
+    _vel_ff *= fly;
 }
 
 // reset the rate controller target loop updates

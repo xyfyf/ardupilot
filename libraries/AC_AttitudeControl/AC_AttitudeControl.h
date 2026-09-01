@@ -684,7 +684,10 @@ protected:
     Vector3f            _pd_scale_used;
 
     // Ratio of normal to reduced rate controller gain when landed to suppress ground resonance
-    float               _landed_gain_ratio;
+    // 0 = flying, 1 = fully landed.  landed_gain_reduction() reads this before
+    // it writes it (ratio + spool_step), so an uninitialised value propagates
+    // into the first call's result.
+    float               _landed_gain_ratio = 0.0f;
 
     // References to external libraries
     const AP_AHRS_View&  _ahrs;
