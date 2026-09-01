@@ -15,6 +15,27 @@ I 项在追一个转速与自身带宽同量级的目标、从来没收敛过，
 2026-08-26 在同一架 SITL 机体上实测：反拉日志拟合俯仰 +0.0088（r=0.916），
 同一物理模型的绕圈日志只给出 +0.0050（r=0.665）——低估约 43%。
 
+速度来自哪一条 EKF lane
+-----------------------
+本机默认启用两条 EKF3 lane。此前本工具固定读 core 0，而 ATT.Yaw 和飞控在线
+用的速度都来自**当时的 primary core**——primary 不是 0、或飞行中发生 lane
+切换时，回归的两侧就不属于同一个估计器，斜率被污染且无从察觉。
+
+现按 XKF4/NKF4 的 PI 字段（primary core index）逐段选取对应 core 的速度，
+并剔除切换点附近 LANE_SWITCH_GUARD_S 秒内的样本——切换瞬间两条 lane 的状态
+会有阶跃差，而 I 项要过若干个时间常数才跟上，那段数据两侧都不可信。
+
+VFF 消息（若存在）
+------------------
+固件启用 ATC_VFF_* 后会写 VFF 消息，其中 FF/FR 就是控制器实际用的机体系
+速度（取自活动 AHRS、已做风修正与滤波）。有它就不需要上面那套「选 lane +
+转机体系」的重建，本工具会自动优先使用并在输出里注明。
+
+但**拟合架次通常没有 VFF**：拟合的前提是前馈关闭、让 I 项独自承担配平，而
+增益为零时固件不写该消息。所以 VFF 路径的用途是**留出航段交叉验证**——用
+拟合出的增益飞第二架次，再跑一次本工具，看 I 项是否已被前馈接管（斜率应
+显著趋近于零）。只用同一架次拟合并验收是不成立的。
+
 用真机日志时注意：ATT/PID 至少要 10 Hz（bit12），速度取自 XKF1/NKF1。
 """
 
@@ -33,6 +54,10 @@ from pymavlink import DFReader  # noqa: E402
 
 # 只用飞行段。地面上 I 项被复位、速度恒零，会把回归拉向原点。
 MIN_SPEED_MS = 0.5
+
+# lane 切换前后各剔除多少秒。取 2 s：切换是状态阶跃，而速率环 I 项的时间常数
+# 在零点几秒量级，两三个时间常数后才谈得上重新配平。
+LANE_SWITCH_GUARD_S = 2.0
 
 
 def interp(series, t):
@@ -53,6 +78,21 @@ def interp(series, t):
     return v0 + (v1 - v0) * (t - t0) / (t1 - t0)
 
 
+def step_at(series, t):
+    """阶跃量取值：返回 t 时刻之前最后一次记录的值。primary core 是整数索引，
+    插值没有意义。"""
+    if not series or t < series[0][0]:
+        return None
+    lo, hi = 0, len(series) - 1
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if series[mid][0] <= t:
+            lo = mid
+        else:
+            hi = mid
+    return series[hi][1] if series[hi][0] <= t else series[lo][1]
+
+
 def fit(xs, ys):
     """最小二乘斜率与相关系数。"""
     n = len(xs)
@@ -70,9 +110,12 @@ def fit(xs, ys):
 
 def collect(path):
     m = DFReader.DFReader_binary(path)
-    att, vel, pidr, pidp = [], [], [], []
+    att, pidr, pidp, vff = [], [], [], []
+    vel_by_core = {}
+    primary = []
     while True:
-        msg = m.recv_match(type=["ATT", "XKF1", "NKF1", "PIDR", "PIDP"])
+        msg = m.recv_match(type=["ATT", "XKF1", "NKF1", "XKF4", "NKF4",
+                                 "PIDR", "PIDP", "VFF"])
         if msg is None:
             break
         t = msg.TimeUS * 1e-6
@@ -80,48 +123,96 @@ def collect(path):
         if mt == "ATT":
             att.append((t, math.radians(msg.Yaw)))
         elif mt in ("XKF1", "NKF1"):
-            # 多核只取 core 0，不同核的状态不该混在一起回归
-            if getattr(msg, "C", 0) == 0:
-                vel.append((t, msg.VN, msg.VE))
+            vel_by_core.setdefault(getattr(msg, "C", 0), []).append((t, msg.VN, msg.VE))
+        elif mt in ("XKF4", "NKF4"):
+            # 每个 core 都写一行，PI 是全局的 primary 索引，取哪一行都一样
+            pi = getattr(msg, "PI", None)
+            if pi is not None and pi >= 0:
+                if not primary or primary[-1][1] != pi:
+                    primary.append((t, int(pi)))
         elif mt == "PIDR":
             pidr.append((t, msg.I))
         elif mt == "PIDP":
             pidp.append((t, msg.I))
-    return att, vel, pidr, pidp
+        elif mt == "VFF":
+            vff.append((t, msg.FF, msg.FR, msg.Scl))
+    return att, vel_by_core, primary, pidr, pidp, vff
+
+
+def body_vel_from_ekf(t, att, vel_series_by_core, primary, cores_seen):
+    """按 t 时刻的 primary core 取速度，转到机体系。"""
+    if primary:
+        core = step_at(primary, t)
+        if core is None:
+            # 早于第一条 XKF4 的样本：沿用最早记录的 primary，而不是丢掉
+            core = primary[0][1]
+    else:
+        core = 0 if 0 in cores_seen else min(cores_seen)
+    if core not in vel_series_by_core:
+        return None
+    vn_s, ve_s = vel_series_by_core[core]
+    yaw = interp(att, t)
+    n = interp(vn_s, t)
+    e = interp(ve_s, t)
+    if yaw is None or n is None or e is None:
+        return None
+    # 机体系：x 前，y 右
+    return (n * math.cos(yaw) + e * math.sin(yaw),
+            -n * math.sin(yaw) + e * math.cos(yaw))
 
 
 def analyse(path):
-    att, vel, pidr, pidp = collect(path)
-    if not att or not vel:
-        return None, "缺少 ATT 或 XKF1/NKF1，无法换算机体速度"
+    att, vel_by_core, primary, pidr, pidp, vff = collect(path)
     if not pidr and not pidp:
         return None, "缺少 PIDR/PIDP（LOG_BITMASK 需开 bit12）"
 
-    yaw_series = att
-    vn = [(t, a) for t, a, _ in vel]
-    ve = [(t, b) for t, _, b in vel]
+    info = {"cores": sorted(vel_by_core), "switches": max(0, len(primary) - 1),
+            "dropped_switch": 0, "source": None, "vff_faded": 0}
+
+    # 优先用 VFF：那是控制器自己用过的速度，不需要重建
+    use_vff = len(vff) >= 20
+    if use_vff:
+        info["source"] = "VFF"
+        vff_ff = [(t, ff) for t, ff, _, _ in vff]
+        vff_fr = [(t, fr) for t, _, fr, _ in vff]
+        vff_scl = [(t, s) for t, _, _, s in vff]
+    else:
+        if not att or not vel_by_core:
+            return None, "缺少 ATT 或 XKF1/NKF1，且日志中无 VFF，无法换算机体速度"
+        info["source"] = "XKF1/NKF1 primary lane" if primary else "XKF1/NKF1 (无 PI 字段，退回单 lane)"
+        prepared = {c: ([(t, a) for t, a, _ in rows], [(t, b) for t, _, b in rows])
+                    for c, rows in vel_by_core.items()}
+        switch_times = [t for t, _ in primary[1:]]
 
     samples = {"roll": ([], []), "pitch": ([], [])}
     for axis, pid in (("roll", pidr), ("pitch", pidp)):
         for t, i_term in pid:
-            yaw = interp(yaw_series, t)
-            n = interp(vn, t)
-            e = interp(ve, t)
-            if yaw is None or n is None or e is None:
-                continue
-            # 机体系：x 前，y 右
-            vx = n * math.cos(yaw) + e * math.sin(yaw)
-            vy = -n * math.sin(yaw) + e * math.cos(yaw)
+            if use_vff:
+                scl = interp(vff_scl, t)
+                if scl is None or scl < 0.999:
+                    # 落地淡出段：前馈被缩放，I 项也不在稳态配平
+                    info["vff_faded"] += 1
+                    continue
+                vx = interp(vff_ff, t)
+                vy = interp(vff_fr, t)
+                if vx is None or vy is None:
+                    continue
+            else:
+                if any(abs(t - st) < LANE_SWITCH_GUARD_S for st in switch_times):
+                    info["dropped_switch"] += 1
+                    continue
+                bv = body_vel_from_ekf(t, att, prepared, primary, info["cores"])
+                if bv is None:
+                    continue
+                vx, vy = bv
             if math.hypot(vx, vy) < MIN_SPEED_MS:
                 continue
             # 横滚看侧向来流，俯仰看前向来流
             samples[axis][0].append(vy if axis == "roll" else vx)
             samples[axis][1].append(i_term)
 
-    out = {}
-    for axis, (xs, ys) in samples.items():
-        out[axis] = fit(xs, ys)
-    return out, None
+    out = {axis: fit(xs, ys) for axis, (xs, ys) in samples.items()}
+    return (out, info), None
 
 
 def main(argv=None):
@@ -139,11 +230,23 @@ def main(argv=None):
         if err:
             print("  跳过:", err)
             continue
+        out, info = res
+
+        print("  速度来源: %s" % info["source"])
+        if info["source"] != "VFF":
+            print("  EKF lane: 见到 core %s；primary 切换 %d 次"
+                  % (info["cores"], info["switches"]))
+            if info["switches"]:
+                print("            切换点 ±%.1f s 内剔除 %d 个样本"
+                      % (LANE_SWITCH_GUARD_S, info["dropped_switch"]))
+        elif info["vff_faded"]:
+            print("            落地淡出段剔除 %d 个样本" % info["vff_faded"])
+
         rows = {"roll": ("ATC_VFF_RLL", "机体右向速度", "PIDR.I"),
                 "pitch": ("ATC_VFF_PIT", "机体前向速度", "PIDP.I")}
         for axis in ("roll", "pitch"):
             name, xdesc, ydesc = rows[axis]
-            fitted = res.get(axis)
+            fitted = out.get(axis)
             if fitted is None:
                 print("  %-12s 样本不足，跳过" % axis)
                 continue
@@ -154,6 +257,12 @@ def main(argv=None):
                 print("               相关系数偏低，该轴 I 项主要不是速度驱动的，先别照搬")
             else:
                 print("               %s %.4f" % (name, slope))
+
+        if info["source"] == "VFF":
+            print("  注：本架次前馈是开着的，I 项已被它接管一部分，此处的斜率是"
+                  "**残余**而非应设增益。")
+            print("      交叉验证的判据是斜率显著趋近于零；若仍与拟合值同量级，"
+                  "说明前馈没起作用。")
     return 0
 
 
