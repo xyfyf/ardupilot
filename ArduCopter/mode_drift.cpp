@@ -147,6 +147,22 @@ void ModeDrift::run()
         break;
     }
 
+#if AP_AVOIDANCE_ENABLED
+    // Hard fence limit on the lean about to be commanded.
+    //
+    // Placed here rather than next to get_pilot_desired_lean_angles_rad()
+    // above: in this mode the pilot's roll is consumed to derive the yaw rate
+    // and is then overwritten by the velocity-error term, and pitch is
+    // overwritten by the auto-brake once the stick centres, so the pilot's
+    // values are not what reaches the vehicle.  The fence has to act on what
+    // actually gets commanded.  The yaw rate derived earlier is left alone -
+    // the limit is on lean, not on heading.
+    copter.avoid.adjust_lean_for_fence_rad(target_roll_rad, target_pitch_rad,
+                                           attitude_control->lean_angle_max_rad(),
+                                           ahrs.get_yaw_rad(),
+                                           pos_control->get_pos_NE_p().kP(), G_Dt);
+#endif
+
     // call attitude controller (already expects radians)
     attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw_rad(
         target_roll_rad, target_pitch_rad, target_yaw_rate_rads);

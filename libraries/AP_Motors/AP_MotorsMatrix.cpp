@@ -650,8 +650,25 @@ void AP_MotorsMatrix::update_failure_detection()
         // telemetry link or a channel mapping error than a simultaneous
         // multiple failure - and removing motors on that basis would cause the
         // crash it is meant to prevent.  Warn, do not act.
-        gcs().send_text(MAV_SEVERITY_WARNING,
-                        "Motor: %u read stopped, check ESC telem", suspect_count);
+        //
+        // Warning without acting means _failed_motor is never set, so the early
+        // return at the top of this function never engages and this branch is
+        // reached on every mixer pass - 400 Hz on this board - for as long as
+        // the condition lasts.  Send on the rising edge, then no more often
+        // than once a second, or the message floods the GCS queue and buries
+        // whatever else the vehicle is trying to say.
+        const uint32_t now_ms = AP_HAL::millis();
+        if (_fail_warn_count == 0 || now_ms - _fail_warn_last_ms >= 1000U) {
+            _fail_warn_last_ms = now_ms;
+            gcs().send_text(MAV_SEVERITY_WARNING,
+                            "Motor: %u read stopped, check ESC telem", suspect_count);
+        }
+        _fail_warn_count = suspect_count;
+    } else if (_fail_warn_count != 0) {
+        // Cleared.  Say so - a warning that simply stops leaves the operator
+        // unable to tell recovery from a lost link.
+        _fail_warn_count = 0;
+        gcs().send_text(MAV_SEVERITY_INFO, "Motor: ESC telem readings recovered");
     }
 #endif // HAL_WITH_ESC_TELEM
 }

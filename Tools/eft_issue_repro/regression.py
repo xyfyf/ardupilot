@@ -21,6 +21,7 @@ import datetime
 import json
 import os
 import subprocess
+import time
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -39,6 +40,20 @@ def _m(result, key, default=None):
 YAW_CFG = ["--set", "WPNAV_SPEED=300", "--set", "ATC_SLEW_YAW=12000",
            "--set", "ATC_RAT_YAW_P=0.60", "--set", "ATC_RAT_YAW_I=0.12",
            "--set", "ATC_RAT_YAW_FF=0.30"]
+
+def _fence_metrics(r):
+    steps = r.get("steps", [])
+    return {"最小余量": "%.2f m" % min((s.get("margin_achieved_m", -99) for s in steps), default=-99),
+            "停稳均值": "%.2f m" % min((s.get("hold_margin_mean_m", -99) for s in steps), default=-99),
+            "越界档数": str(sum(1 for s in steps if s.get("breached")))}
+
+
+def _fence_check(r):
+    steps = r.get("steps", [])
+    return (len(steps) >= 4
+            and all(not s.get("breached") for s in steps)
+            and min((s.get("margin_achieved_m", -99) for s in steps), default=-99) > 0.0)
+
 
 SUITE = [
     dict(
@@ -155,6 +170,70 @@ SUITE = [
         why="LOITER 是唯一有主动围控的手动模式，也是作业期间的推荐模式。"
             "余量压到 2 m 仍不得越界；越界说明避障链路坏了",
     ),
+    # ---- 姿态层围栏硬限 ----
+    #
+    # 交付现场的功能至今没有自动化条目守着，验收数据只来自提交信息里手工跑的命令行。
+    # 任何人改动 AC_Avoid、AC_Fence 或这几个模式的输入路径，集中回归都不会报警。
+    #
+    # **每条都带风速维度**，这不是可选项：无风下四个模式全过，而 2 m/s 风曾经把
+    # ALT_HOLD 推到栏外 86 m —— 只测无风会给出系统性偏乐观的结论。
+    #
+    # 判据用「越界档数 = 0」加「最小余量 > 0」，两者都是到边界的法向距离，与飞行
+    # 方位无关。刻意不固定 --fence-heading：turn_to_heading() 的机体系方向约定尚未
+    # 定论（见 TODO.md P2），依赖它反而会引入不可信的重复性。
+    dict(
+        pid="P05", name="姿态层围栏-ALT_HOLD-无风", case="fence",
+        args=["--fence-mode", "ALT_HOLD", "--polyfence-radius", "60",
+              "--polyfence-sides", "6", "--fence-throttle", "1650",
+              "--set", "FENCE_MARGIN=5", "--set", "FENCE_ACTION=0"],
+        metrics=_fence_metrics,
+        check=_fence_check,
+        why="姿态层硬限的无风基线。飞手满杆冲栏不得越界",
+    ),
+    dict(
+        pid="P05", name="姿态层围栏-ALT_HOLD-2m/s风", case="fence",
+        args=["--fence-mode", "ALT_HOLD", "--polyfence-radius", "60",
+              "--polyfence-sides", "6", "--fence-throttle", "1650",
+              "--set", "FENCE_MARGIN=5", "--set", "FENCE_ACTION=0",
+              "--set", "SIM_WIND_SPD=2", "--set", "SIM_WIND_DIR=0"],
+        metrics=_fence_metrics,
+        check=_fence_check,
+        why="风是这条链路的真实工况。缺位置项时限制器会以 a_wind*T 的恒定速度"
+            "被推穿余量——这一条就是为守住那个修复而设",
+    ),
+    dict(
+        pid="P05", name="姿态层围栏-POSHOLD-2m/s风", case="fence",
+        args=["--fence-mode", "POSHOLD", "--polyfence-radius", "60",
+              "--polyfence-sides", "6", "--fence-throttle", "1650",
+              "--set", "FENCE_MARGIN=5", "--set", "FENCE_ACTION=0",
+              "--set", "SIM_WIND_SPD=2", "--set", "SIM_WIND_DIR=0"],
+        metrics=_fence_metrics,
+        check=_fence_check,
+        why="POSHOLD 打杆段走姿态链路，与 ALT_HOLD 同一条代码路径",
+    ),
+    dict(
+        pid="P05", name="姿态层围栏-STABILIZE-2m/s风", case="fence",
+        args=["--fence-mode", "STABILIZE", "--polyfence-radius", "60",
+              "--polyfence-sides", "6", "--fence-throttle", "1650",
+              "--set", "FENCE_MARGIN=5", "--set", "FENCE_ACTION=0",
+              "--set", "SIM_WIND_SPD=2", "--set", "SIM_WIND_DIR=0"],
+        metrics=_fence_metrics,
+        check=_fence_check,
+        why="手动油门模式。fence_throttle 用于顶到与其他模式相当的高度，"
+            "否则贴地飞行的围栏结论不可信",
+    ),
+    dict(
+        pid="P05", name="姿态层围栏-DRIFT-2m/s风", case="fence",
+        args=["--fence-mode", "DRIFT", "--polyfence-radius", "60",
+              "--polyfence-sides", "6", "--fence-throttle", "1650",
+              "--set", "FENCE_MARGIN=5", "--set", "FENCE_ACTION=0",
+              "--set", "SIM_WIND_SPD=2", "--set", "SIM_WIND_DIR=0"],
+        metrics=_fence_metrics,
+        check=_fence_check,
+        why="DRIFT 编译进 EFT_CAAC 且此前完全没有硬限，实测越界 1032 m。"
+            "接入点与其他三个不同——roll 被速度误差项覆盖、pitch 被自动刹车覆盖，"
+            "限制器必须接在送进姿态控制器之前",
+    ),
     dict(
         pid="P05", name="电子围栏边界-LOITER", case="fence", args=[],
         metrics=lambda r: {
@@ -197,18 +276,41 @@ def _motor_msgs(r):
 
 
 def run_one(item, outdir, timeout_s):
+    """跑一条并读**本次**产生的结果。
+
+    三处曾经同时失效，合起来会把「运行失败」报成「通过」：
+      1. subprocess.run() 的返回码没人看；
+      2. stdout/stderr 全丢进 DEVNULL，失败时连原因都不留；
+      3. 随后按 variant 名做全局 glob 再取 sorted(...)[-1]。目录名以时间戳开头，
+         字典序即时间序，所以取到的是**历史上最新**的一次，不是刚跑的这一次。
+    本次运行没产生结果时，第 3 条会安静地读上一次的 result.json 交上去。
+    """
     variant = "reg_%s_%s" % (item["pid"], item["case"])
     cmd = [sys.executable, REPRO, item["case"], "--variant", variant] + item["args"]
+    log_path = os.path.join(outdir, "%s.log" % variant)
+    started = time.time()
     try:
-        subprocess.run(cmd, cwd=HERE, timeout=timeout_s,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with open(log_path, "w", encoding="utf-8") as log:
+            proc = subprocess.run(cmd, cwd=HERE, timeout=timeout_s,
+                                  stdout=log, stderr=subprocess.STDOUT)
     except subprocess.TimeoutExpired:
-        return {"ok": False, "note": "超时", "metrics": {}}
+        return {"ok": False, "note": "超时（输出见 %s）" % os.path.basename(log_path),
+                "metrics": {}}
+    if proc.returncode != 0:
+        return {"ok": False,
+                "note": "运行失败 returncode=%d（输出见 %s）"
+                        % (proc.returncode, os.path.basename(log_path)),
+                "metrics": {}}
 
     import glob
-    hits = sorted(glob.glob(os.path.join(HERE, "runs", "*%s" % variant, "result.json")))
+    # 只认本次运行之后落盘的结果。留 5 s 容差应付文件系统时间戳粒度。
+    hits = [h for h in glob.glob(os.path.join(HERE, "runs", "*%s" % variant, "result.json"))
+            if os.path.getmtime(h) >= started - 5.0]
+    hits.sort()
     if not hits:
-        return {"ok": False, "note": "未产生结果", "metrics": {}}
+        return {"ok": False,
+                "note": "本次未产生结果（输出见 %s）" % os.path.basename(log_path),
+                "metrics": {}}
     result = json.load(open(hits[-1], encoding="utf-8"))
     try:
         metrics = item["metrics"](result)

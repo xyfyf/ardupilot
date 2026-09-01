@@ -205,6 +205,12 @@ protected:
 
     // seconds each motor has been commanded but not turning
     float               _fail_timer_s[AP_MOTORS_MAX_NUM_MOTORS];
+    // Rate limiting for the multi-motor telemetry warning.  That branch warns
+    // without acting, so _failed_motor stays -1 and the early return in
+    // update_failure_detection() never engages: unthrottled, the message
+    // repeats at the mixer rate for as long as the condition lasts.
+    uint32_t            _fail_warn_last_ms;
+    uint8_t             _fail_warn_count = 0;
 
     // call vehicle supplied thrust compensation if set
     void                thrust_compensation(void) override;

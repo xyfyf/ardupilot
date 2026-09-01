@@ -342,6 +342,13 @@ void ModeFlowHold::run()
 #if AP_AVOIDANCE_ENABLED
     // apply avoidance
     copter.avoid.adjust_roll_pitch_rad(bf_angles_rad.x, bf_angles_rad.y, attitude_control->lean_angle_max_rad());
+    // Hard fence limit.  adjust_roll_pitch_rad() above only reads proximity
+    // sensors; without this the fence does nothing in this mode until after a
+    // breach, the same gap that was fixed in ALT_HOLD.
+    copter.avoid.adjust_lean_for_fence_rad(bf_angles_rad.x, bf_angles_rad.y,
+                                           attitude_control->lean_angle_max_rad(),
+                                           copter.ahrs.get_yaw_rad(),
+                                           pos_control->get_pos_NE_p().kP(), copter.G_Dt);
 #endif
 
     // call attitude controller
