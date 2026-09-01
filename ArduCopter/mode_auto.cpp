@@ -582,6 +582,16 @@ bool ModeAuto::arc_start(const Location& centre_loc, float radius_m, float turns
         return false;
     }
 
+    // The arc drives the position controller directly and is seen by neither the
+    // path planner nor AC_Avoid, so the only place the fence can constrain it is
+    // before it is accepted.  Refusing here falls back to the ordinary circle,
+    // which does go through the normal path.
+    if (!arc_within_fence(centre_loc, centre_ne_m, pos_ne_m, radius_m, sweep_rad,
+                          pos_control->get_pos_desired_U_m())) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "Arc: leaves fence, circling");
+        return false;
+    }
+
     if (!auto_arc_nav.set_arc(*pos_control, centre_ne_m, radius_m, pos_ne_m, sweep_rad,
                               speed_ms, pos_control->get_pos_desired_U_m())) {
         gcs().send_text(MAV_SEVERITY_WARNING, "Arc: r%.0f v%.1f unflyable, circling",

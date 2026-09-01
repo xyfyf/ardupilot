@@ -179,6 +179,13 @@ public:
 
     virtual float get_alt_above_ground_m(void) const;
 
+    // Sample a constant-speed arc and check every point against the fence.
+    // The arc drives AC_PosControl directly, so nothing on that path ever sees
+    // it - see arc_within_fence() for why the check has to happen up front.
+    bool arc_within_fence(const Location &centre_loc, const Vector2f &centre_ne_m,
+                          const Vector2f &start_ne_m, float radius_m,
+                          float sweep_rad, float arc_alt_u_m) const;
+
     // pilot input processing
     void get_pilot_desired_lean_angles_rad(float &roll_out_rad, float &pitch_out_rad, float angle_max_rad, float angle_limit_rad) const;
     float get_pilot_desired_yaw_rate_rads() const;

@@ -467,6 +467,62 @@ void Copter::notify_flight_mode() {
 
 // get_pilot_desired_angle - transform pilot's roll or pitch input into a desired lean angle
 // returns desired angle in radians
+// Sample a constant-speed arc and check every point of it against the fence.
+//
+// The arc primitive writes position, velocity and acceleration straight into
+// AC_PosControl every cycle.  Nothing on that path consults AC_Avoid, the path
+// planner or the fence - AC_ArcNav.cpp contains no reference to any of them -
+// so unlike a waypoint leg or a LOITER stick input, a turn can be commanded
+// that leaves the fence and nothing will object until FENCE_ACTION fires after
+// the breach.  That is a reaction, not a constraint.
+//
+// The arc is a closed-form curve, so the whole of it can be checked before it
+// is accepted, once, off the control loop.  Refusing here makes the caller fall
+// back to the ordinary circle behaviour, which does go through the normal path.
+bool Mode::arc_within_fence(const Location &centre_loc, const Vector2f &centre_ne_m,
+                            const Vector2f &start_ne_m, float radius_m,
+                            float sweep_rad, float arc_alt_u_m) const
+{
+#if AP_FENCE_ENABLED
+    AC_Fence *fence = AP::fence();
+    if (fence == nullptr || fence->get_enabled_fences() == 0) {
+        return true;
+    }
+    if (!is_positive(radius_m)) {
+        return true;
+    }
+
+    // Where on the circle the vehicle starts.  The arc begins at the current
+    // position by construction, so this is the bearing of the vehicle from the
+    // centre, in the NE frame where the angle increases north-to-east.
+    const Vector2f start_rel = start_ne_m - centre_ne_m;
+    if (start_rel.length() < 0.01f) {
+        return true;                     // degenerate; set_arc() will reject it
+    }
+    const float th0 = atan2f(start_rel.y, start_rel.x);
+
+    // One sample every 5 degrees of sweep, bounded so a many-turn command
+    // cannot make this expensive.  Sampling rather than solving because the
+    // fence may be an arbitrary polygon.
+    const uint16_t steps = constrain_int16((int16_t)(fabsf(sweep_rad) / radians(5.0f)),
+                                           8, 360);
+    for (uint16_t i = 0; i <= steps; i++) {
+        const float th = th0 + sweep_rad * ((float)i / (float)steps);
+        Location p = centre_loc;
+        // The arc holds this altitude for its whole length, which is not
+        // necessarily the commanded location's - check the altitude the vehicle
+        // will actually fly.
+        p.set_alt_cm(arc_alt_u_m * 100.0f, Location::AltFrame::ABOVE_ORIGIN);
+        p.offset(radius_m * cosf(th), radius_m * sinf(th));
+        if (!fence->check_destination_within_fence(p)) {
+            return false;
+        }
+    }
+#endif
+    return true;
+}
+
+
 void Mode::get_pilot_desired_lean_angles_rad(float &roll_out_rad, float &pitch_out_rad, float angle_max_rad, float angle_limit_rad) const
 {
     // throttle failsafe check

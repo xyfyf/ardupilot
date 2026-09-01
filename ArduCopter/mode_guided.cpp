@@ -275,6 +275,15 @@ bool ModeGuided::set_arc_destination(const Location& centre, float radius_m,
         return false;
     }
 
+    // Same reason as the AUTO side: nothing downstream of the arc sees the fence.
+    // The GUIDED entry point previously checked only that the centre resolved,
+    // so a commanded turn could sit entirely outside the fence and be accepted.
+    if (!arc_within_fence(centre, centre_ne_m, pos_ne_m, fabsf(radius_m), sweep_rad,
+                          pos_control->get_pos_desired_U_m())) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "ArcNav: arc leaves fence");
+        return false;
+    }
+
     if (!guided_arc_nav.set_arc(*pos_control, centre_ne_m, fabsf(radius_m), pos_ne_m, sweep_rad,
                            speed_ms, pos_control->get_pos_desired_U_m())) {
         gcs().send_text(MAV_SEVERITY_WARNING,
