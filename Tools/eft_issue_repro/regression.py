@@ -191,12 +191,15 @@ SUITE = [
             "任一显著上升说明姿态环或前馈被改坏了",
     ),
     dict(
-        pid="P07", name="圆周飞行-倾角饱和护栏", case="circle", tag="circle_guard",
+        pid="P06", name="自动绕圈-倾角饱和护栏", case="circle", tag="circle_guard",
         args=[],
         metrics=_circle_metrics,
         check=_circle_check,
-        why="倾角饱和是 P07 的核心失效形态——一饱和圆周参考就跟不上，抽动随之出现。"
-            "AC_Circle 的限速基准若被改回只看 WPNAV_ACCEL，这一条会立刻报警",
+        why="⚠ 本条守的是**自动 CIRCLE 模式**（run_circle 用 set_mode_wait(CIRCLE) 加 "
+            "CIRCLE_RATE/CIRCLE_RADIUS）。而 P07 的实际问题是**飞手手动打杆绕圈时机身"
+            "抽动**，走的是姿态链路而非 AC_Circle 的参考生成——两者不是一条路径。"
+            "本条作为 AC_Circle 的回归护栏仍然有效（限速基准若被改回只看 WPNAV_ACCEL "
+            "会立刻报警），但**不构成对 P07 的验证**；手动绕圈的复现场景尚未建立。",
     ),
     dict(
         # AUTO 下围栏不拦飞机，只在越界后触发动作——这是 ArduPilot 的设计，
