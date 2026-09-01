@@ -719,6 +719,12 @@ void Copter::twentyfive_hz_logging()
     }
 #endif
 
+    // Degraded allocation.  Skipped entirely unless a motor has been removed and
+    // the allocator is actually running, so it costs nothing in normal flight.
+    if (should_log(MASK_LOG_ATTITUDE_MED)) {
+        Log_Write_MotAlloc();
+    }
+
 #if FRAME_CONFIG != HELI_FRAME
     // Airflow torque feedforward.  25 Hz against a 2 Hz input filter leaves
     // plenty of margin, and the write is skipped entirely while ATC_VFF_* are

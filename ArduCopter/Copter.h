@@ -904,6 +904,7 @@ private:
 
     // Log.cpp
     void Log_Write_Control_Tuning();
+    void Log_Write_MotAlloc();
 #if FRAME_CONFIG != HELI_FRAME
     void Log_Write_VelFF();
 #endif

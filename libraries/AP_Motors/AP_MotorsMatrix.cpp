@@ -419,6 +419,7 @@ void AP_MotorsMatrix::output_armed_stabilizing()
     //
     // Yaw is left out of the demand on purpose; see allocate_redistributed().
     bool redistributed = false;
+    _alloc_active = false;
     if (_failed_motor >= 0 && _fail_alloc_mode > 0) {
         const float demand[4] = { throttle_thrust_best_plus_adj, roll_thrust, pitch_thrust, yaw_thrust };
         float alloc[AP_MOTORS_MAX_NUM_MOTORS];
@@ -429,6 +430,7 @@ void AP_MotorsMatrix::output_armed_stabilizing()
                 }
             }
             redistributed = true;
+            set_limits_from_allocation(demand, false, alloc);
         }
     }
 
@@ -918,6 +920,82 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
         thrust_out[idx[k]] = constrain_float(thrust[k], 0.0f, 1.0f);
     }
     return true;
+}
+
+// Relative shortfall above which an axis counts as saturated.  The solver meets
+// the demand exactly whenever nothing clamps - the residual check inside
+// allocate_redistributed() guarantees that - so anything beyond arithmetic noise
+// came from clamping, i.e. from running out of motor.  1% keeps float noise out
+// while still catching the first real millimetre of shortfall.
+#define AP_MOTORS_ALLOC_LIMIT_REL     0.01f
+#define AP_MOTORS_ALLOC_LIMIT_ABS     1.0e-4f
+
+void AP_MotorsMatrix::set_limits_from_allocation(const float demand[4], bool include_yaw,
+                                                 const float thrust[AP_MOTORS_MAX_NUM_MOTORS])
+{
+    // What the committed thrusts actually produce.  Same B as the solver used:
+    // the throttle row sums the motors, the moment rows weight them by their
+    // geometry.
+    float achieved[4] = {};
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
+        if (!motor_enabled[i]) {
+            continue;
+        }
+        n++;
+        achieved[0] += thrust[i] * _throttle_factor[i];
+        achieved[1] += thrust[i] * _roll_factor[i];
+        achieved[2] += thrust[i] * _pitch_factor[i];
+        achieved[3] += thrust[i] * _yaw_factor[i];
+    }
+
+    // The throttle demand is per motor while the throttle row is a sum, the
+    // same scaling allocate_redistributed() applies to rem[0].
+    const float thr_demand = demand[0] * (float)n;
+
+    // limit.roll/pitch/yaw are consumed by AC_PID::update_i(), which still lets
+    // the integrator shrink when the error opposes it and only blocks growth.
+    // So the honest signal is simply "this axis did not get what it asked for",
+    // with no need to work out a direction here.
+    const auto short_of = [](float want, float got) {
+        return fabsf(want - got) > MAX(AP_MOTORS_ALLOC_LIMIT_ABS,
+                                       AP_MOTORS_ALLOC_LIMIT_REL * fabsf(want));
+    };
+
+    // Snapshot for the log before the flags collapse it to booleans.
+    _alloc_demand[0] = thr_demand;
+    for (uint8_t r = 1; r < 4; r++) {
+        _alloc_demand[r] = demand[r];
+    }
+    for (uint8_t r = 0; r < 4; r++) {
+        _alloc_achieved[r] = achieved[r];
+    }
+    _alloc_active = true;
+
+    limit.roll  = short_of(demand[1], achieved[1]);
+    limit.pitch = short_of(demand[2], achieved[2]);
+
+    // Yaw is deliberately absent from the demand today (see
+    // allocate_redistributed), so the allocator is not even trying to track it.
+    // Leaving limit.yaw as the forward mixer left it invites the yaw PID to keep
+    // integrating against a demand nothing is serving, and a wound-up yaw
+    // integrator eats the mixer headroom roll and pitch still need.  Report it
+    // as limited for as long as yaw is out of the solve.
+    //
+    // Keyed off include_yaw rather than hardcoded so that if MOT_FAIL_YAW ever
+    // does put yaw back into the demand (R-03), this follows automatically
+    // instead of silently reporting a tracked axis as saturated.
+    limit.yaw = include_yaw ? short_of(demand[3], achieved[3]) : true;
+
+    // Throttle is directional: too little lift is the upper limit biting, too
+    // much is the lower one.
+    if (thr_demand - achieved[0] > MAX(AP_MOTORS_ALLOC_LIMIT_ABS,
+                                       AP_MOTORS_ALLOC_LIMIT_REL * fabsf(thr_demand))) {
+        limit.throttle_upper = true;
+    } else if (achieved[0] - thr_demand > MAX(AP_MOTORS_ALLOC_LIMIT_ABS,
+                                              AP_MOTORS_ALLOC_LIMIT_REL * fabsf(thr_demand))) {
+        limit.throttle_lower = true;
+    }
 }
 
 int8_t AP_MotorsMatrix::find_opposite_motor(uint8_t motor_num) const

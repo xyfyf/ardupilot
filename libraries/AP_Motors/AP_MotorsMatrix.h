@@ -129,6 +129,15 @@ public:
     // motor removed by set_motor_failed(), or -1
     int8_t              get_failed_motor() const { return _failed_motor; }
 
+    // Last redistributed allocation, for the MALC log message.  Without demand
+    // against achieved there is no way to tell, after the fact, whether a poor
+    // post-failure response was the controller asking for the wrong thing or the
+    // allocator failing to deliver what it asked.  Valid only while
+    // alloc_active() is true.
+    bool                alloc_active() const { return _alloc_active; }
+    const float        *get_alloc_demand() const { return _alloc_demand; }
+    const float        *get_alloc_achieved() const { return _alloc_achieved; }
+
     // Redistributed-pseudoinverse control allocation.
     //
     // Solves for per-motor thrusts whose resulting moments come as close as
@@ -160,8 +169,22 @@ public:
     // the suppression term in allocate_redistributed() has to work from these.
     float               _yaw_geom[AP_MOTORS_MAX_NUM_MOTORS];
 
+    // Snapshot of the last redistributed solve: what was asked for, and what the
+    // committed thrusts actually produce.  [throttle, roll, pitch, yaw], with the
+    // throttle entry already summed over motors so the two are comparable.
+    float               _alloc_demand[4];
+    float               _alloc_achieved[4];
+    bool                _alloc_active;
+
     bool                allocate_redistributed(const float demand[4], bool include_yaw,
                                                float thrust_out[AP_MOTORS_MAX_NUM_MOTORS]) const;
+
+    // Report what the redistributed allocation actually achieved back into
+    // limit.*, so the rate PIDs get anti-windup that matches the mixer that
+    // really ran.  Without this the flags still describe the forward mixer,
+    // which the allocator has just replaced wholesale.
+    void                set_limits_from_allocation(const float demand[4], bool include_yaw,
+                                                   const float thrust[AP_MOTORS_MAX_NUM_MOTORS]);
 
     // Index of the motor diametrically opposite the given one - the one whose
     // roll and pitch factors are both its negation - or -1 if there is none.

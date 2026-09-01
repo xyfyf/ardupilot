@@ -291,6 +291,43 @@ void Copter::Log_Write_VelFF()
 }
 #endif  // FRAME_CONFIG != HELI_FRAME
 
+struct PACKED log_MotAlloc {
+    LOG_PACKET_HEADER;
+    uint64_t time_us;
+    int8_t   failed;        // motor removed from the mixer, -1 if none
+    float    dem_thr;       // demand, summed over motors so it matches achieved
+    float    dem_rll;
+    float    dem_pit;
+    float    dem_yaw;
+    float    ach_thr;       // what the committed thrusts actually produce
+    float    ach_rll;
+    float    ach_pit;
+    float    ach_yaw;
+};
+
+// Log the degraded allocation.  After a motor failure the mixer no longer does
+// what the frame table says, so a log without this cannot separate "the
+// controller asked for the wrong thing" from "the allocator could not deliver
+// what it asked" - and those two want opposite fixes.  Yaw is expected to show
+// a large shortfall: it is left out of the solve on purpose.
+void Copter::Log_Write_MotAlloc()
+{
+    const AP_MotorsMatrix *mat = AP_MotorsMatrix::get_singleton();
+    if (mat == nullptr || !mat->alloc_active()) {
+        return;
+    }
+    const float *d = mat->get_alloc_demand();
+    const float *a = mat->get_alloc_achieved();
+    const struct log_MotAlloc pkt {
+        LOG_PACKET_HEADER_INIT(LOG_MOTALLOC_MSG),
+        time_us : AP_HAL::micros64(),
+        failed  : mat->get_failed_motor(),
+        dem_thr : d[0], dem_rll : d[1], dem_pit : d[2], dem_yaw : d[3],
+        ach_thr : a[0], ach_rll : a[1], ach_pit : a[2], ach_yaw : a[3]
+    };
+    logger.WriteBlock(&pkt, sizeof(pkt));
+}
+
 void Copter::Log_Video_Stabilisation()
 {
     if (!should_log(MASK_LOG_VIDEO_STABILISATION)) {
@@ -502,6 +539,21 @@ const struct LogStructure Copter::log_structure[] = {
 // @Field: OutR: Roll torque actually added to the rate loop
 // @Field: OutP: Pitch torque actually added to the rate loop
 // @Field: Scl: Landed fade on the output, 1 flying and 0 gated off
+// @LoggerMessage: MALC
+// @Description: Degraded control allocation after a motor failure.  Only written while it is in use.
+// @Field: TimeUS: Time since system startup
+// @Field: Fail: Motor removed from the mixer, -1 if none
+// @Field: DThr: Throttle demand, summed over motors to match AThr
+// @Field: DRll: Roll moment demand
+// @Field: DPit: Pitch moment demand
+// @Field: DYaw: Yaw moment demand (left out of the solve on purpose)
+// @Field: AThr: Throttle the committed thrusts actually produce
+// @Field: ARll: Roll moment achieved
+// @Field: APit: Pitch moment achieved
+// @Field: AYaw: Yaw moment achieved
+    { LOG_MOTALLOC_MSG, sizeof(log_MotAlloc),
+      "MALC", "Qbffffffff",     "TimeUS,Fail,DThr,DRll,DPit,DYaw,AThr,ARll,APit,AYaw", "s#--------", "F---------" },
+
 #if FRAME_CONFIG != HELI_FRAME
     { LOG_VELFF_MSG, sizeof(log_VelFF),
       "VFF", "Qfffffffff",      "TimeUS,VF,VR,FF,FR,RawR,RawP,OutR,OutP,Scl", "snnnn-----", "F---------" },
