@@ -633,6 +633,23 @@ LOITER_ANGLE_MAX_DEG = 15.0
 CLI_OVERRIDDEN = set()
 
 
+def get_param(mon, name, timeout_ms=8000):
+    """回读飞控里参数的实际值。
+
+    set_param() 在 CLI_OVERRIDDEN 时会跳过写入，此时场景内部那个局部变量并不等于
+    飞控里生效的值——若拿它去记录或计算，产出的就是「记录的值不是生效的值」。
+    """
+    mon.mav.mav.param_request_read_send(
+        mon.mav.target_system, mon.mav.target_component, name.encode(), -1)
+    deadline = mon.sim_ms + timeout_ms
+    while mon.sim_ms < deadline:
+        msg = mon.recv()
+        if msg is not None and msg.get_type() == "PARAM_VALUE" \
+                and msg.param_id.rstrip("\x00") == name:
+            return msg.param_value
+    raise RuntimeError("参数 %s 回读超时" % name)
+
+
 def set_param(mon, name, value, timeout_ms=8000):
     """设参数并等飞控回读确认。CIRCLE_RATE 只在模式 init 时读取，所以调用方
     必须退出 CIRCLE 再重进，否则改了不生效。
@@ -980,8 +997,10 @@ def run_fence(mon, mode="LOITER", skip_param_fence=False, fence_heading=None,
     # 圆形围栏避障用的是 FENCE_MARGIN 而不是 AVOID_MARGIN
     # （AC_Avoid::adjust_velocity_circle_fence 取 _fence.get_margin()），
     # AVOID_MARGIN 管的是 proximity 传感器那条路。这里沿用实机的 FENCE_MARGIN=5。
-    margin = 5.0
-    set_param(mon, "FENCE_MARGIN", margin)
+    set_param(mon, "FENCE_MARGIN", 5.0)
+    # 回读：--set FENCE_MARGIN 会让上面这次写入被跳过，用写入值去打印和记录就会
+    # 报出「设定余量 5」而飞控里其实是 10。
+    margin = get_param(mon, "FENCE_MARGIN")
     set_param(mon, "AVOID_MARGIN", 10.0)
     set_param(mon, "AVOID_ENABLE", 7)        # 与实机 defaults.parm 一致
     set_param(mon, "AVOID_ACCEL_MAX", 4.0)   # 实机设的 4 m/s²，但 ANGLE_MAX=15° 只给得出 2.63

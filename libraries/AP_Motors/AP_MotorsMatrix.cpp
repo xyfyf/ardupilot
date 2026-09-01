@@ -879,8 +879,29 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
                 thrust[k] = t;
             }
         }
-        have_solution = true;
         if (!clamped_any) {
+            // Only a pass that needed no clamping counts as a solution.
+            //
+            // This is an active-set iteration: clamped_any means this round's
+            // assignment is *not* usable and the next round must redistribute
+            // with the clamped motors' contributions removed from the demand.
+            // Setting the flag on such a round made a later degeneration commit
+            // it anyway - the clamped motors would hold their clamped values
+            // while the free ones still held figures computed on the assumption
+            // that those same motors were putting out their unclamped, out of
+            // range values.  B*t no longer equals the demand and the moment
+            // balance is gone, yet the caller is told the allocation succeeded.
+            //
+            // It is reachable, and not by numerical accident: with yaw out of
+            // the demand (rows = 3), once clamping has frozen all but two
+            // motors, B is 3x2, so B*B^T is 3x3 of rank at most 2 and its
+            // determinant is identically zero - mat_inverse() fails and the
+            // loop breaks.  Three successive clamps in a saturated case is all
+            // it takes.
+            //
+            // No snapshot is needed: this branch breaks immediately, so
+            // thrust[] at the exit is exactly the assignment being blessed.
+            have_solution = true;
             break;
         }
     }
