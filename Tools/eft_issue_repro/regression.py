@@ -41,6 +41,41 @@ YAW_CFG = ["--set", "WPNAV_SPEED=300", "--set", "ATC_SLEW_YAW=12000",
            "--set", "ATC_RAT_YAW_P=0.60", "--set", "ATC_RAT_YAW_I=0.12",
            "--set", "ATC_RAT_YAW_FF=0.30"]
 
+def _rev_metrics(r):
+    ev = r.get("reversals", [])
+    m = r.get("metrics", {})
+    return {"反拉次数": str(len(ev)),
+            "峰值俯仰速率": "%.0f °/s" % max((e.get("peak_pitch_rate_deg_s", 0) for e in ev), default=-1),
+            "峰值俯仰误差": "%.2f°" % max((e.get("peak_pitch_error_deg", 0) for e in ev), default=-1),
+            "俯仰I项跨度": "%.4f" % m.get("pitch_i_span", -1)}
+
+
+def _rev_check(r):
+    ev = r.get("reversals", [])
+    m = r.get("metrics", {})
+    # 护栏而非达标线：P02 尚未关闭，只保证不比现基线更差。
+    # 现基线（2026-09-01）：峰值俯仰速率 118 °/s、峰值俯仰误差 2.98°、I 项跨度 0.040。
+    return (len(ev) >= 3
+            and max((e.get("peak_pitch_rate_deg_s", 0) for e in ev), default=999) < 150.0
+            and max((e.get("peak_pitch_error_deg", 0) for e in ev), default=999) < 5.0
+            and m.get("pitch_i_span", 999) < 0.08)
+
+
+def _circle_metrics(r):
+    st = r.get("steps", [])
+    return {"档数": str(len(st)),
+            "倾角饱和占比": "%.3f" % max((s.get("tilt_saturated_frac", 0) for s in st), default=-1),
+            "姿态误差峰值": "%.2f°" % max((s.get("att_err_max_deg", 0) for s in st), default=-1)}
+
+
+def _circle_check(r):
+    st = r.get("steps", [])
+    # 倾角饱和是 P07 的核心失效形态——一旦饱和圆周参考就跟不上，抽动随之出现。
+    return (len(st) >= 2
+            and max((s.get("tilt_saturated_frac", 1.0) for s in st), default=1.0) < 0.01
+            and max((s.get("att_err_max_deg", 999) for s in st), default=999) < 5.0)
+
+
 def _fence_metrics(r):
     steps = r.get("steps", [])
     return {"最小余量": "%.2f m" % min((s.get("margin_achieved_m", -99) for s in steps), default=-99),
@@ -130,6 +165,30 @@ SUITE = [
                            "混控输出峰值": "%.2f" % (_m(r, "yaw_out_peak") or -1)},
         check=lambda r: (_m(r, "yaw_rate_max_pos_degs") or 0) > 50.0,
         why="偏航能力是协调转弯的硬约束，掉了说明偏航通道被改坏",
+    ),
+    # ---- P02 / P07 专项入口纳入集中回归 ----
+    #
+    # 这两个场景此前只有专项命令行入口，游离在集中回归之外，改坏了没人报警。姿态层
+    # 围栏栽过同一个跟头：交付现场的功能靠手工跑的一条命令验收，之后任何人改动
+    # AC_Avoid 或那几个模式都不会触发告警。
+    #
+    # 两条判据都是**护栏**，不是达标线。P02 与 P07 均未关闭，数字只保证不比当前基线
+    # 更差；把护栏读成「问题已解决」正是审查里点名警告过的错误。
+    dict(
+        pid="P02", name="高速反拉-抽动护栏", case="reverse", tag="reverse_guard",
+        args=[],
+        metrics=_rev_metrics,
+        check=_rev_check,
+        why="反拉是抽动最容易复现的工况。峰值俯仰速率与 I 项跨度是抽动的两个侧面，"
+            "任一显著上升说明姿态环或前馈被改坏了",
+    ),
+    dict(
+        pid="P07", name="圆周飞行-倾角饱和护栏", case="circle", tag="circle_guard",
+        args=[],
+        metrics=_circle_metrics,
+        check=_circle_check,
+        why="倾角饱和是 P07 的核心失效形态——一饱和圆周参考就跟不上，抽动随之出现。"
+            "AC_Circle 的限速基准若被改回只看 WPNAV_ACCEL，这一条会立刻报警",
     ),
     dict(
         # AUTO 下围栏不拦飞机，只在越界后触发动作——这是 ArduPilot 的设计，
