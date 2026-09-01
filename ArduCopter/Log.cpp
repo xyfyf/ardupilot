@@ -238,6 +238,59 @@ void Copter::Log_Write_PTUN(uint8_t param, float tuning_val, float tune_min, flo
     logger.WriteBlock(&pkt_tune, sizeof(pkt_tune));
 }
 
+#if FRAME_CONFIG != HELI_FRAME
+struct PACKED log_VelFF {
+    LOG_PACKET_HEADER;
+    uint64_t time_us;
+    float    vel_fwd;       // body-forward velocity feeding the term, m/s
+    float    vel_rgt;       // body-right velocity feeding the term, m/s
+    float    filt_fwd;      // the same after the input filter, m/s
+    float    filt_rgt;
+    float    raw_roll;      // roll torque asked for, before limit and fade
+    float    raw_pitch;
+    float    out_roll;      // roll torque actually added to the rate loop
+    float    out_pitch;
+    float    scale;         // landed fade, 1 flying / 0 gated off
+};
+
+// Log the airflow torque feedforward.  A gain lifted from a log is only valid
+// over samples where the term was neither limited by ATC_VFF_MAX nor faded by
+// the landed ratio, and the applied value on its own cannot say which of those
+// happened - hence logging the input, what the gain asked for, and what came
+// out.  Nothing is written while the feature is off, so it costs no log
+// bandwidth on a vehicle that is not using it.
+void Copter::Log_Write_VelFF()
+{
+    // Non-heli frames always build an AC_AttitudeControl_Multi here (6DoF
+    // derives from it); the heli controller has no such term.
+    const AC_AttitudeControl_Multi *att_multi =
+        static_cast<const AC_AttitudeControl_Multi *>(attitude_control);
+    if (att_multi == nullptr || !att_multi->vel_ff_enabled()) {
+        return;
+    }
+
+    const Vector2f &vel = att_multi->get_vel_ff_body_vel();
+    const Vector2f &filt = att_multi->get_vel_ff_input();
+    const Vector2f &raw = att_multi->get_vel_ff_unlimited();
+    const Vector2f &out = att_multi->get_vel_ff();
+
+    const struct log_VelFF pkt {
+        LOG_PACKET_HEADER_INIT(LOG_VELFF_MSG),
+        time_us   : AP_HAL::micros64(),
+        vel_fwd   : vel.x,
+        vel_rgt   : vel.y,
+        filt_fwd  : filt.x,
+        filt_rgt  : filt.y,
+        raw_roll  : raw.x,
+        raw_pitch : raw.y,
+        out_roll  : out.x,
+        out_pitch : out.y,
+        scale     : att_multi->get_vel_ff_scale()
+    };
+    logger.WriteBlock(&pkt, sizeof(pkt));
+}
+#endif  // FRAME_CONFIG != HELI_FRAME
+
 void Copter::Log_Video_Stabilisation()
 {
     if (!should_log(MASK_LOG_VIDEO_STABILISATION)) {
@@ -436,6 +489,23 @@ const struct LogStructure Copter::log_structure[] = {
 
     { LOG_PARAMTUNE_MSG, sizeof(log_PTUN),
       "PTUN", "QBffff",         "TimeUS,Param,TunVal,TunMin,TunMax,NIn", "s#----", "F-----" },
+
+// @LoggerMessage: VFF
+// @Description: Airflow torque feedforward (ATC_VFF_*).  Only written while the feature is enabled.
+// @Field: TimeUS: Time since system startup
+// @Field: VF: Body-forward velocity feeding the term, after the optional wind correction
+// @Field: VR: Body-right velocity feeding the term
+// @Field: FF: Body-forward velocity after the input filter
+// @Field: FR: Body-right velocity after the input filter
+// @Field: RawR: Roll torque the gain asked for, before ATC_VFF_MAX and the landed fade
+// @Field: RawP: Pitch torque the gain asked for, before ATC_VFF_MAX and the landed fade
+// @Field: OutR: Roll torque actually added to the rate loop
+// @Field: OutP: Pitch torque actually added to the rate loop
+// @Field: Scl: Landed fade on the output, 1 flying and 0 gated off
+#if FRAME_CONFIG != HELI_FRAME
+    { LOG_VELFF_MSG, sizeof(log_VelFF),
+      "VFF", "Qfffffffff",      "TimeUS,VF,VR,FF,FR,RawR,RawP,OutR,OutP,Scl", "snnnn-----", "F---------" },
+#endif
 
 // @LoggerMessage: CTUN
 // @Description: Control Tuning information

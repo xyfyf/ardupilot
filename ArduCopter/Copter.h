@@ -904,6 +904,9 @@ private:
 
     // Log.cpp
     void Log_Write_Control_Tuning();
+#if FRAME_CONFIG != HELI_FRAME
+    void Log_Write_VelFF();
+#endif
     void Log_Write_Attitude();
     void Log_Write_Rate();
     void Log_Write_EKF_POS();

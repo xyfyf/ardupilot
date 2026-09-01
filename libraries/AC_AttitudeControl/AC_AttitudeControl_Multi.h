@@ -101,6 +101,20 @@ public:
     // Filtered body-frame velocity (x forward, y right, m/s) driving the above.
     const Vector2f& get_vel_ff_input() const { return _vel_ff_input; }
 
+    // The rest of the chain, for the VFF log message.  A gain fitted from a log
+    // is only valid over samples where the term was neither limited nor faded,
+    // and the applied value alone cannot say which happened - so log what fed
+    // it, what it asked for, and what came out.
+    //
+    // Body-frame velocity before filtering, after the optional wind correction.
+    const Vector2f& get_vel_ff_body_vel() const { return _vel_ff_body_vel; }
+    // Roll/pitch torque before ATC_VFF_MAX limiting and before the landed fade.
+    const Vector2f& get_vel_ff_unlimited() const { return _vel_ff_unlimited; }
+    // Landed fade applied to the output: 1 flying, 0 on the ground or gated off.
+    float get_vel_ff_scale() const { return _vel_ff_scale; }
+    // Both gains zero means the feature is off and there is nothing to log.
+    bool vel_ff_enabled() const { return !is_zero(_vel_ff_rll) || !is_zero(_vel_ff_pit); }
+
     // user settable parameters
     static const struct AP_Param::GroupInfo var_info[];
 
@@ -188,6 +202,9 @@ protected:
 
     Vector2f              _vel_ff;          // normalised torque applied this cycle (x roll, y pitch)
     Vector2f              _vel_ff_input;    // filtered body velocity behind it (x fwd, y right)
+    Vector2f              _vel_ff_body_vel; // same velocity before filtering (x fwd, y right)
+    Vector2f              _vel_ff_unlimited;// torque before limiting and landed fade (x roll, y pitch)
+    float                 _vel_ff_scale;    // landed fade applied to the output, 1 flying / 0 gated
     LowPassFilterVector2f _vel_ff_filter;   // keeps velocity noise out of the rate loop
 
     enum class VelFFOption : uint8_t {

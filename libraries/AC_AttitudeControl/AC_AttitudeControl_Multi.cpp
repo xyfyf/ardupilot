@@ -527,6 +527,9 @@ void AC_AttitudeControl_Multi::update_velocity_feedforward(float dt)
         !_ahrs.get_velocity_NED(vel_ned)) {
         _vel_ff.zero();
         _vel_ff_input.zero();
+        _vel_ff_body_vel.zero();
+        _vel_ff_unlimited.zero();
+        _vel_ff_scale = 0.0f;
         _vel_ff_filter.reset();
         return;
     }
@@ -542,7 +545,8 @@ void AC_AttitudeControl_Multi::update_velocity_feedforward(float dt)
 
     // Body frame of the control view: x forward, y right.
     const Vector3f vel_body = _ahrs.get_rotation_body_to_ned().mul_transpose(vel_ned);
-    _vel_ff_input = _vel_ff_filter.apply(Vector2f{vel_body.x, vel_body.y}, dt);
+    _vel_ff_body_vel = Vector2f{vel_body.x, vel_body.y};
+    _vel_ff_input = _vel_ff_filter.apply(_vel_ff_body_vel, dt);
 
     // Fade with the same ratio landed_gain_reduction() applies to the PID gains.
     // THROTTLE_UNLIMITED is reached while still on the ground - it only means the
@@ -550,13 +554,16 @@ void AC_AttitudeControl_Multi::update_velocity_feedforward(float dt)
     // above opens before the vehicle actually leaves the pad.  Riding the landed
     // ratio hands the feedforward in over the same time constant the rest of the
     // controller uses, instead of stepping to full authority at that boundary.
-    const float fly_scale = 1.0f - constrain_float(_landed_gain_ratio, 0.0f, 1.0f);
+    _vel_ff_scale = 1.0f - constrain_float(_landed_gain_ratio, 0.0f, 1.0f);
 
     // Roll responds to sideways airflow, pitch to forward airflow.  Each gain carries
     // its own sign so it can be lifted straight from a log regression.
+    _vel_ff_unlimited.x = _vel_ff_rll * _vel_ff_input.y;
+    _vel_ff_unlimited.y = _vel_ff_pit * _vel_ff_input.x;
+
     const float lim = MAX(_vel_ff_max.get(), 0.0f);
-    _vel_ff.x = constrain_float(_vel_ff_rll * _vel_ff_input.y, -lim, lim) * fly_scale;
-    _vel_ff.y = constrain_float(_vel_ff_pit * _vel_ff_input.x, -lim, lim) * fly_scale;
+    _vel_ff.x = constrain_float(_vel_ff_unlimited.x, -lim, lim) * _vel_ff_scale;
+    _vel_ff.y = constrain_float(_vel_ff_unlimited.y, -lim, lim) * _vel_ff_scale;
 }
 
 // reset the rate controller target loop updates

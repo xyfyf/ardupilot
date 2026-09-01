@@ -718,6 +718,15 @@ void Copter::twentyfive_hz_logging()
         gyro_fft.write_log_messages();
     }
 #endif
+
+#if FRAME_CONFIG != HELI_FRAME
+    // Airflow torque feedforward.  25 Hz against a 2 Hz input filter leaves
+    // plenty of margin, and the write is skipped entirely while ATC_VFF_* are
+    // zero, so this costs nothing until the feature is switched on.
+    if (should_log(MASK_LOG_ATTITUDE_MED)) {
+        Log_Write_VelFF();
+    }
+#endif
 }
 #endif  // HAL_LOGGING_ENABLED
 
