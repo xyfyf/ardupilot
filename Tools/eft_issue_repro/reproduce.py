@@ -888,6 +888,36 @@ def horiz_radius(mon):
     return math.hypot(mon.local.x, mon.local.y)
 
 
+def return_to_centre(mon, mode, alt_m, timeout_ms=60000, accept_r_m=8.0):
+    """用位置控制模式回到围栏圆心，回来后切回被测模式。返回是否真的回到了。
+
+    原先这里是 rc_override(pitch=1000) 满杆后退。那是**机体系**指令：航向一漂就
+    不指向圆心，有风时甚至完全回不来。而回不来的后果不止是这一档不准——下一档会
+    从上一档结束的位置起飞，飞机若已在栏外，限制器按设计根本不介入，于是四档连锁
+    失真。带风的高风速数据之所以不可信，根子在这里，不在被测代码。
+
+    GUIDED 走位置控制器，有积分项，顶得住稳态风，且与航向无关。
+    """
+    set_mode_wait(mon, "GUIDED")
+    t0 = mon.sim_ms
+    ok = False
+    while mon.sim_ms - t0 < timeout_ms:
+        stream_setpoint(mon, 0.0, 0.0, alt_m, 0.0, 0.0, 0.0, 0.0)
+        mon.recv()
+        r = horiz_radius(mon)
+        if r is not None and r < accept_r_m:
+            ok = True
+            break
+    # 到位后静置，让速度归零，下一档才是从静止起步
+    settle = mon.sim_ms
+    while mon.sim_ms - settle < 4000:
+        stream_setpoint(mon, 0.0, 0.0, alt_m, 0.0, 0.0, 0.0, 0.0)
+        mon.recv()
+    set_mode_wait(mon, mode)
+    rc_override(mon)
+    return ok
+
+
 def run_fence(mon, mode="LOITER", skip_param_fence=False, fence_heading=None,
               release_at_r=None, fence_throttle=1500, fence_poly=None):
     """满杆冲向围栏，量各模式的实际围控能力。
@@ -912,14 +942,12 @@ def run_fence(mon, mode="LOITER", skip_param_fence=False, fence_heading=None,
     if not skip_param_fence:
         set_param(mon, "FENCE_TYPE", 2)      # 只留圆形围栏，隔离变量
         set_param(mon, "FENCE_RADIUS", FENCE_RADIUS_M)
-    else:
-        # 用的是上传的 polyfence。**下面所有「最近半径 / 实际余量 / 越界」都是按
-        # FENCE_RADIUS 的圆形算的径向距离，对多边形没有意义**——多边形的正确度量
-        # 是到边界的法向距离，必须用 tools/fence_margin.py 从日志重算。
-        # 曾经据这些数字报出 3 档「越界」，而真实多边形距离是 +4.90~+5.01 m，
-        # 一次都没越界。
-        print("  【注意】使用上传的 polyfence：以下余量/越界数字按圆形 %.0f m 计算，"
-              "对多边形无效，请用 tools/fence_margin.py 重算" % FENCE_RADIUS_M)
+    # 用上传的 polyfence 时这里什么都不设——形状由 upload_fence() 决定。
+    #
+    # 此处曾打印一条警告，说「以下余量/越界数字按圆形计算、对多边形无效，请用
+    # tools/fence_margin.py 重算」。那是当时 run_fence 用到起飞点的径向距离量余量
+    # 留下的。现在改用 poly_signed_dist() 的法向距离，圆形与多边形通用，该警告
+    # 反而会让人不信任正确的数字，故删除。
     set_param(mon, "FENCE_ACTION", 0)        # 只报告，不触发 RTL，才能观察避障本身
     set_param(mon, "FENCE_ENABLE", 1)
     # 圆形围栏避障用的是 FENCE_MARGIN 而不是 AVOID_MARGIN
@@ -930,7 +958,9 @@ def run_fence(mon, mode="LOITER", skip_param_fence=False, fence_heading=None,
     set_param(mon, "AVOID_MARGIN", 10.0)
     set_param(mon, "AVOID_ENABLE", 7)        # 与实机 defaults.parm 一致
     set_param(mon, "AVOID_ACCEL_MAX", 4.0)   # 实机设的 4 m/s²，但 ANGLE_MAX=15° 只给得出 2.63
-    print("圆形围栏 %.0f m，FENCE_MARGIN %.0f m，逐档接近" % (FENCE_RADIUS_M, margin))
+    print("%s，FENCE_MARGIN %.0f m，逐档接近"
+          % ("多边形围栏 %d 边（外接 %.0f m）" % (len(fence_poly), FENCE_RADIUS_M)
+             if fence_poly else "圆形围栏 %.0f m" % FENCE_RADIUS_M, margin))
 
     steps = []
     for speed in FENCE_APPROACH_SPEEDS_MS:
@@ -1018,23 +1048,24 @@ def run_fence(mon, mode="LOITER", skip_param_fence=False, fence_heading=None,
                  "  ** 越界 **" if step["breached"] else "",
                  decel, step.get("hold_radius_pp_m", float("nan"))))
 
-        # 回飞到圆心附近，为下一档留出加速距离
-        back = mon.sim_ms
-        while mon.sim_ms - back < 45000:
-            rc_override(mon, pitch=1000)
-            mon.recv()
-            r = horiz_radius(mon)
-            if r is not None and r < 12.0:
-                break
-        rc_override(mon)
-        settle = mon.sim_ms
-        while mon.sim_ms - settle < 4000:
-            rc_override(mon)
-            mon.recv()
+        # 回飞到圆心，为下一档留出加速距离。回不去就必须停，不能继续——
+        # 后续各档会从错误的起点出发，数字仍然照常打印，看不出是废的。
+        if not return_to_centre(mon, mode, 15.0):
+            step["return_failed"] = True
+            print("  【中止】未能回到圆心，后续档次会从错误起点出发，不再继续")
+            break
 
-    set_mode_wait(mon, "LAND")
-    wait_disarmed(mon, 120)
-    return {"fence_radius_m": FENCE_RADIUS_M, "steps": steps}
+    # 测量到此已经全部完成。落地上锁只是收尾，它超时不该让整条作废——
+    # STABILIZE 是手动油门，带风时落地明显更慢，2 m/s 风的那一条就因此被判成
+    # 「运行失败 returncode=1」，而四档数据其实全部有效且全部拦住。
+    out = {"fence_radius_m": FENCE_RADIUS_M, "steps": steps}
+    try:
+        set_mode_wait(mon, "LAND")
+        wait_disarmed(mon, 120)
+    except RuntimeError as exc:
+        print("  【收尾】落地上锁未完成：%s（不影响上面已完成的测量）" % exc)
+        out["teardown_note"] = str(exc)
+    return out
 
 
 # P06：作业航线骨架。优先覆盖两类最影响亩用量的场景——180° 掉头与密集航点切换。
