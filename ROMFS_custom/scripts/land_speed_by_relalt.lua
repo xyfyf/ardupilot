@@ -46,7 +46,7 @@ assert(param:add_table(PARAM_TABLE_KEY, PARAM_PREFIX, 8), "add_table LNDS")
   @Values: 0:Disabled,1:Enabled
   @User: Standard
 --]]
-local P_ENABLE = bind_add_param("ENABLE", 1, 1)
+local P_ENABLE = bind_add_param("ENABLE", 1, 0)
 
 --[[
   @Param: LNDS_ALT_M
