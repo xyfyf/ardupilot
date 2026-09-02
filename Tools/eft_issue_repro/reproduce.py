@@ -2781,7 +2781,6 @@ def main(argv=None):
                              "给出时忽略 --polyfence-sides/--polyfence-radius 的形状")
     parser.add_argument("--polyfence-rotate", type=float, default=0.0, metavar="DEG",
                         help="多边形围栏旋转角，用于选择正南撞到顶点还是边心")
-<<<<<<< Updated upstream
     parser.add_argument("--sprint-speeds", type=lambda s: tuple(float(x) for x in s.split(",")),
                         default=None, metavar="V1,V2,...",
                         help="fence-sprint 的进场速度（m/s，逗号分隔）。默认 3,5,7，"
@@ -2789,10 +2788,10 @@ def main(argv=None):
     parser.add_argument("--sprint-back", type=float, default=FENCE_SPRINT_BACK_M, metavar="M",
                         help="fence-sprint 起跑点退到圆心后方多少米。退得不够则加速距离"
                              "不足，高速档达不到目标速度，测到的又变回稳态侵入")
-=======
     parser.add_argument("--fence-speeds", default=None, metavar="A,B,C",
-                        help="逐档接近的目标速度（m/s，逗号分隔）。默认 2,5,8,12")
->>>>>>> Stashed changes
+                        help="fence 场景逐档接近的目标速度（m/s，逗号分隔）。默认 2,5,8,12。"
+                             "注意 fence 场景从圆心起跑，助跑距离有限，高速档未必达得到"
+                             "目标速度——要测真正的高速进场请用 fence-sprint")
     parser.add_argument("--fence-mode", default="LOITER", metavar="MODE",
                         help="fence 场景中被测的飞行模式（LOITER/POSHOLD/ALT_HOLD/SPORT/…）")
     parser.add_argument("--polyfence-sides", type=int, default=0, metavar="N",
@@ -2887,17 +2886,13 @@ def main(argv=None):
                                     fence_heading=args.fence_heading,
                                     release_at_r=args.release_at_r,
                                     fence_throttle=args.fence_throttle,
-<<<<<<< Updated upstream
-                                    fence_poly=fence_poly))
+                                    fence_poly=fence_poly,
+                                    speeds=[float(x) for x in args.fence_speeds.split(",")]
+                                           if args.fence_speeds else None))
         elif args.case == "fence-sprint":
             result.update(run_fence_sprint(mon, args.fence_mode, fence_poly=fence_poly,
                                            speeds=args.sprint_speeds or FENCE_SPRINT_SPEEDS_MS,
                                            back_m=args.sprint_back))
-=======
-                                    fence_poly=fence_poly,
-                                    speeds=[float(x) for x in args.fence_speeds.split(',')]
-                                            if args.fence_speeds else None))
->>>>>>> Stashed changes
         elif args.case == "uturn-auto":
             result.update(run_uturn_auto(mon, args.swath, turns=args.turns))
         elif args.case == "motor-fail":
