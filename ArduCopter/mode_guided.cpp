@@ -378,6 +378,17 @@ void ModeGuided::arc_run()
     pos_control->update_NE_controller();
     pos_control->update_U_controller();
 
+    // Keep the reported target in step with what the arc is actually
+    // commanding.  POSITION_TARGET_LOCAL_NED reports the Arc submode through
+    // the same getters as PosVelAccel, and those return these statics - which
+    // the arc never touched, because it drives the position controller
+    // directly.  A ground station or companion computer watching the target
+    // therefore saw whatever was current before the turn began, for the whole
+    // turn.
+    guided_pos_target_neu_m = pos_control->get_pos_desired_NEU_m();
+    guided_vel_target_neu_ms = pos_control->get_vel_desired_NEU_ms();
+    guided_accel_target_neu_mss = pos_control->get_accel_desired_NEU_mss();
+
 #if HAL_LOGGING_ENABLED
     // @LoggerMessage: ARCN
     // @Description: Constant-speed arc navigation

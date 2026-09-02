@@ -91,6 +91,28 @@
 // 1.5x as long as a straight ramp to keep the same peak yaw acceleration.
 #define AC_ARCNAV_SMOOTHSTEP_PEAK  1.5f
 
+// How far the actual radial distance may sit from the commanded radius before
+// the turn is refused.  The generator starts the path at the vehicle's position
+// but curves it at the commanded radius, so the circle it flies is centred
+// wherever that puts it - not necessarily at the commanded centre.  A small
+// mismatch is unavoidable; a large one means the caller and the generator
+// disagree about where the circle is.
+#ifndef AC_ARCNAV_RADIUS_TOL_FRAC
+ # define AC_ARCNAV_RADIUS_TOL_FRAC  0.20f
+#endif
+#ifndef AC_ARCNAV_RADIUS_TOL_MIN_M
+ # define AC_ARCNAV_RADIUS_TOL_MIN_M 1.0f
+#endif
+
+// Minimum entry speed *along the entry tangent*, as a fraction of the arc
+// speed.  Projecting rather than taking the magnitude tests direction and
+// magnitude at once: a vehicle hovering, or moving the other way round the
+// circle, both fail it, and both would otherwise have the reference set off at
+// working speed from a standstill.
+#ifndef AC_ARCNAV_ENTRY_SPEED_FRACTION
+ # define AC_ARCNAV_ENTRY_SPEED_FRACTION  0.7f
+#endif
+
 #ifndef AC_ARCNAV_YAW_RATE_FRACTION
  # define AC_ARCNAV_YAW_RATE_FRACTION  0.5f
 #endif

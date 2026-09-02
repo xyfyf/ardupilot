@@ -1885,13 +1885,20 @@ def run_uturn_arcnav(mon, swath=SWATH_M, speed=2.0, leg=SPRAY_LEG_M):
 
     samples = []
     t0 = mon.sim_ms
+    # 采样窗口刻意长于圆弧本身（弧长 pi*R/speed，窗口 1.6 倍再加 4 s），为的是
+    # 也看到出弧之后。但半径必须只用弧内的样本：0.5 圈在 R=12 / 5 m/s 下是 7.5 s，
+    # 而 core 切片取到 13.7 s，超过一半的样本落在弧后的减速段——那时飞机在退出
+    # 转弯、离圆心自然越来越远，把它算进「实飞半径」量的就不是弧了。用 sim_ms
+    # 界定弧内区间，与掉速指标用 ARCN.Prog 界定稳态段是同一个道理。
+    arc_end_ms = t0 + int(math.pi * R / speed * 1000)
     while mon.sim_ms - t0 < int(1.6 * math.pi * R / speed * 1000) + 4000:
         mon.recv()
         if mon.local is None:
             continue
+        in_arc = mon.sim_ms <= arc_end_ms
         samples.append((math.hypot(mon.local.vx, mon.local.vy),
                         target_tilt_deg(mon),
-                        math.hypot(mon.local.x - (leg), mon.local.y - R)))
+                        math.hypot(mon.local.x - (leg), mon.local.y - R) if in_arc else None))
     set_mode_wait(mon, "LAND")
     wait_disarmed(mon, 120)
 
@@ -1901,13 +1908,13 @@ def run_uturn_arcnav(mon, swath=SWATH_M, speed=2.0, leg=SPRAY_LEG_M):
     core = samples[int(n * 0.15):int(n * 0.85)] or samples
     sps = [s[0] for s in core]
     tilts = [s[1] for s in core if s[1] is not None]
-    radii = [s[2] for s in core]
+    radii = [s[2] for s in core if s[2] is not None]
     res = {"accepted": True, "swath_m": swath, "uturn_radius_m": R,
            "target_speed_m_s": speed,
            "speed_min_m_s": min(sps), "speed_mean_m_s": sum(sps) / len(sps),
            "speed_dip_pct": 100 * (1 - min(sps) / speed),
            "tilt_max_deg": max(tilts) if tilts else None,
-           "flown_radius_mean_m": sum(radii) / len(radii)}
+           "flown_radius_mean_m": (sum(radii) / len(radii)) if radii else -1.0}
     print("  固件圆弧：最低速 %.2f m/s（掉速 %.0f%%），实飞半径 %.2f m，指令倾角 max %.1f°"
           % (res["speed_min_m_s"], res["speed_dip_pct"],
              res["flown_radius_mean_m"], res["tilt_max_deg"] or 0))

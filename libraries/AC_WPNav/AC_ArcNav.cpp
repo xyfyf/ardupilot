@@ -206,8 +206,33 @@ bool AC_ArcNav::set_arc(const AC_PosControl& pos_control,
     }
 
     const Vector2f offset = start_ne_m - centre_ne_m;
-    if (offset.length() < 0.1f) {
+    const float offset_len_m = offset.length();
+    if (offset_len_m < 0.1f) {
         // start point sits on the centre, so it defines no bearing
+        return false;
+    }
+
+    // The commanded centre has to agree with where the vehicle actually is.
+    // Only the bearing of `offset` is used below; the path then curves at
+    // radius_m from the vehicle's own position, so if the two disagree the
+    // circle that gets flown is not the one that was asked for and nothing
+    // downstream ever notices.
+    if (fabsf(offset_len_m - radius_m) >
+        MAX(AC_ARCNAV_RADIUS_TOL_FRAC * radius_m, AC_ARCNAV_RADIUS_TOL_MIN_M)) {
+        return false;
+    }
+
+    // Entry state.  Checked here rather than in each caller because the caller
+    // that had no check at all was AUTO, where LOITER_TURNS can follow a hover,
+    // a delay or a takeoff - the reference would then step to working speed
+    // from a standstill and the vehicle would spend the entry transition
+    // catching up with it.  Projecting the velocity on the entry tangent covers
+    // direction too: going the other way round the circle fails the same test.
+    const float dir = is_positive(sweep_rad) ? 1.0f : -1.0f;
+    const float entry_heading_rad = wrap_PI(atan2f(offset.y, offset.x) + dir * M_PI_2);
+    const Vector2f tangent{cosf(entry_heading_rad), sinf(entry_heading_rad)};
+    const Vector2f vel_ne_ms = pos_control.get_vel_estimate_NEU_ms().xy();
+    if ((vel_ne_ms * tangent) < speed_ms * AC_ARCNAV_ENTRY_SPEED_FRACTION) {
         return false;
     }
 
@@ -221,7 +246,7 @@ bool AC_ArcNav::set_arc(const AC_PosControl& pos_control,
     // The tangent at the start is the radius turned a quarter circle the way
     // the vehicle is going.
     _start_pos_ne_m = start_ne_m;
-    _start_heading_rad = wrap_PI(atan2f(offset.y, offset.x) + _direction * M_PI_2);
+    _start_heading_rad = entry_heading_rad;
 
     // Size the transitions from the jerk the position controller is already
     // shaping to, so the turn asks for no more rate of change of acceleration

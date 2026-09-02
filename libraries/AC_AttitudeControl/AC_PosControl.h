@@ -490,6 +490,11 @@ public:
     // Returns desired velocity in NEU frame in m/s.
     const Vector3f& get_vel_desired_NEU_ms() const { return _vel_desired_neu_ms; }
 
+    /// Returns the desired NEU acceleration in m/s². This is the feed-forward
+    /// term set by an external trajectory generator, not the controller output;
+    /// see get_accel_target_NEU_mss() for the latter.
+    const Vector3f& get_accel_desired_NEU_mss() const { return _accel_desired_neu_mss; }
+
     // Returns velocity target in NEU frame in cm/s.
     // See get_vel_target_NEU_ms() for full details.
     const Vector3f get_vel_target_NEU_cms() const { return get_vel_target_NEU_ms() * 100.0; }
