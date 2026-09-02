@@ -102,6 +102,12 @@ bool ModeAuto::init(bool ignore_checks)
 // stop mission when we leave auto mode
 void ModeAuto::exit()
 {
+    // Leaving AUTO mid-turn must not hand the next mode a position controller
+    // still tuned for the arc.  Its correction limits are what wp_nav uses to
+    // decide a waypoint is reached, so an arc-sized limit left behind changes
+    // navigation behaviour in a mode that never asked for it.
+    arc_stop_and_restore();
+
     if (copter.mode_auto.mission.state() == AP_Mission::MISSION_RUNNING) {
         copter.mode_auto.mission.stop();
     }
@@ -605,6 +611,9 @@ bool ModeAuto::arc_start(const Location& centre_loc, float radius_m, float turns
     // flying under it at working speed and that state is exactly what the arc
     // continues from.
     const float accel_arc_mss = sq(speed_ms) / radius_m;
+    // Snapshot before overwriting - see arc_stop_and_restore().
+    arc_saved_speed_ne_ms = pos_control->get_max_speed_NE_ms();
+    arc_saved_accel_ne_mss = pos_control->get_max_accel_NE_mss();
     pos_control->set_max_speed_accel_NE_m(speed_ms, accel_arc_mss * 1.2f);
     pos_control->set_correction_speed_accel_NE_m(speed_ms, accel_arc_mss * 1.2f);
     // These are restored in arc_run() when the turn ends.  Leaving them raised
@@ -620,6 +629,24 @@ bool ModeAuto::arc_start(const Location& centre_loc, float radius_m, float turns
     arc_handover_count = 0;
     set_submode(SubMode::ARC);
     return true;
+}
+
+// Undo arc_start().  Safe to call at any time and more than once - the guard on
+// auto_arc_nav.active() makes the second call a no-op, so every exit path can
+// call it unconditionally rather than each having to work out whether an arc was
+// running.
+void ModeAuto::arc_stop_and_restore()
+{
+    if (!auto_arc_nav.active() && !is_positive(arc_saved_speed_ne_ms)) {
+        return;
+    }
+    auto_arc_nav.stop();
+    if (is_positive(arc_saved_speed_ne_ms) && is_positive(arc_saved_accel_ne_mss)) {
+        pos_control->set_max_speed_accel_NE_m(arc_saved_speed_ne_ms, arc_saved_accel_ne_mss);
+        pos_control->set_correction_speed_accel_NE_m(arc_saved_speed_ne_ms, arc_saved_accel_ne_mss);
+    }
+    arc_saved_speed_ne_ms = 0.0f;
+    arc_saved_accel_ne_mss = 0.0f;
 }
 
 // arc_run - fly the coordinated turn
@@ -642,10 +669,7 @@ void ModeAuto::arc_run()
             // Hand the position controller back the way the rest of the mission
             // expects to find it.  arc_start() raised these to what holding the
             // circle needs, which is well above WPNAV_ACCEL.
-            pos_control->set_max_speed_accel_NE_m(wp_nav->get_default_speed_NE_ms(),
-                                                  wp_nav->get_wp_acceleration_mss());
-            pos_control->set_correction_speed_accel_NE_m(wp_nav->get_default_speed_NE_ms(),
-                                                         wp_nav->get_wp_acceleration_mss());
+            arc_stop_and_restore();
         }
         if (arc_handover_count < AUTO_ARC_HANDOVER_LOOPS) {
             arc_handover_count++;
