@@ -233,7 +233,7 @@ const AP_Param::GroupInfo AP_MotorsMulticopter::var_info[] = {
 
     // @Param: FAIL_IDX
     // @DisplayName: Failed motor index
-    // @Description: Motor number (1 to 12) to treat as failed, or 0 for none. Setting this removes the motor from the mixer and surrenders yaw control - the degraded allocation a multirotor needs once a motor stops, since the remaining motors cannot satisfy roll, pitch, yaw and throttle at the same time. Without it the controller keeps commanding the dead motor and drives its opposite one down to balance thrust that is not there, turning one failure into two. Intended to be written by a failure detector; may also be set manually for ground testing. Not reversible in flight.
+    // @Description: Motor number (1 to 12) to treat as failed, or 0 for none. Setting this removes the motor from the mixer and surrenders yaw control - the degraded allocation a multirotor needs once a motor stops, since the remaining motors cannot satisfy roll, pitch, yaw and throttle at the same time. Without it the controller keeps commanding the dead motor and drives its opposite one down to balance thrust that is not there, turning one failure into two. Set manually for ground and injection testing. The rpm-based detector does NOT write this parameter - it degrades the mixer directly - so a real detection does not survive a reboot, and a value found here was put here by hand. Not reversible in flight, and it only takes effect once armed, so a value left over from a bench test would first bite on the next takeoff: arming is therefore refused while this is non-zero. To deliberately take off pre-degraded, turn off arming checks.
     // @Range: 0 12
     // @User: Advanced
     AP_GROUPINFO("FAIL_IDX", 45, AP_MotorsMulticopter, _fail_motor_idx, 0),
@@ -875,6 +875,23 @@ bool AP_MotorsMulticopter::arming_checks(size_t buflen, char *buffer) const
         hal.util->snprintf(buffer, buflen,
                            "%sFAIL_YAW needs %sFAIL_ALLOC=0 (else it does nothing)",
                            AP_MOTORS_PARAM_PREFIX, AP_MOTORS_PARAM_PREFIX);
+        return false;
+    }
+    // FAIL_IDX removes a motor from the mixer, irreversibly, on the first mixer
+    // pass after arming.  It is a persistent parameter, so a bench test that
+    // ends without clearing it leaves a hexacopter that silently takes off on
+    // five motors - the degradation only bites once armed, which is exactly too
+    // late to notice it.
+    //
+    // Blocking here and not at the parameter write, because the write is the
+    // legitimate half: the failure injection scenarios set this in flight, after
+    // arming, and are unaffected.  What this catches is the one case that has no
+    // legitimate reading - it was still set when the vehicle was next armed.
+    // A deliberate pre-degraded takeoff is still possible by turning off arming
+    // checks, which is a visible act rather than a forgotten one.
+    if (_fail_motor_idx.get() != 0) {
+        hal.util->snprintf(buffer, buflen, "%sFAIL_IDX=%d set, clear it to fly",
+                           AP_MOTORS_PARAM_PREFIX, int(_fail_motor_idx.get()));
         return false;
     }
     if (!check_mot_pwm_params()) {
