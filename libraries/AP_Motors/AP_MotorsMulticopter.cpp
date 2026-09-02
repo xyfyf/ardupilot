@@ -263,7 +263,7 @@ const AP_Param::GroupInfo AP_MotorsMulticopter::var_info[] = {
 
     // @Param: FAIL_YAW
     // @DisplayName: Yaw authority retained after motor failure
-    // @Description: Fraction of the yaw mixer factors kept after a motor is removed. The default of 0 gives yaw up entirely: the vehicle rotates, but the authority that would have gone into holding heading stays available for roll and pitch, which is what keeps it upright. Raising this buys heading back and works in still air - measured in SITL on a hexacopter losing its worst-case motor, keeping yaw held rotation to about 2 deg/s instead of 23 - but it costs the margin needed to trim against wind: with the same airframe and only 2 m/s of wind, keeping yaw drove roll overshoot to 68 degrees and crashed, while giving it up held roll to 2.4 degrees and landed. One rotor down, the remaining authority is enough to hold attitude or heading, not both, and attitude is the one that has to be held. Raise this only for an airframe with margin to spare, and only with wind in the test.
+    // @Description: Fraction of the yaw mixer factors kept after a motor is removed. The default of 0 gives yaw up entirely: the vehicle rotates, but the authority that would have gone into holding heading stays available for roll and pitch, which is what keeps it upright. Raising this buys heading back and works in still air - measured in SITL on a hexacopter losing its worst-case motor, keeping yaw held rotation to about 2 deg/s instead of 23 - but it costs the margin needed to trim against wind: with the same airframe and only 2 m/s of wind, keeping yaw drove roll overshoot to 68 degrees and crashed, while giving it up held roll to 2.4 degrees and landed. One rotor down, the remaining authority is enough to hold attitude or heading, not both, and attitude is the one that has to be held. Raise this only for an airframe with margin to spare, and only with wind in the test. Applies to the forward mixer only: it scales the yaw mixer factors, and with MOT_FAIL_ALLOC=1 (the default) the redistributing solver overwrites every command that mixer produced and leaves yaw out of the demand, so those factors are never read. Setting this non-zero while MOT_FAIL_ALLOC is on is refused at arming rather than silently ignored. To bias the allocator's leftover yaw instead, use MOT_FAIL_YSUP.
     // @Range: 0 1
     // @User: Advanced
     AP_GROUPINFO("FAIL_YAW", 49, AP_MotorsMulticopter, _fail_yaw_keep, 0),
@@ -284,7 +284,7 @@ const AP_Param::GroupInfo AP_MotorsMulticopter::var_info[] = {
 
     // @Param: FAIL_YSUP
     // @DisplayName: Yaw moment suppression after motor failure
-    // @Description: How hard the degraded allocator works to keep the residual yaw moment small. With yaw out of the demand the remaining motors have freedom to spare - many thrust sets deliver the same throttle, roll and pitch - and plain minimum norm picks one without regard for how much yaw moment is left over. Raising this biases that pick toward less of it. A hexacopter cannot hold heading on five motors whatever this is set to; what this buys is a slower rotation, not a stopped one. The number to watch is the mean yaw rate, not the peak: the peak is the switching transient, while the mean sets how far the nose actually sweeps and how much time the pilot gets. They behave differently - from still air to 10 m/s the peak climbs 24.7 to 35.5 deg/s while the mean falls 23.1 to 20.9, because the mean is set by the parasitic yaw moment and barely notices the wind. Defaults to 0.7, measured across all six failure positions and four wind speeds: mean yaw rate drops 15 to 30 percent (more in stronger wind), height loss stays at 0.04 m and horizontal excursion at 0.12 m throughout, and every run stayed airborne. It is paid for in steady roll error, but only in the middle of the range - no cost in still air (0.07 to 0.06 deg), worst at 4 m/s (1.36 to 1.99), back down to +9 percent at 8 m/s, and at 10 m/s it is better rather than worse (6.99 to 5.46). Peak roll error is unchanged everywhere. Set 0 for the plain minimum-norm pick. This suppresses the parasitic yaw moment, with a target of zero; it is not MOT_FAIL_YAW, which puts yaw back into the demand and asks the controller to track it.
+    // @Description: How hard the degraded allocator works to keep the residual yaw moment small. With yaw out of the demand the remaining motors have freedom to spare - many thrust sets deliver the same throttle, roll and pitch - and plain minimum norm picks one without regard for how much yaw moment is left over. Raising this biases that pick toward less of it. A hexacopter cannot hold heading on five motors whatever this is set to; what this buys is a slower rotation, not a stopped one. The number to watch is the mean yaw rate, not the peak: the peak is the switching transient, while the mean sets how far the nose actually sweeps and how much time the pilot gets. They behave differently - from still air to 10 m/s the peak climbs 24.7 to 35.5 deg/s while the mean falls 23.1 to 20.9, because the mean is set by the parasitic yaw moment and barely notices the wind. Defaults to 0.7, measured across all six failure positions and four wind speeds: mean yaw rate drops 15 to 30 percent (more in stronger wind), height loss stays at 0.04 m and horizontal excursion at 0.12 m throughout, and every run stayed airborne. It is paid for in steady roll error, but only in the middle of the range - no cost in still air (0.07 to 0.06 deg), worst at 4 m/s (1.36 to 1.99), back down to +9 percent at 8 m/s, and at 10 m/s it is better rather than worse (6.99 to 5.46). Peak roll error is unchanged everywhere. Set 0 for the plain minimum-norm pick. This suppresses the parasitic yaw moment, with a target of zero, and is the only yaw knob the redistributing allocator reads. It is not MOT_FAIL_YAW: that one scales the yaw mixer factors, which this allocator never looks at - see that parameter.
     // @Range: 0 1
     // @Increment: 0.05
     AP_GROUPINFO("FAIL_YSUP", 52, AP_MotorsMulticopter, _fail_yaw_suppress, 0.7),
@@ -858,6 +858,23 @@ bool AP_MotorsMulticopter::arming_checks(size_t buflen, char *buffer) const
     }
     if (_spin_arm > thr_lin.get_spin_min()) {
         hal.util->snprintf(buffer, buflen, "%sSPIN_ARM > %sSPIN_MIN", AP_MOTORS_PARAM_PREFIX, AP_MOTORS_PARAM_PREFIX);
+        return false;
+    }
+    // FAIL_YAW only reaches the motors through the forward mixer.  With
+    // FAIL_ALLOC set, the redistributing solver overwrites every motor command
+    // that mixer produced, and it leaves yaw out of the demand entirely - so the
+    // yaw factors FAIL_YAW scaled are never read and the parameter does nothing.
+    //
+    // Refusing to arm rather than silently ignoring it: the whole point of
+    // setting FAIL_YAW is a belief about how much heading authority survives a
+    // motor failure, and a wrong belief about that is exactly the kind that gets
+    // acted on in the air.  Neither default trips this - FAIL_YAW is 0 - so this
+    // only stops someone who has explicitly asked for something they are not
+    // getting.
+    if (_fail_alloc_mode > 0 && !is_zero(_fail_yaw_keep)) {
+        hal.util->snprintf(buffer, buflen,
+                           "%sFAIL_YAW needs %sFAIL_ALLOC=0 (else it does nothing)",
+                           AP_MOTORS_PARAM_PREFIX, AP_MOTORS_PARAM_PREFIX);
         return false;
     }
     if (!check_mot_pwm_params()) {
