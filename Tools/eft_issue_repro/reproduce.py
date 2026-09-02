@@ -1137,6 +1137,299 @@ def run_fence(mon, mode="LOITER", skip_param_fence=False, fence_heading=None,
     return out
 
 
+# P05 冲刺场景：以作业速度**直冲**边界，而不是逼近后停住。
+#
+# run_fence() 量的是稳态侵入：满杆从圆心出发，一路被限制器压着加速，跑到停住为止。
+# 那条路径上飞机从来没有以作业速度自由巡航过。真机 2026-08-31 架次的失效通道是另
+# 一条：飞机在 5 m/s 附近巡航撞围栏，限制器要在**剩下的距离**里把它刹住，而刹车
+# 距离是 v²/(2a)，是场地尺寸的函数。60 m 六边形上永远测不出那个失效——60 m 的场地
+# 对任何速度都够用。
+#
+# 所以两件事都要按真机来：场地按**半宽 22–26 m**（六边形边心距，不是外接半径），
+# 进场速度固定在 3/5/7 m/s。半宽由传入的 polyfence 顶点直接算出，不再单开参数——
+# 形状和数字必须来自同一处，否则改了 --polyfence-radius 而半宽还按旧值报，数字看
+# 不出已经错了。
+FENCE_SPRINT_SPEEDS_MS = (3.0, 5.0, 7.0)
+# 起跑点退到圆心后方多少米。7 m/s 在满倾角下需要 9.3 m 刹车距离，限制器因此在离
+# 边界 14.3 m 处就开始压速度；从圆心起跑只剩 9.7 m 加速距离，达不到 7 m/s，测出来
+# 的会是「加速段的稳态侵入」——正是本场景要区别于 run_fence() 的那个东西。
+FENCE_SPRINT_BACK_M = 15.0
+
+
+def _ray_dist_to_poly(p, d, verts):
+    """从 p 沿单位方向 d 走到多边形边界的距离。射线打不到边界时返回 inf。
+
+    这不是 poly_signed_dist() 的替代品，两者回答的是不同问题：法向距离是限制器用
+    的量、也是「越界」的定义；而「还剩多少加速/刹车距离」只能沿**行进方向**量。
+    起跑点退到圆心后方之后，离飞机最近的边在**身后**——用法向距离判「快到边界了」
+    会在起跑瞬间就命中，冻结在零速上，整档作废。冒烟测试第一版正是这么废的。
+    """
+    px, py = p
+    dx, dy = d
+    best = float("inf")
+    n = len(verts)
+    for i in range(n):
+        (ax, ay), (bx, by) = verts[i], verts[(i + 1) % n]
+        ex, ey = bx - ax, by - ay
+        den = dx * ey - dy * ex
+        if abs(den) < 1e-12:
+            continue
+        t = ((ax - px) * ey - ex * (ay - py)) / den
+        u = (dy * (ax - px) - dx * (ay - py)) / den
+        if t >= 0.0 and -1e-9 <= u <= 1.0 + 1e-9:
+            best = min(best, t)
+    return best
+
+
+def _ne_stick(mon, dn, de, signs, gain_pwm_per_unit=500.0):
+    """把期望的 NE 方向转成 roll/pitch 杆量。
+
+    不用 turn_to_heading()：那要求先把机头转到固定方位，而机体系方向约定尚未定论
+    （TODO.md P2），一旦转反，飞机会朝相反的边冲出去，而所有数字照常打印。这里改成
+    按当前航向把期望地理方向旋进机体系，航向是多少都不影响进场方向。
+
+    signs 是 _calibrate_stick_signs() 实测出来的 (roll_sign, pitch_sign)，不写死。
+    """
+    if mon.att is None:
+        return 1500, 1500
+    roll_sign, pitch_sign = signs
+    c, s = math.cos(mon.att.yaw), math.sin(mon.att.yaw)
+    fwd = c * dn + s * de
+    rgt = -s * dn + c * de
+    pitch = int(max(1000, min(2000, 1500 + pitch_sign * gain_pwm_per_unit * fwd)))
+    roll = int(max(1000, min(2000, 1500 + roll_sign * gain_pwm_per_unit * rgt)))
+    return roll, pitch
+
+
+def _probe_axis(mon, axis, probe_pwm, probe_ms=4000):
+    """给一个轴加固定杆量，返回该轴机体系速度的稳态均值。"""
+    t0 = mon.sim_ms
+    acc, n = 0.0, 0
+    while mon.sim_ms - t0 < probe_ms:
+        kw = {axis: 1500 + probe_pwm, "throttle": hold_alt_throttle(mon)}
+        rc_override(mon, **kw)
+        mon.recv()
+        bv = mon.body_velocity()
+        # 只统计后半段，前半段是建立过程
+        if bv is not None and mon.sim_ms - t0 > probe_ms * 0.5:
+            acc += bv[0] if axis == "pitch" else bv[1]
+            n += 1
+    # 收杆静置，让 LOITER 把速度收回去，下一个探针从静止开始
+    t1 = mon.sim_ms
+    while mon.sim_ms - t1 < 5000:
+        rc_override(mon, throttle=hold_alt_throttle(mon))
+        mon.recv()
+    return acc / n if n else 0.0
+
+
+def _calibrate_stick_signs(mon, probe_pwm=250):
+    """实测 roll/pitch 杆量的正方向，不再假设。
+
+    `run_fence()` 的注释写「`pitch=2000` 满杆向前」，而 TODO.md P2 记着这条存疑。
+    那个场景查不出来：飞机从圆心出发，前飞后飞半径都在涨，方向反了也照样出数、
+    照样「拦住」。本场景不行——进场方向错了就是朝相反的边冲，起跑点还恰好在那条
+    边的余量带附近，限制器一压飞机就不动了，看起来像「飞控没响应」。
+
+    在 LOITER 里标定：杆量到机体轴的映射由 RC_Channel 决定，与模式无关，而 LOITER
+    有位置控制器会自己把速度收回去，探针之间不会留残速。
+    """
+    set_mode_wait(mon, "LOITER", 15)
+    vx = _probe_axis(mon, "pitch", probe_pwm)
+    vy = _probe_axis(mon, "roll", probe_pwm)
+    pitch_sign = 1.0 if vx >= 0 else -1.0
+    roll_sign = 1.0 if vy >= 0 else -1.0
+    print("  杆量方向标定：pitch +%d → 机体前向 %+.2f m/s（sign %+.0f）；"
+          "roll +%d → 机体右向 %+.2f m/s（sign %+.0f）"
+          % (probe_pwm, vx, pitch_sign, probe_pwm, vy, roll_sign))
+    if abs(vx) < 0.3 or abs(vy) < 0.3:
+        raise RuntimeError("杆量标定响应过小（前向 %.2f、右向 %.2f m/s），"
+                           "无法判定方向，拒绝在未知约定下出数" % (vx, vy))
+    return (roll_sign, pitch_sign)
+
+
+def run_fence_sprint(mon, mode="ALT_HOLD", fence_poly=None,
+                     speeds=FENCE_SPRINT_SPEEDS_MS, back_m=FENCE_SPRINT_BACK_M):
+    """按固定进场速度冲击围栏，量刹车距离够不够用。
+
+    每档三段：
+      加速段  以速度环选杆量，把飞机加到目标速度
+      冻结段  到速即**冻结杆量**，让飞机以巡航状态撞围栏
+      滑行段  保持冻结杆量直到停住或超时
+
+    冻结是关键。若让速度环一路跟着限制器加杆，测到的是「飞手与限制器对抗」，两条
+    机制的贡献分不开；冻结之后杆量是常量，速度的变化全部来自限制器。
+    """
+    if not fence_poly:
+        raise RuntimeError("fence-sprint 需要 polyfence："
+                           "加 --polyfence-sides 6 --polyfence-radius 27.7 --polyfence-rotate 30"
+                           "（外接 27.7 m 的正六边形，边心距即半宽 24 m）")
+
+    # 半宽 = 圆心到边界的法向距离，正是限制器用的那个量
+    half_width = poly_signed_dist((0.0, 0.0), fence_poly)
+
+    command_takeoff(mon, FENCE_TEST_ALT_M)
+    set_mode_wait(mon, "LOITER")
+    for _ in range(60):
+        rc_override(mon)
+        mon.recv()
+
+    set_param(mon, "FENCE_ACTION", 0)        # 只报告，观察限制器本身
+    set_param(mon, "FENCE_ENABLE", 1)
+    set_param(mon, "FENCE_MARGIN", 5.0)
+    margin = get_param(mon, "FENCE_MARGIN")
+    set_param(mon, "AVOID_MARGIN", 10.0)
+    set_param(mon, "AVOID_ENABLE", 7)
+    print("冲刺场景：六边形半宽 %.2f m，FENCE_MARGIN %.0f m，起跑点后退 %.0f m"
+          % (half_width, margin, back_m))
+
+    # 开跑前实测杆量方向。围栏此时已开，但圆心到任一边都有 24 m，250 的小杆量
+    # 走不到余量带，标定不会被限制器污染。
+    signs = _calibrate_stick_signs(mon)
+
+    steps = []
+    for target in speeds:
+        # 起跑点退到圆心南侧，进场方向取正北。用 GUIDED 定点，与航向无关。
+        if not _goto_ne(mon, -back_m, 0.0, FENCE_TEST_ALT_M):
+            print("  【中止】未能到达起跑点，后续档会从错误起点出发，不再继续")
+            steps.append({"target_speed_m_s": target, "start_failed": True})
+            break
+        set_mode_wait(mon, mode, 15)
+
+        t0 = mon.sim_ms
+        frozen = None            # 冻结后的 (roll, pitch)
+        cruise_v = 0.0           # 冻结瞬间的地速
+        entry_v = None           # 越过余量线时的地速
+        freeze_d = None          # 冻结瞬间到边界的法向距离
+        d_min, v_at_dmin = float("inf"), 0.0
+        v_max = 0.0
+        cmd = 0.0                # 加速段的杆量偏置（积分量）
+        # 目标速度所需的刹车距离，再留 6 m：限制器在 margin + v²/(2a) 处起作用，
+        # 冻结要发生在那之前，飞机才是以巡航状态进入围栏作用范围的
+        freeze_at = target * target / (2.0 * 2.63) + 6.0
+        stall = 0
+        heading_checked = False
+        bad_dir = False
+        while mon.sim_ms - t0 < 90000:
+            thr = hold_alt_throttle(mon)
+            if mon.local is None or mon.att is None:
+                mon.recv()
+                continue
+            d = poly_signed_dist((mon.local.x, mon.local.y), fence_poly)
+            # 前方还剩多少距离：沿进场方向（正北）量，与身后的边无关
+            d_ahead = _ray_dist_to_poly((mon.local.x, mon.local.y), (1.0, 0.0), fence_poly)
+            v = math.hypot(mon.local.vx, mon.local.vy)
+
+            if frozen is None:
+                # 速度环必须带积分。第一版用的是「增益随误差收缩」的纯 P
+                # （gain = 120*(target-v)），到速前增益先归零，飞机停在阻力与杆量
+                # 平衡的速度上，三档实测巡航都只有 0.07~0.22 m/s，全被记成「未达
+                # 目标速度」——测的其实还是稳态侵入，不是冲刺。改成对杆量积分，
+                # 稳态误差才收得掉。
+                cmd = max(0.0, min(500.0, cmd + 8.0 * (target - v)))
+                roll, pitch = _ne_stick(mon, 1.0, 0.0, signs, gain_pwm_per_unit=cmd)
+                rc_override(mon, roll=roll, pitch=pitch, throttle=thr)
+                # 冻结点选在**刹车区边缘**，不是「刚到速那一刻」。
+                #
+                # 第一版在 v 首次达标时就冻结，实测三档巡航分别记成 3.03/5.00，而
+                # 峰值全是 6.3 m/s——因为到速瞬间的杆量还高于维持该速所需，冻结之后
+                # 飞机继续加速到那个杆量的终端速度。冻结的本意是「进入围栏作用范围
+                # 后杆量不再变化，减速全部归限制器」，那就应该一直跟到该刹车了为止。
+                # 冻结点必须由**目标速度**算，不能用瞬时速度。用瞬时速度时阈值会
+                # 跟着限制器的减速一路下滑：限制器在 d = margin + v²/(2a) 处就开始
+                # 压速度，v 一降阈值跟着降，条件永远追不上，实测三档冻结时速度已经
+                # 是 0.07~2.17 m/s——冻结的是刹停后的状态，量不到巡航速度。
+                # 改成常量：目标速度所需刹车距离再加 6 m 余量，落在限制器起作用之前。
+                if d_ahead - margin <= freeze_at:
+                    frozen = (roll, pitch)
+                    cruise_v, freeze_d = v, d_ahead
+                    print("    冻结杆量：巡航 %.2f m/s（目标 %.1f），前方剩 %.2f m，"
+                          "法向余量 %.2f m" % (v, target, d_ahead, d))
+            else:
+                rc_override(mon, roll=frozen[0], pitch=frozen[1], throttle=thr)
+
+            # 方向自检：起跑 4 s 后仍未朝北，说明杆量方向约定与假设相反，
+            # 此时飞机在朝相反的边冲，数字照常产生但毫无意义，必须当场判废
+            if not heading_checked and mon.sim_ms - t0 > 4000:
+                heading_checked = True
+                if mon.local.vx < 0.3:
+                    bad_dir = True
+                    print("    【判废】起跑 4 s 北向速度仅 %.2f m/s，"
+                          "杆量方向与假设不符" % mon.local.vx)
+                    break
+
+            if entry_v is None and d <= margin:
+                entry_v = v
+            if d < d_min:
+                d_min, v_at_dmin = d, v
+            if v > v_max:
+                v_max = v
+
+            # 停住即收：连续 2 s 低于 0.3 m/s
+            if frozen is not None and v < 0.3:
+                stall += 1
+                if stall > 80:
+                    break
+            else:
+                stall = 0
+            mon.recv()
+
+        step = {
+            "target_speed_m_s": target,
+            "half_width_m": half_width,
+            "fence_margin_m": margin,
+            "cruise_speed_m_s": cruise_v,
+            "peak_speed_m_s": v_max,
+            "reached_target": cruise_v >= target - 0.5,
+            "freeze_distance_ahead_m": freeze_d,
+            "entry_speed_m_s": entry_v,
+            "margin_achieved_m": d_min,
+            "margin_overshoot_m": margin - d_min,
+            "speed_at_closest_m_s": v_at_dmin,
+            "breached": d_min < 0.0,
+            "invalid_direction": bad_dir,
+        }
+        # 刹车距离需求 v²/(2a)：与实际可用距离对照，说明这一档为什么过或不过
+        if entry_v:
+            step["brake_dist_needed_m"] = entry_v * entry_v / (2.0 * 2.63)
+        steps.append(step)
+        print("  目标 %.1f m/s：巡航 %.2f（峰值 %.2f），入余量带 %s m/s，"
+              "最近余量 %.2f m（侵入 %.2f）%s"
+              % (target, cruise_v, v_max,
+                 "%.2f" % entry_v if entry_v is not None else "未进入",
+                 d_min, step["margin_overshoot_m"],
+                 "  ** 越界 **" if step["breached"] else ""))
+        if bad_dir:
+            break
+
+    out = {"half_width_m": half_width, "steps": steps}
+    try:
+        set_mode_wait(mon, "LAND")
+        wait_disarmed(mon, 120)
+    except RuntimeError as exc:
+        print("  【收尾】落地上锁未完成：%s（不影响上面已完成的测量）" % exc)
+        out["teardown_note"] = str(exc)
+    return out
+
+
+def _goto_ne(mon, n_m, e_m, alt_m, timeout_ms=60000, accept_m=1.5):
+    """GUIDED 定点飞到相对 Home 的 (北, 东)，到位后静置到速度归零。"""
+    set_mode_wait(mon, "GUIDED")
+    t0 = mon.sim_ms
+    ok = False
+    while mon.sim_ms - t0 < timeout_ms:
+        stream_setpoint(mon, n_m, e_m, alt_m, 0.0, 0.0, 0.0, 0.0)
+        mon.recv()
+        if mon.local is not None and \
+                math.hypot(mon.local.x - n_m, mon.local.y - e_m) < accept_m:
+            ok = True
+            break
+    settle = mon.sim_ms
+    while mon.sim_ms - settle < 4000:
+        stream_setpoint(mon, n_m, e_m, alt_m, 0.0, 0.0, 0.0, 0.0)
+        mon.recv()
+    return ok
+
+
 # P06：作业航线骨架。优先覆盖两类最影响亩用量的场景——180° 掉头与密集航点切换。
 # 航线相对 Home（米，北/东）：
 #   起飞 → (60,0) → (60,12) → (0,12)        直线段 + 180° 掉头
@@ -2452,7 +2745,7 @@ def latest_log(out):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle", "fence", "route", "uturn", "uturn-guided", "uturn-arcnav", "uturn-auto", "yaw-step", "mag-align", "motor-fail"))
+    parser.add_argument("case", choices=("landing", "reverse", "circle", "loiter-circle", "fence", "fence-sprint", "route", "uturn", "uturn-guided", "uturn-arcnav", "uturn-auto", "yaw-step", "mag-align", "motor-fail"))
     parser.add_argument("--baseline", action="store_true",
                         help="关闭新增物理项，跑默认物理模型对照")
     parser.add_argument("--speedup", type=float, default=2.0)
@@ -2488,6 +2781,13 @@ def main(argv=None):
                              "给出时忽略 --polyfence-sides/--polyfence-radius 的形状")
     parser.add_argument("--polyfence-rotate", type=float, default=0.0, metavar="DEG",
                         help="多边形围栏旋转角，用于选择正南撞到顶点还是边心")
+    parser.add_argument("--sprint-speeds", type=lambda s: tuple(float(x) for x in s.split(",")),
+                        default=None, metavar="V1,V2,...",
+                        help="fence-sprint 的进场速度（m/s，逗号分隔）。默认 3,5,7，"
+                             "取自真机架次的作业速度区间")
+    parser.add_argument("--sprint-back", type=float, default=FENCE_SPRINT_BACK_M, metavar="M",
+                        help="fence-sprint 起跑点退到圆心后方多少米。退得不够则加速距离"
+                             "不足，高速档达不到目标速度，测到的又变回稳态侵入")
     parser.add_argument("--fence-mode", default="LOITER", metavar="MODE",
                         help="fence 场景中被测的飞行模式（LOITER/POSHOLD/ALT_HOLD/SPORT/…）")
     parser.add_argument("--polyfence-sides", type=int, default=0, metavar="N",
@@ -2583,6 +2883,10 @@ def main(argv=None):
                                     release_at_r=args.release_at_r,
                                     fence_throttle=args.fence_throttle,
                                     fence_poly=fence_poly))
+        elif args.case == "fence-sprint":
+            result.update(run_fence_sprint(mon, args.fence_mode, fence_poly=fence_poly,
+                                           speeds=args.sprint_speeds or FENCE_SPRINT_SPEEDS_MS,
+                                           back_m=args.sprint_back))
         elif args.case == "uturn-auto":
             result.update(run_uturn_auto(mon, args.swath, turns=args.turns))
         elif args.case == "motor-fail":
