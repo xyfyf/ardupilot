@@ -91,6 +91,52 @@ def _fence_metrics(r):
             "越界档数": str(sum(1 for s in steps if s.get("breached")))}
 
 
+def _sprint_metrics(r):
+    steps = r.get("steps", [])
+    return {"最低巡航": "%.2f m/s" % min((s.get("cruise_speed_m_s", -99) for s in steps), default=-99),
+            "最小余量": "%.2f m" % min((s.get("margin_achieved_m", -99) for s in steps), default=-99),
+            "越界档数": str(sum(1 for s in steps if s.get("breached")))}
+
+
+def _sprint_check(r):
+    steps = r.get("steps", [])
+    # 「最低巡航 >= 2 m/s」不是性能指标，是**脚手架自检**。冲刺场景调试期间报废过
+    # 三版，共同症状都是飞机根本没动起来而判据照样通过：射线距离用错时起跑瞬间就
+    # 冻结、纯 P 增益收缩到零时巡航只有 0.07 m/s。没飞就不越界，那种「通过」比失败
+    # 更坏。速度门槛把这类假通过挡在外面。
+    return (len(steps) >= 3
+            and not any(s.get("start_failed") or s.get("invalid_direction") for s in steps)
+            and all(not s.get("breached") for s in steps)
+            and min((s.get("margin_achieved_m", -99) for s in steps), default=-99) > 0.0
+            and min((s.get("cruise_speed_m_s", -99) for s in steps), default=-99) >= 2.0)
+
+
+def _sprint_check_speed(r):
+    """在守住围栏之外，再卡「围栏附近还跑得动」。
+
+    剖面减速度决定的不是守不守得住——命令律饱和到机体能力，任何剖面都刹得住——
+    而是**飞手在边界附近被允许跑多快**。真机 15° 倾角下实测，剖面 1.05 m/s² 把飞机
+    钳在 3.00/3.03/4.48 m/s，剖面 2.63 m/s² 给到 5.03/6.49/7.11 m/s，两者余量都是
+    1.0~1.3 m。作业机在有界地块里，那 20 m 就是整片地头。
+    门槛 4.5 m/s 卡在两者之间：剖面若退回降额，这一条立刻红。
+    """
+    steps = r.get("steps", [])
+    return (_sprint_check(r)
+            and min((s.get("cruise_speed_m_s", -99) for s in steps), default=-99) >= 4.5)
+
+
+# 冲刺场景共用的围栏形状：外接 27.7 m 的正六边形、旋转 30°，边心距（半宽）24 m，
+# 落在真机 2026-08-31 架次的 22–26 m 区间内。正北撞的是边心而不是顶点。
+SPRINT_FENCE = ["--polyfence-sides", "6", "--polyfence-radius", "27.7",
+                "--polyfence-rotate", "30",
+                # 必须对齐真机倾角。脚手架默认 ANGLE_MAX=2000（20°），而真机
+                # defaults.parm 是 1500（15°）——剖面减速度正是 g·tan(ANGLE_MAX)，
+                # 20° 给 3.57 m/s²、15° 只有 2.63，差 36%。同一组 A/B 在 20° 下两条
+                # 剖面完全重合、看不出任何差别，在 15° 下巡航速度差一倍：**结论在
+                # 15° 与 20° 之间是反的**，跑错倾角等于没测。
+                "--set", "ANGLE_MAX=1500", "--set", "PSC_POSXY_P=1.5"]
+
+
 def _fence_check(r):
     steps = r.get("steps", [])
     return (len(steps) >= 4
@@ -303,6 +349,35 @@ SUITE = [
         why="DRIFT 编译进 EFT_CAAC 且此前完全没有硬限，实测越界 1032 m。"
             "接入点与其他三个不同——roll 被速度误差项覆盖、pitch 被自动刹车覆盖，"
             "限制器必须接在送进姿态控制器之前",
+    ),
+    # ---- 姿态层围栏：冲刺场景 ----
+    #
+    # 与上面五条测的**不是一回事**。上面是「逼近后停住」的稳态侵入，飞机全程被限制器
+    # 压着加速，从没以作业速度巡航过；这里是以 3/5/7 m/s 巡航撞围栏，考的是刹车距离
+    # v²/(2a) 够不够用——而那是场地尺寸的函数，所以场地必须按真机的半宽 24 m，
+    # 不能用上面那个 60 m 六边形（60 m 对任何速度都够用，测不出东西）。
+    dict(
+        pid="P05", name="姿态层围栏-冲刺-ALT_HOLD-无风", tag="sprint_althold_calm",
+        case="fence-sprint",
+        args=["--fence-mode", "ALT_HOLD"] + SPRINT_FENCE
+             + ["--set", "FENCE_MARGIN=5", "--set", "FENCE_ACTION=0"],
+        metrics=_sprint_metrics,
+        check=_sprint_check,
+        why="推荐配置下的冲刺基线。三档都不得进余量带",
+    ),
+    dict(
+        pid="P05", name="姿态层围栏-冲刺-现场工况", tag="sprint_field_cfg",
+        case="fence-sprint",
+        args=["--fence-mode", "ALT_HOLD"] + SPRINT_FENCE
+             + ["--sprint-speeds", "5,7,10",
+                "--set", "FENCE_MARGIN=1", "--set", "FENCE_ACTION=0",
+                "--set", "SIM_WIND_SPD=5", "--set", "SIM_WIND_DIR=180"],
+        metrics=_sprint_metrics,
+        check=_sprint_check_speed,
+        why="复刻 2026-08-31 架次的工况：余量压到 1 m、5 m/s 顺风推向围栏，"
+            "速度加到 5/7/10 找失守边界。这一条同时卡两件事——不得越界（盯命令律），"
+            "且围栏附近巡航不得低于 4.5 m/s（盯剖面减速度）。"
+            "实测剖面 2.63 给 5.03/6.49/7.11 m/s，退回 1.05 只剩 3.00/3.03/4.48",
     ),
     dict(
         pid="P05", name="电子围栏边界-LOITER", tag="fence_loiter_edge", case="fence", args=[],

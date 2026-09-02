@@ -547,16 +547,22 @@ void AC_Avoid::adjust_lean_for_fence_rad(float &roll_rad, float &pitch_rad,
     // is built on.
     //
     // The velocity-layer path caps this at AC_AVOID_ACCEL_CMSS_MAX, a fixed
-    // 1.0 m/s/s.  An absolute constant cannot be right here: the profile it
-    // implies has to fit inside the site, and how much room a stop needs is
-    // v^2/(2*a).  At 1.0 m/s/s, arriving at 7 m/s needs 25.5 m, which exceeded
-    // the 22-26 m half-width of the fence flown on 2026-08-31 - the limiter was
-    // asking for a stopping distance the field did not have.  Tie it to the
-    // airframe instead: veh_angle_max_rad is what the attitude controller will
-    // actually honour this cycle, so g*tan of it is the deceleration the vehicle
-    // can really produce, 2.63 m/s/s at ANGLE_MAX 15 degrees.  The same stop now
-    // needs 9.3 m.  The last argument overrides the constant for this path only;
-    // the velocity-layer callers keep the cap they were written for.
+    // 1.0 m/s/s.  An absolute constant does not belong here: what the vehicle can
+    // decelerate at is known - veh_angle_max_rad is the lean the attitude
+    // controller will actually honour this cycle, so g*tan of it is the real
+    // figure, 2.63 m/s/s at ANGLE_MAX 15 degrees.  The last argument overrides the
+    // constant for this path only; the velocity-layer callers keep the cap they
+    // were written for.
+    //
+    // Be careful about what this buys.  The braking distance a profile implies is
+    // v^2/(2*a), so on paper 1.0 m/s/s needs 25.5 m to stop from 7 m/s against
+    // 9.3 m at 2.63, and the field fence of 2026-08-31 was only 22-26 m across.
+    // That arithmetic is what the change was made on and it is beside the point:
+    // the command law below saturates at accel_cap_mss, so the vehicle brakes at
+    // the airframe's capability whatever the profile says, and measured A/B shows
+    // both profiles holding the fence.  What the profile actually governs is the
+    // speed the pilot is allowed near the boundary - at 1.0 m/s/s the aircraft is
+    // clamped to about 3 m/s for the last 20 m.  See AC_AVOID_FENCE_PROFILE_FRAC.
     const float accel_cap_mss = GRAVITY_MSS * tanf(veh_angle_max_rad);
     const float accel_profile_mss = accel_cap_mss * AC_AVOID_FENCE_PROFILE_FRAC;
 

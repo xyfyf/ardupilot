@@ -28,21 +28,41 @@
 #define AC_AVOID_LEAN_HORIZON_S             1.0f
 // Fraction of the airframe's lean authority the stopping profile is built on.
 //
-// This used to be 0.4, which on this airframe (ANGLE_MAX 15 degrees, 2.63 m/s/s)
-// reproduced the fixed 1.0 m/s/s the velocity-layer path uses, and the headroom to
-// pull an overspeed back came from that de-rating.  The braking distance a profile
-// implies is v^2/(2*a), so 1.0 m/s/s needs 25.5 m to stop from 7 m/s - more than the
-// 22-26 m half-width of the field fence of 2026-08-31.  A profile that cannot fit
-// inside the site is not a safety factor, it is a guarantee of breach, and that
-// sortie duly logged six of them, the deepest 18.6 m.
+// At 1 the profile is the airframe's real capability, g*tan(veh_angle_max_rad).
+// It used to be 0.4, which on this airframe (ANGLE_MAX 15 degrees, 2.63 m/s/s)
+// happened to reproduce the fixed 1.0 m/s/s of the velocity-layer path.
 //
-// The headroom now comes from the command law instead: a_req = a_prof*(v_out/v_allow)^2
-// saturating at the airframe's capability, so an overspeed is answered with more than
-// the profile costs without the profile having to be small.  See
-// adjust_lean_for_fence_rad().  Held at 1 so the profile is the real capability;
-// this is the knob to bisect on if the SITL sprint sweep shows the margin is too thin
-// in wind, which eats the budget asymmetrically (measured k = 0.122 1/s along the
-// outward normal, a 2.8x spread between the upwind and downwind edges).
+// What it does not change is whether the fence holds.  The profile sets where
+// v_allow = sqrt(2*a_prof*s) puts the limit, so it decides when braking starts; how
+// hard the vehicle then brakes comes from the command law in
+// adjust_lean_for_fence_rad(), a_req = a_prof*(v_out/v_allow)^2 saturating at the
+// airframe's capability.  That saturation is what stops the vehicle, and it is
+// reached at any profile - measured, both values hold the fence with 1.0 to 1.3 m
+// to spare in the worst case tried.
+//
+// What it does change, and the reason it is 1, is how fast the aircraft may be
+// flown near the boundary.  A low profile clamps the pilot long before the fence.
+// A/B on the fence-sprint scenario at the airframe's real ANGLE_MAX of 15 degrees,
+// hexagon of 24 m half-width, FENCE_MARGIN 1, 5 m/s tailwind onto the boundary,
+// same build but for this value - cruise speed actually achieved against demand:
+//
+//   demand   5 m/s      7 m/s      10 m/s
+//   0.4      3.00       3.03       4.48      closest margin 1.03 / 1.12 / 1.12 m
+//   1.0      5.03       6.49       7.11      closest margin 1.08 / 1.03 / 1.32 m
+//
+// At 0.4 the aircraft is held near 3 m/s anywhere within about 20 m of the fence.
+// On a sprayer working a bounded field that is the whole headland.
+//
+// Measure this at the real ANGLE_MAX.  The same A/B run at the harness default of
+// 20 degrees shows the two agreeing to the centimetre and no speed penalty at all,
+// because 0.4 of 3.57 m/s/s is a high enough profile not to bind at these speeds.
+// The conclusion inverts between 15 and 20 degrees.
+//
+// The cost of 1 is that the profile now equals the capability, so there is no
+// reserve left for the case where the airframe cannot deliver it - thrust-limited,
+// heavy, or in wind, which eats the budget asymmetrically (measured k = 0.122 1/s
+// along the outward normal, a 2.8x spread between upwind and downwind edges).
+// Lower it to buy that back, at the speed penalty above.
 #define AC_AVOID_FENCE_PROFILE_FRAC     1.0f
 
 #define AC_AVOID_ACTIVE_LIMIT_TIMEOUT_MS    500     // if limiting is active if last limit is happened in the last x ms
