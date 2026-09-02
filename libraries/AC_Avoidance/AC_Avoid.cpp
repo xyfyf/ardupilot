@@ -134,14 +134,15 @@ AC_Avoid::AC_Avoid()
 * This method limits velocity and calculates backaway velocity from various supported fences
 * Also limits vertical velocity using adjust_velocity_z method
 */
-void AC_Avoid::adjust_velocity_fence(float kP, float accel_cmss, Vector3f &desired_vel_cms, Vector3f &backup_vel, float kP_z, float accel_cmss_z, float dt)
-{   
+void AC_Avoid::adjust_velocity_fence(float kP, float accel_cmss, Vector3f &desired_vel_cms, Vector3f &backup_vel, float kP_z, float accel_cmss_z, float dt,
+                                     float accel_cmss_max)
+{
     // Only horizontal component needed for most fences, since fences are 2D
     Vector2f desired_velocity_xy_cms{desired_vel_cms.x, desired_vel_cms.y};
 
 #if AP_FENCE_ENABLED || AP_BEACON_ENABLED
     // limit acceleration
-    const float accel_cmss_limited = MIN(accel_cmss, AC_AVOID_ACCEL_CMSS_MAX);
+    const float accel_cmss_limited = MIN(accel_cmss, accel_cmss_max);
 #endif
 
     // maximum component of desired  backup velocity in each quadrant 
@@ -542,23 +543,28 @@ void AC_Avoid::adjust_lean_for_fence_rad(float &roll_rad, float &pitch_rad,
     desired_vel_cms.x += accel_ne_mss.x * 100.0f * AC_AVOID_LEAN_HORIZON_S;
     desired_vel_cms.y += accel_ne_mss.y * 100.0f * AC_AVOID_LEAN_HORIZON_S;
 
-    // What the airframe can actually deliver, and the deliberately smaller
-    // figure the stopping profile is built on.
+    // What the airframe can actually deliver, and the figure the stopping profile
+    // is built on.
     //
-    // AC_AVOID_ACCEL_CMSS_MAX is a fixed 1.0 m/s/s.  On this airframe
-    // (ANGLE_MAX 15 degrees, 2.63 m/s/s) that happens to be a sane 40%, but it
-    // is an absolute constant, so on a machine with a different lean limit the
-    // safety factor is whatever it happens to be.  Tie it to the airframe
-    // instead.  Keeping the profile below the capability is the point: it makes
-    // the limit engage early and leaves headroom to correct with.  The
-    // capability itself is what the *command* may use - see below.
+    // The velocity-layer path caps this at AC_AVOID_ACCEL_CMSS_MAX, a fixed
+    // 1.0 m/s/s.  An absolute constant cannot be right here: the profile it
+    // implies has to fit inside the site, and how much room a stop needs is
+    // v^2/(2*a).  At 1.0 m/s/s, arriving at 7 m/s needs 25.5 m, which exceeded
+    // the 22-26 m half-width of the fence flown on 2026-08-31 - the limiter was
+    // asking for a stopping distance the field did not have.  Tie it to the
+    // airframe instead: veh_angle_max_rad is what the attitude controller will
+    // actually honour this cycle, so g*tan of it is the deceleration the vehicle
+    // can really produce, 2.63 m/s/s at ANGLE_MAX 15 degrees.  The same stop now
+    // needs 9.3 m.  The last argument overrides the constant for this path only;
+    // the velocity-layer callers keep the cap they were written for.
     const float accel_cap_mss = GRAVITY_MSS * tanf(veh_angle_max_rad);
     const float accel_profile_mss = accel_cap_mss * AC_AVOID_FENCE_PROFILE_FRAC;
 
     const Vector3f desired_pre_cms = desired_vel_cms;
     Vector3f backup_vel_cms;
     adjust_velocity_fence(kP, accel_profile_mss * 100.0f, desired_vel_cms,
-                          backup_vel_cms, 0.0f, 0.0f, dt);
+                          backup_vel_cms, 0.0f, 0.0f, dt,
+                          accel_profile_mss * 100.0f);
 
     // Fold in the backup velocity.
     //
@@ -649,6 +655,14 @@ void AC_Avoid::adjust_lean_for_fence_rad(float &roll_rad, float &pitch_rad,
     // grows with the square of the overspeed; at the margin, where v_allow goes
     // to zero, it saturates at what the airframe can give.  No horizon constant
     // decides the strength any more.
+    //
+    // With AC_AVOID_FENCE_PROFILE_FRAC at 1 the two are the same figure, so
+    // tracking the profile already spends the whole lean budget and the square
+    // law has nowhere left to grow: the reserve against wind and estimator error
+    // is now the difference between the profile and the disturbance, not between
+    // the profile and the airframe.  That is the trade the field data bought -
+    // a profile that fits the site, at the cost of the reserve that used to sit
+    // in the de-rating.  Lower the fraction to buy some of it back.
     const Vector2f vel_ne_ms{vel_neu_cms.x * 0.01f, vel_neu_cms.y * 0.01f};
     const float v_out = vel_ne_ms * out_dir;
     const float v_allow = (Vector2f{desired_vel_cms.x, desired_vel_cms.y} * out_dir) * 0.01f;

@@ -27,9 +27,23 @@
 // profile itself comes from get_max_speed().
 #define AC_AVOID_LEAN_HORIZON_S             1.0f
 // Fraction of the airframe's lean authority the stopping profile is built on.
-// Below 1 on purpose: the profile decides how early the limit engages, and the
-// remainder is the headroom the command needs to pull an overspeed back.
-#define AC_AVOID_FENCE_PROFILE_FRAC     0.4f
+//
+// This used to be 0.4, which on this airframe (ANGLE_MAX 15 degrees, 2.63 m/s/s)
+// reproduced the fixed 1.0 m/s/s the velocity-layer path uses, and the headroom to
+// pull an overspeed back came from that de-rating.  The braking distance a profile
+// implies is v^2/(2*a), so 1.0 m/s/s needs 25.5 m to stop from 7 m/s - more than the
+// 22-26 m half-width of the field fence of 2026-08-31.  A profile that cannot fit
+// inside the site is not a safety factor, it is a guarantee of breach, and that
+// sortie duly logged six of them, the deepest 18.6 m.
+//
+// The headroom now comes from the command law instead: a_req = a_prof*(v_out/v_allow)^2
+// saturating at the airframe's capability, so an overspeed is answered with more than
+// the profile costs without the profile having to be small.  See
+// adjust_lean_for_fence_rad().  Held at 1 so the profile is the real capability;
+// this is the knob to bisect on if the SITL sprint sweep shows the margin is too thin
+// in wind, which eats the budget asymmetrically (measured k = 0.122 1/s along the
+// outward normal, a 2.8x spread between the upwind and downwind edges).
+#define AC_AVOID_FENCE_PROFILE_FRAC     1.0f
 
 #define AC_AVOID_ACTIVE_LIMIT_TIMEOUT_MS    500     // if limiting is active if last limit is happened in the last x ms
 #define AC_AVOID_ACCEL_TIMEOUT_MS           200     // stored velocity used to calculate acceleration will be reset if avoidance is active after this many ms
@@ -71,7 +85,12 @@ public:
 
     // This method limits velocity and calculates backaway velocity from various supported fences
     // Also limits vertical velocity using adjust_velocity_z method
-    void adjust_velocity_fence(float kP, float accel_cmss, Vector3f &desired_vel_cms, Vector3f &backup_vel, float kP_z, float accel_cmss_z, float dt);
+    // accel_cmss_max caps the horizontal deceleration the stopping profile is built on.
+    // It defaults to AC_AVOID_ACCEL_CMSS_MAX, the fixed 1.0 m/s/s the velocity-layer
+    // callers have always used.  adjust_lean_for_fence_rad() passes the airframe's own
+    // figure instead - see there for why a constant does not belong on that path.
+    void adjust_velocity_fence(float kP, float accel_cmss, Vector3f &desired_vel_cms, Vector3f &backup_vel, float kP_z, float accel_cmss_z, float dt,
+                               float accel_cmss_max = AC_AVOID_ACCEL_CMSS_MAX);
 
     // adjust desired horizontal speed so that the vehicle stops before the fence or object
     // accel (maximum acceleration/deceleration) is in m/s/s
