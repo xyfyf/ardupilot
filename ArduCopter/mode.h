@@ -582,6 +582,13 @@ public:
     // Unlike circle_start() this never stops at the edge first: the whole point
     // is to enter at working speed and hold it round the turn.
     bool arc_start(const Location& centre_loc, float radius_m, float turns, bool ccw);
+
+    // Undo everything arc_start() changed, from any exit path.  The arc raises
+    // the position controller's NE limits well above what the rest of the
+    // mission expects and leaves a trajectory generator running; both have to
+    // come back whether the turn finished, the mode changed, the mission was
+    // aborted or a failsafe fired.
+    void arc_stop_and_restore();
     void nav_guided_start();
 
     bool is_landing() const override;
@@ -806,6 +813,13 @@ private:
     // mission to take over.  Only a fallback: normally verify_circle() sees the
     // turn is done on the very next loop and advances.
     uint8_t arc_handover_count;
+
+    // NE limits as they were when arc_start() took over.  Snapshotted rather
+    // than assumed equal to the WPNAV defaults: DO_CHANGE_SPEED moves
+    // AC_WPNav's _wp_desired_speed_ne_ms, which is what the limits actually
+    // came from, while get_default_speed_NE_ms() still reports the parameter.
+    float arc_saved_speed_ne_ms;
+    float arc_saved_accel_ne_mss;
 };
 
 #if AUTOTUNE_ENABLED
@@ -1093,6 +1107,7 @@ public:
     Number mode_number() const override { return Number::GUIDED; }
 
     bool init(bool ignore_checks) override;
+    void exit() override;
     void run() override;
 
     bool requires_GPS() const override { return true; }
@@ -1203,6 +1218,14 @@ protected:
     float crosstrack_error_m() const override;
 
 private:
+
+    // Undo what set_arc_destination() changed, from any exit path.  See
+    // ModeAuto::arc_stop_and_restore() for why this cannot live only in the
+    // normal-completion branch.
+    void arc_stop_and_restore();
+    float arc_saved_speed_ne_ms;
+    float arc_saved_accel_ne_mss;
+    bool  arc_pilot_yaw_warned;
 
     // enum for GUID_OPTIONS parameter
     enum class Option : uint32_t {

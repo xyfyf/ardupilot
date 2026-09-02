@@ -715,27 +715,14 @@ void Frame::calculate_forces(const Aircraft &aircraft,
         rot_accel.z -= gyro.z * radians(400.0) / terminal_rotation_rate;
     }
 
-    if (use_drag) {
-        // use the model params to calculate drag
-        Vector3f drag_bf;
-        drag_bf.x = areaCd * 0.5f * air_density * sq(vel_air_bf.x);
-        if (is_negative(vel_air_bf.x)) {
-            drag_bf.x = -drag_bf.x;
-        }
-
-        drag_bf.y = areaCd * 0.5f * air_density * sq(vel_air_bf.y);
-        if (is_negative(vel_air_bf.y)) {
-            drag_bf.y = -drag_bf.y;
-        }
-
-        drag_bf.z = areaCd * 0.5f * air_density * sq(vel_air_bf.z);
-        if (is_negative(vel_air_bf.z)) {
-            drag_bf.z = -drag_bf.z;
-        }
-
-        thrust -= drag_bf;
-    }
-
+    // Before the drag subtraction, not after: this scales *rotor thrust*.
+    // Applied afterwards it would multiply the whole force sum, inflating the
+    // body drag by the same factor - the airframe does not become more draggy
+    // near the ground, the rotors just push harder.  With this model's numbers
+    // (gain 0.26, kmax 0.6) the factor reaches 1.39 below 0.16 m, so the error
+    // was up to 39% of body drag, confined to the last quarter metre of a
+    // landing - small against weight, but wrong in a term the P01 touchdown
+    // work reads directly.
     if (is_positive(model.ground_effect_gain)) {
         // 桨半径：优先用显式值，否则从桨盘面积反算
         float R = model.ground_effect_radius;
@@ -761,6 +748,27 @@ void Frame::calculate_forces(const Aircraft &aircraft,
         const float dt = aircraft.get_frame_time_s();
         ground_effect_state += (target - ground_effect_state) * constrain_float(dt / tau, 0.0f, 1.0f);
         thrust *= 1.0f + MAX(ground_effect_state, 0.0f);
+    }
+
+    if (use_drag) {
+        // use the model params to calculate drag
+        Vector3f drag_bf;
+        drag_bf.x = areaCd * 0.5f * air_density * sq(vel_air_bf.x);
+        if (is_negative(vel_air_bf.x)) {
+            drag_bf.x = -drag_bf.x;
+        }
+
+        drag_bf.y = areaCd * 0.5f * air_density * sq(vel_air_bf.y);
+        if (is_negative(vel_air_bf.y)) {
+            drag_bf.y = -drag_bf.y;
+        }
+
+        drag_bf.z = areaCd * 0.5f * air_density * sq(vel_air_bf.z);
+        if (is_negative(vel_air_bf.z)) {
+            drag_bf.z = -drag_bf.z;
+        }
+
+        thrust -= drag_bf;
     }
 
     body_accel = thrust/aircraft.gross_mass();

@@ -310,6 +310,9 @@ bool ModeGuided::set_arc_destination(const Location& centre, float radius_m,
     // circle and sheds speed instead.  Raise the limits for the arc; leaving it
     // hands them back to the WPNAV defaults.
     const float accel_arc_mss = sq(speed_ms) / fabsf(radius_m);
+    // Snapshot before overwriting - see arc_stop_and_restore().
+    arc_saved_speed_ne_ms = pos_control->get_max_speed_NE_ms();
+    arc_saved_accel_ne_mss = pos_control->get_max_accel_NE_mss();
     pos_control->set_max_speed_accel_NE_m(speed_ms, accel_arc_mss * 1.2f);
     pos_control->set_correction_speed_accel_NE_m(speed_ms, accel_arc_mss * 1.2f);
 
@@ -320,12 +323,44 @@ bool ModeGuided::set_arc_destination(const Location& centre, float radius_m,
     return true;
 }
 
+// Undo set_arc_destination().  Idempotent, so every exit path can call it
+// unconditionally.
+void ModeGuided::arc_stop_and_restore()
+{
+    if (!guided_arc_nav.active() && !is_positive(arc_saved_speed_ne_ms)) {
+        return;
+    }
+    guided_arc_nav.stop();
+    if (is_positive(arc_saved_speed_ne_ms) && is_positive(arc_saved_accel_ne_mss)) {
+        pos_control->set_max_speed_accel_NE_m(arc_saved_speed_ne_ms, arc_saved_accel_ne_mss);
+        pos_control->set_correction_speed_accel_NE_m(arc_saved_speed_ne_ms, arc_saved_accel_ne_mss);
+    }
+    arc_saved_speed_ne_ms = 0.0f;
+    arc_saved_accel_ne_mss = 0.0f;
+    arc_pilot_yaw_warned = false;
+}
+
+// GUIDED had no exit() at all, so a mode change mid-arc left the raised limits
+// and a running generator behind for whatever came next.
+void ModeGuided::exit()
+{
+    arc_stop_and_restore();
+}
+
 // Feed the arc's position, velocity and acceleration to the position
 // controller.  Hands back to a plain position hold once the sweep completes.
 void ModeGuided::arc_run()
 {
-    if (!copter.failsafe.radio && use_pilot_yaw()) {
-        // let the pilot keep yaw authority during the turn
+    // GUID_OPTIONS can ask for the pilot to keep yaw during a guided manoeuvre.
+    // The arc cannot honour it: binding the nose to the track tangent is what
+    // makes a coordinated turn coordinated, and a turn flown with the nose
+    // somewhere else is a different manoeuvre with a different lean and yaw-rate
+    // budget - the one arc_start() checked feasibility against.  Say so once
+    // instead of leaving an empty block that reads as if the option were
+    // handled.
+    if (!copter.failsafe.radio && use_pilot_yaw() && !arc_pilot_yaw_warned) {
+        arc_pilot_yaw_warned = true;
+        gcs().send_text(MAV_SEVERITY_INFO, "Arc: holding tangent, GUID_OPTIONS yaw ignored");
     }
 
     motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
@@ -335,10 +370,7 @@ void ModeGuided::arc_run()
         // that set_arc_destination() raised for the turn before settling into a
         // position hold, otherwise everything that follows inherits a position
         // controller tuned for holding a circle.
-        pos_control->set_max_speed_accel_NE_m(wp_nav->get_default_speed_NE_ms(),
-                                              wp_nav->get_wp_acceleration_mss());
-        pos_control->set_correction_speed_accel_NE_m(wp_nav->get_default_speed_NE_ms(),
-                                                     wp_nav->get_wp_acceleration_mss());
+        arc_stop_and_restore();
         pos_control_start();
         return;
     }
