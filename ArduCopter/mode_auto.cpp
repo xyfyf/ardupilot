@@ -1858,14 +1858,49 @@ bool ModeAuto::set_next_wp(const AP_Mission::Mission_Command& current_cmd, const
                 centre_loc.get_vector_xy_from_origin_NE_cm(centre_ne_m)) {
                 Vector2f radial = (dest_ne_m - centre_ne_m) * 0.01f;
                 if (radial.length() > 0.1f) {
-                    radial.normalize();
-                    // tangent is the radius turned a quarter circle the way the
-                    // turn goes; ccw here is the MAVLink sense (param3 < 0)
-                    const float dir = next_cmd.content.location.loiter_ccw ? -1.0f : 1.0f;
-                    const Vector2f tangent{-radial.y * dir, radial.x * dir};
-                    Location next_dest_loc = dest_loc;
-                    next_dest_loc.offset(tangent.x * AUTO_ARC_LEAD_M, tangent.y * AUTO_ARC_LEAD_M);
-                    return wp_nav->set_wp_destination_next_loc(next_dest_loc);
+                    // Decide here whether the turn is flyable at all, with the
+                    // same radius, speed and limits arc_start() will use.
+                    // Committing to a fast entry on the turn count alone and
+                    // letting set_arc() refuse afterwards leaves the fallback
+                    // circle without its standard entry - the leg has already
+                    // been aimed past the waypoint and told not to decelerate.
+                    // Only the state-dependent half (where the vehicle actually
+                    // is, and how fast) has to wait; everything derived from
+                    // radius and speed is knowable now.
+                    //
+                    // Safe to configure auto_arc_nav here: it is not running at
+                    // planning time, and arc_start() sets the same limits again
+                    // before using it.
+                    // Radius lives in the high byte of p1, with a x10 flag for
+                    // larger circles - decoded the same way do_circle() does.
+                    uint16_t radius_raw_m = HIGHBYTE(next_cmd.p1);
+                    if (next_cmd.type_specific_bits & (1U << 0)) {
+                        radius_raw_m *= 10;
+                    }
+                    const float radius_m = float(radius_raw_m);
+                    const float speed_ms = wp_nav->get_default_speed_NE_ms();
+                    auto_arc_nav.set_yaw_limits(attitude_control->get_slew_yaw_max_rads(),
+                                                attitude_control->get_accel_yaw_max_radss());
+                    float lead_in_m = 0.0f;
+                    if (auto_arc_nav.plan_feasible(*pos_control, radius_m, speed_ms, lead_in_m)) {
+                        radial.normalize();
+                        // tangent is the radius turned a quarter circle the way
+                        // the turn goes; ccw here is the MAVLink sense (param3 < 0)
+                        const float dir = next_cmd.content.location.loiter_ccw ? -1.0f : 1.0f;
+                        const Vector2f tangent{-radial.y * dir, radial.x * dir};
+                        // Never shorter than the old fixed lead: that value was
+                        // picked to comfortably clear the transition, and a
+                        // gentle turn can legitimately size its transition below
+                        // the distance wp_nav needs to treat the point as a fast
+                        // waypoint at all.
+                        const float lead_m = MAX(lead_in_m, AUTO_ARC_LEAD_M);
+                        Location next_dest_loc = dest_loc;
+                        next_dest_loc.offset(tangent.x * lead_m, tangent.y * lead_m);
+                        return wp_nav->set_wp_destination_next_loc(next_dest_loc);
+                    }
+                    // Not flyable - fall through to the ordinary handling so the
+                    // leg decelerates into the waypoint and the circle that
+                    // arc_start() falls back to gets the entry it expects.
                 }
             }
         }

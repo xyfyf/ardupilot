@@ -189,6 +189,30 @@ public:
 
     /// Largest speed that the given radius can be flown at within the budget.
     /// Use it to pick a speed for a radius that geometry has already fixed.
+    /// Everything about a turn that can be decided before the vehicle reaches
+    /// it: whether the lean angle and the yaw rate it needs fit inside what the
+    /// airframe has.  Both depend only on radius, speed and the limits, so they
+    /// are knowable while the *previous* leg is still being planned - which is
+    /// when the mission has to decide whether to aim past the entry point and
+    /// carry speed in, or to slow down for an ordinary circle.
+    ///
+    /// Deciding it in two places was the bug this exists to prevent: the leg
+    /// before the turn used to commit to a fast entry on the turn count alone,
+    /// and only afterwards would set_arc() work out that the turn was not
+    /// flyable - by which time the leg geometry had already been changed and
+    /// the fallback circle no longer had its standard entry.
+    ///
+    /// On success lead_in_m is how far past the entry point the previous leg
+    /// should aim, taken from the transition length the generator will really
+    /// use.  Requires set_yaw_limits() to have been called.
+    bool plan_feasible(const AC_PosControl& pos_control, float radius_m,
+                       float speed_ms, float& lead_in_m) const;
+
+    /// Transition length the turn needs before the sweep is allowed to shorten
+    /// it.  Exposed so the lead-in can be sized from it rather than guessed.
+    float required_spiral_len_m(const AC_PosControl& pos_control,
+                                float radius_m, float speed_ms) const;
+
     float max_speed_for_radius_ms(const AC_PosControl& pos_control, float radius_m) const;
 
     /// Smallest radius that the given speed can be flown at within the budget.

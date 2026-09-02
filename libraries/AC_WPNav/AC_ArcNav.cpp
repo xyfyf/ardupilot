@@ -173,6 +173,87 @@ AC_ArcNav::UTurnPlan AC_ArcNav::plan_from_yaw_capability(float speed_ms, float s
     return plan;
 }
 
+// Length the entry and exit transitions have to be, before the sweep is allowed
+// to shorten them.  Pulled out of set_arc() so the mission planner can size the
+// lead-in leg from the same number the generator will actually use: a fixed
+// lead distance is either wasteful or too short the moment speed, radius or the
+// jerk limit changes.
+//
+// Depends on the yaw limits, so set_yaw_limits() must have run first.
+bool AC_ArcNav::plan_feasible(const AC_PosControl& pos_control, float radius_m,
+                              float speed_ms, float& lead_in_m) const
+{
+    lead_in_m = 0.0f;
+    if (!is_positive(radius_m) || !is_positive(speed_ms)) {
+        return false;
+    }
+    // Lean.  The constant-curvature part is the tightest the path gets, so
+    // radius_m is what has to be checked - same test set_arc() applies.
+    if (speed_ms > max_speed_for_radius_ms(pos_control, radius_m)) {
+        return false;
+    }
+    // Yaw rate.  Binding the nose to the tangent costs v/r for the whole arc,
+    // and on a multirotor yaw is the weakest axis, so this bites first on a
+    // tight turn.  Half the budget is left as headroom for the entry transient.
+    if (is_positive(_yaw_rate_max_rads) &&
+        speed_ms / radius_m > _yaw_rate_max_rads * AC_ARCNAV_YAW_RATE_FRACTION) {
+        return false;
+    }
+    // Aim one transition past the entry point, plus the look-ahead the heading
+    // uses.  That is the distance over which the path is still straightening
+    // out, so it is exactly the distance the previous leg must not decelerate
+    // over.
+    lead_in_m = required_spiral_len_m(pos_control, radius_m, speed_ms)
+                + speed_ms * _heading_lead_s;
+    return true;
+}
+
+float AC_ArcNav::required_spiral_len_m(const AC_PosControl& pos_control,
+                                       float radius_m, float speed_ms) const
+{
+    if (!is_positive(radius_m) || !is_positive(speed_ms)) {
+        return 0.0f;
+    }
+    const float jerk = pos_control.get_shaping_jerk_NE_msss();
+    float spiral_len_m = 0.0f;
+    if (is_positive(jerk)) {
+        spiral_len_m = (sq(speed_ms) * speed_ms) / (radius_m * jerk);
+    }
+    // The transition must also be at least as long as the heading look-ahead,
+    // or the look-ahead point skips straight over the ramp into the constant
+    // arc and the yaw command steps to its full rate on the first sample -
+    // measured in SITL, exactly what happened with a 1.0 m look-ahead over a
+    // 0.53 m spiral.  Sizing the ramp to cover the look-ahead keeps the yaw
+    // command a ramp, which is the whole point of the transition.
+    spiral_len_m = MAX(spiral_len_m, speed_ms * _heading_lead_s);
+    // With the nose on the tangent, yaw accelerates at v^2/(r*L_s) through a
+    // spiral.  A short spiral therefore asks for a yaw acceleration the vehicle
+    // may not have; lengthening it is the only way to lower that demand without
+    // slowing down or opening the radius, both of which are ruled out here -
+    // the speed is fixed by the spray rate and the radius by the swath.
+    if (is_positive(_yaw_accel_max_radss)) {
+        // The commanded heading rate is v*curvature evaluated at the look-ahead
+        // point, so its rate of change carries two factors:
+        //
+        //   yaw_accel = v^2 * curvature'(s) * (1 + lead'(s))
+        //
+        // curvature' peaks at k/(r*L_s), and the look-ahead fades in across the
+        // transition so lead'(s) = v*tau/L_s there.  Ignoring that second factor
+        // under-sizes the transition: it is what turns a ramp the vehicle could
+        // have followed into one it cannot.  Requiring the peak to fit gives a
+        // quadratic in L_s, whose positive root is the shortest transition that
+        // keeps the commanded yaw acceleration inside what the vehicle has.
+        const float a = AC_ARCNAV_SMOOTHSTEP_PEAK * sq(speed_ms) / (radius_m * _yaw_accel_max_radss);
+        const float lead_m = speed_ms * _heading_lead_s;
+        const float min_len_m = 0.5f * (a + safe_sqrt(sq(a) + 4.0f * a * lead_m));
+        spiral_len_m = MAX(spiral_len_m, min_len_m);
+    }
+    // Each spiral turns through spiral/(2r), so the pair uses spiral/r of the
+    // sweep and the arc takes what is left.  A sweep too small to fit both
+    // spirals gets as much transition as it can and no constant arc at all.
+    return spiral_len_m;
+}
+
 bool AC_ArcNav::set_arc(const AC_PosControl& pos_control,
                         const Vector2f& centre_ne_m, float radius_m,
                         const Vector2f& start_ne_m, float sweep_rad,
@@ -252,43 +333,10 @@ bool AC_ArcNav::set_arc(const AC_PosControl& pos_control,
     // shaping to, so the turn asks for no more rate of change of acceleration
     // than the straight legs do.  Ramping the lateral acceleration from 0 to
     // v^2/r at that jerk takes v^2/(r*jerk) seconds, hence v^3/(r*jerk) metres.
-    const float jerk = pos_control.get_shaping_jerk_NE_msss();
-    float spiral_len_m = 0.0f;
-    if (is_positive(jerk)) {
-        spiral_len_m = (sq(speed_ms) * speed_ms) / (radius_m * jerk);
-    }
-    // The transition must also be at least as long as the heading look-ahead,
-    // or the look-ahead point skips straight over the ramp into the constant
-    // arc and the yaw command steps to its full rate on the first sample -
-    // measured in SITL, exactly what happened with a 1.0 m look-ahead over a
-    // 0.53 m spiral.  Sizing the ramp to cover the look-ahead keeps the yaw
-    // command a ramp, which is the whole point of the transition.
-    spiral_len_m = MAX(spiral_len_m, speed_ms * _heading_lead_s);
-    // With the nose on the tangent, yaw accelerates at v^2/(r*L_s) through a
-    // spiral.  A short spiral therefore asks for a yaw acceleration the vehicle
-    // may not have; lengthening it is the only way to lower that demand without
-    // slowing down or opening the radius, both of which are ruled out here -
-    // the speed is fixed by the spray rate and the radius by the swath.
-    if (is_positive(_yaw_accel_max_radss)) {
-        // The commanded heading rate is v*curvature evaluated at the look-ahead
-        // point, so its rate of change carries two factors:
-        //
-        //   yaw_accel = v^2 * curvature'(s) * (1 + lead'(s))
-        //
-        // curvature' peaks at k/(r*L_s), and the look-ahead fades in across the
-        // transition so lead'(s) = v*tau/L_s there.  Ignoring that second factor
-        // under-sizes the transition: it is what turns a ramp the vehicle could
-        // have followed into one it cannot.  Requiring the peak to fit gives a
-        // quadratic in L_s, whose positive root is the shortest transition that
-        // keeps the commanded yaw acceleration inside what the vehicle has.
-        const float a = AC_ARCNAV_SMOOTHSTEP_PEAK * sq(speed_ms) / (radius_m * _yaw_accel_max_radss);
-        const float lead_m = speed_ms * _heading_lead_s;
-        const float min_len_m = 0.5f * (a + safe_sqrt(sq(a) + 4.0f * a * lead_m));
-        spiral_len_m = MAX(spiral_len_m, min_len_m);
-    }
-    // Each spiral turns through spiral/(2r), so the pair uses spiral/r of the
-    // sweep and the arc takes what is left.  A sweep too small to fit both
-    // spirals gets as much transition as it can and no constant arc at all.
+    // Same sizing the planner used to place the lead-in point; see
+    // required_spiral_len_m().
+    float spiral_len_m = required_spiral_len_m(pos_control, radius_m, speed_ms);
+
     const float nominal_len_m = radius_m * _sweep_rad;
     spiral_len_m = MIN(spiral_len_m, nominal_len_m);
 
