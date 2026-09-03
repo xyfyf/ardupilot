@@ -84,6 +84,45 @@ def _circle_check(r):
             and max((s.get("att_err_max_deg", 999) for s in st), default=999) < 5.0)
 
 
+def _p07_step(r, speed):
+    """取指定速度档。按 target_speed_m_s 找，不靠下标——档位顺序改了也不会错位。"""
+    for st in r.get("steps", []):
+        if abs(st.get("target_speed_m_s", -1) - speed) < 1e-6:
+            return st
+    return {}
+
+
+def _p07_metrics(r):
+    fast = _p07_step(r, 2.5)
+    slow = _p07_step(r, 1.0)
+    return {"2.5m/s 姿态误差": "%.2f°" % fast.get("att_err_mean_deg", -1),
+            "1.0m/s 姿态误差": "%.2f°" % slow.get("att_err_mean_deg", -1),
+            "2.5m/s 倾角饱和占比": "%.2f" % fast.get("tilt_saturated_frac", -1),
+            "2.5m/s 实测半径": "%.2f m" % fast.get("actual_radius_mean_m", -1)}
+
+
+def _p07_check(r):
+    fast = _p07_step(r, 2.5)
+    if not fast:
+        return False
+    # 两件事分开判，缺一不可。
+    #
+    # 其一，这一档必须真的顶到限幅——2 m 半径下 2.5 m/s 需要 17.7 度而
+    # ANGLE_MAX 只有 15 度，所以饱和是这个工况的定义特征。没饱和说明测试根本
+    # 没跑到它声称的工况（ANGLE_MAX 被改回 2000 就会这样），那种“通过”比失败
+    # 更坏。
+    if fast.get("tilt_saturated_frac", 0.0) < 0.5:
+        return False
+    # 且饱和必须是对着 15 度这个实机限幅发生的。放宽 LOIT_ANG_MAX 之后飞机照样
+    # 会顶到新上限、饱和占比照样很高，但那是另一台飞机的工况，拿它的数字与本条
+    # 的门限比没有意义。
+    if abs(r.get("lean_limit_deg", -1.0) - 15.0) > 0.51:
+        return False
+    # 其二，抽动本身。默认配置（前馈关）实测 1.91 度，门限留到 2.6 度：既高于
+    # 2026-08-27 记录的 2.24 度，又能在姿态环或来流力矩前馈被改坏时报警。
+    return (fast.get("att_err_mean_deg", 99.0) < 2.6)
+
+
 def _fence_metrics(r):
     steps = r.get("steps", [])
     return {"最小余量": "%.2f m" % min((s.get("margin_achieved_m", -99) for s in steps), default=-99),
@@ -245,7 +284,27 @@ SUITE = [
             "CIRCLE_RATE/CIRCLE_RADIUS）。而 P07 的实际问题是**飞手手动打杆绕圈时机身"
             "抽动**，走的是姿态链路而非 AC_Circle 的参考生成——两者不是一条路径。"
             "本条作为 AC_Circle 的回归护栏仍然有效（限速基准若被改回只看 WPNAV_ACCEL "
-            "会立刻报警），但**不构成对 P07 的验证**；手动绕圈的复现场景尚未建立。",
+            "会立刻报警），但**不构成对 P07 的验证**；P07 由下一条守。",
+    ),
+    dict(
+        pid="P07", name="手动绕圈-小半径抽动", case="loiter-circle", tag="p07_manual_circle",
+        # 不传 ANGLE_MAX。LOITER 的飞手倾角走 loiter_nav->get_angle_max_rad()，
+        # 即 LOIT_ANG_MAX——eft_hexa.parm 里已是 15，与实机一致，本来就绑得住。
+        # 基线文档曾记「必须把 ANGLE_MAX 由 2000 改回 1500，否则倾角饱和不可能
+        # 复现」，那对这条路径不成立：实测 1500 与 2000 四档结果逐位相同，而把
+        # LOIT_ANG_MAX 由 15 放到 20 才让指令倾角由 16.4 升到 19.9 度。
+        args=[],
+        metrics=_p07_metrics,
+        check=_p07_check,
+        why="P07 是**飞手手动打杆**绕 2 m 小圈时的抽动，走姿态链路，与上一条的 "
+            "AC_Circle 参考生成不是一条路径。杆量按 A·cos(ωt)/A·sin(ωt) 旋转，"
+            "直接映射到倾角指令，因此能真的顶到倾角上限。根因已定为来流力矩"
+            "（同 P02）：默认配置四档姿态误差 0.29/0.80/1.47/1.91 度，而按本档"
+            "工况正确定号的前馈（ATC_VFF_RLL -0.012 / PIT +0.012）把它压到 "
+            "0.03/0.10/0.24/0.43 度，降幅 77-90%，已贴住关闭速度力矩的理论下限 "
+            "0.40 度。本条守默认配置，同时校验两件事：该档确实进入了饱和工况，且生效"
+            "倾角上限确实是实机的 15 度（LOIT_ANG_MAX）——放宽之后照样会饱和，但那"
+            "是另一台飞机的工况，数字不可比",
     ),
     dict(
         # AUTO 下围栏不拦飞机，只在越界后触发动作——这是 ArduPilot 的设计，
