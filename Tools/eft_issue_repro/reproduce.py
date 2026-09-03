@@ -713,7 +713,13 @@ def run_circle(mon):
     # 关掉杆量改半径/速率，否则脚本的中位杆量会干扰几何
     set_param(mon, "CIRCLE_OPTIONS", 0)
     set_param(mon, "CIRCLE_RADIUS", CIRCLE_RADIUS_M * 100.0)
-    print("CIRCLE 半径 %.1f m，逐档加速" % CIRCLE_RADIUS_M)
+    # 饱和阈值回读，不写字面量。CIRCLE 的参考由 AC_Circle 生成，但指令倾角最终
+    # 仍受姿态链路的 ANGLE_MAX 约束，所以这才是「贴住限幅」该比的那个数。此处
+    # 原为裸写的 14.7——参数一改就静默量错，与 run_loiter_circle 里那处同一类。
+    angle_max_raw = get_param(mon, "ANGLE_MAX")
+    angle_max_deg = (angle_max_raw / 100.0) if angle_max_raw else 15.0
+    print("CIRCLE 半径 %.1f m，逐档加速；生效倾角上限 %.1f°"
+          % (CIRCLE_RADIUS_M, angle_max_deg))
 
     steps = []
     for speed in CIRCLE_SPEEDS_MS:
@@ -754,7 +760,8 @@ def run_circle(mon):
             step["target_tilt_max_deg"] = max(tilts)
             step["target_tilt_mean_deg"] = sum(tilts) / len(tilts)
             # 指令倾角贴住 ANGLE_MAX 的时间占比，即控制权限饱和程度
-            step["tilt_saturated_frac"] = sum(t >= 14.7 for t in tilts) / len(tilts)
+            step["tilt_saturated_frac"] = sum(
+                t >= angle_max_deg - 0.3 for t in tilts) / len(tilts)
         if errs:
             step["att_err_mean_deg"] = sum(errs) / len(errs)
             step["att_err_p95_deg"] = errs[int(len(errs) * 0.95)]
@@ -777,7 +784,8 @@ def run_circle(mon):
 
     set_mode_wait(mon, "LAND")
     wait_disarmed(mon, 120)
-    return {"circle_radius_m": CIRCLE_RADIUS_M, "steps": steps}
+    return {"circle_radius_m": CIRCLE_RADIUS_M, "lean_limit_deg": angle_max_deg,
+            "steps": steps}
 
 
 def run_loiter_circle(mon):
@@ -1089,16 +1097,22 @@ def run_fence(mon, mode="LOITER", skip_param_fence=False, fence_heading=None,
                 d = poly_signed_dist((mon.local.x, mon.local.y), fence_poly)
             else:
                 d = FENCE_RADIUS_M - r
-            samples.append((mon.sim_ms - start, r, sp, d))
+            samples.append((mon.sim_ms - start, r, sp, d, -mon.local.z))
             if r > r_max:
                 r_max = r
             if d < d_min:
                 d_min, v_at_dmin = d, sp
 
         # 末段持续顶住围栏，看是否在边界上振荡
-        osc = [r for t, r, _, _ in samples if t >= 55000]
-        osc_d = [d for t, _, _, d in samples if t >= 55000]
+        osc = [r for t, r, _, _, _ in samples if t >= 55000]
+        osc_d = [d for t, _, _, d, _ in samples if t >= 55000]
 
+        # 高度必须被记录，不能只被控制。这条测试两次因高度跑偏而给出无效结论
+        # （STABILIZE 贴地 1.9 m、STABILIZE 爬到 1927 m），两次的水平数字都照常
+        # 打印、看不出工况已经不成立；hold_alt_throttle() 修的是成因，但只要高度
+        # 不进结果，定高环哪天失效就还是一样查不出来。错的高度经推力裕度改变
+        # get_althold_lean_angle_max_rad()，而那正是限制器自己的权限入参。
+        alts = [a for _, _, _, _, a in samples]
         margin_min = d_min
         step = {
             "target_speed_m_s": speed,
@@ -1111,6 +1125,10 @@ def run_fence(mon, mode="LOITER", skip_param_fence=False, fence_heading=None,
             "breached": d_min < 0.0,
             "speed_at_closest_m_s": v_at_dmin,
         }
+        if alts:
+            step["alt_mean_m"] = sum(alts) / len(alts)
+            step["alt_min_m"] = min(alts)
+            step["alt_max_m"] = max(alts)
         if osc:
             step["hold_radius_mean_m"] = sum(osc) / len(osc)
             step["hold_radius_pp_m"] = max(osc) - min(osc)

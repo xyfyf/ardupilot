@@ -78,7 +78,10 @@ def _circle_metrics(r):
 
 def _circle_check(r):
     st = r.get("steps", [])
-    # 倾角饱和是 P07 的核心失效形态——一旦饱和圆周参考就跟不上，抽动随之出现。
+    # AC_Circle 必须靠自限速把自己挡在饱和之外——一旦顶到倾角上限，参考就跟不上、
+    # 实际半径被撑大。注意与 P07 那条的判据方向相反：那边要求必须饱和（手动打杆
+    # 本来就该顶到限幅），这边要求必须不饱和。同名指标、相反期望，因为不是同一
+    # 条路径。
     return (len(st) >= 2
             and max((s.get("tilt_saturated_frac", 1.0) for s in st), default=1.0) < 0.01
             and max((s.get("att_err_max_deg", 999) for s in st), default=999) < 5.0)
@@ -176,9 +179,36 @@ SPRINT_FENCE = ["--polyfence-sides", "6", "--polyfence-radius", "27.7",
                 "--set", "ANGLE_MAX=1500", "--set", "PSC_POSXY_P=1.5"]
 
 
+# 围栏测试的目标高度，与 reproduce.py 的 FENCE_TEST_ALT_M 一致。
+FENCE_TEST_ALT_M = 15.0
+
+
+def _fence_alt_ok(steps):
+    """高度有效性：这条测试的水平结论只在正确高度上成立。
+
+    踩过两次，方向相反：STABILIZE 用中位杆量稳不住高度、全程贴地 1.9 m；改成
+    固定高油门后又一路爬到 1927 m。两次的水平数字都照常打印，看不出工况已经
+    不成立——因为**高度从来没进过判据**。hold_alt_throttle() 修的是成因，这里
+    补的是观测：定高环哪天失效，得当场红，而不是给出一份看起来很好的围栏成绩。
+
+    错的高度不只是「不像作业场景」：油门顶高会吃掉推力裕度，而
+    get_althold_lean_angle_max_rad() 正是限制器的 veh_angle_max_rad 入参——
+    测试会把被测对象自己的权限改掉。
+    """
+    for st in steps:
+        mean = st.get("alt_mean_m")
+        lo = st.get("alt_min_m")
+        if mean is None or lo is None:
+            return False          # 老结果没有这两个字段，视为不可判
+        if abs(mean - FENCE_TEST_ALT_M) > 5.0 or lo < 5.0:
+            return False
+    return True
+
+
 def _fence_check(r):
     steps = r.get("steps", [])
     return (len(steps) >= 4
+            and _fence_alt_ok(steps)
             and all(not s.get("breached") for s in steps)
             and min((s.get("margin_achieved_m", -99) for s in steps), default=-99) > 0.0)
 
@@ -217,7 +247,11 @@ SUITE = [
               "--set", "MOT_FAIL_TIME=200", "--set", "MOT_FAIL_THST=0.15"],
         metrics=lambda r: {"误报次数": str(_motor_msgs(r)),
                            "弧内最低速": "%.2f m/s" % (_m(r, "arc_speed_min_m_s") or -1)},
-        check=lambda r: _motor_msgs(r) == 0,
+        # 「零误报」这种否定式判据最容易空过：一次根本没飞起来的架次同样是零条
+        # 消息。所以要求这一趟确实飞到了作业速度——arc_speed_min_m_s 是航线里
+        # 最慢的那一段，它上得去就说明检测器确实在有推力、有转速的工况下跑过。
+        check=lambda r: (_motor_msgs(r) == 0
+                         and (_m(r, "arc_speed_min_m_s") or 0) > 1.0),
         why="正常作业全程不得误报——误摘一台好电机等于亲手制造要避免的事故",
     ),
     dict(
@@ -239,8 +273,13 @@ SUITE = [
         metrics=lambda r: {"进弧前尾段最低速": "%.2f m/s" % (_m(r, "pre_arc_speed_min_m_s") or -1),
                            "弧内最低速": "%.2f m/s" % (_m(r, "arc_speed_min_m_s") or -1)},
         # 进弧前不减速是 AUTO 接入的核心难点：LOITER_TURNS 原本归在 always stop
-        check=lambda r: (_m(r, "pre_arc_speed_min_m_s") or 0) > 2.0
-                        and (_m(r, "arc_speed_min_m_s") or 0) > 2.7,
+        # reached_arc 是必要前提，不是锦上添花：arc_start() 现在会因倾角预算、
+        # 偏航速率预算、径向一致性或入弧切向速度而拒绝，拒绝后 AUTO 回退到标准
+        # circle_movetoedge_start()。那条路径下「进弧前尾段最低速」照样可能达标，
+        # 于是一次根本没飞成协调转弯的架次会安静地通过。
+        check=lambda r: (bool(_m(r, "reached_arc"))
+                         and (_m(r, "pre_arc_speed_min_m_s") or 0) > 2.0
+                         and (_m(r, "arc_speed_min_m_s") or 0) > 2.7),
         why="进弧前若减速到接近零，匀速掉头无从谈起",
     ),
     dict(
@@ -249,7 +288,9 @@ SUITE = [
         metrics=lambda r: {"辨识偏差": "%.2f°" % (_m(r, "mag_yaw_bias_deg") or -99),
                            "样本数": str(_m(r, "mag_align_samples") or 0)},
         # 注入 30°，GSF 参考自带约 ±3° 偏置，故给 25~35 的窗口
-        check=lambda r: 25.0 < (_m(r, "mag_yaw_bias_deg") or -99) < 35.0,
+        # 样本数一并判：少数几个点也可能凑巧落在窗口里，那不是辨识收敛。
+        check=lambda r: (25.0 < (_m(r, "mag_yaw_bias_deg") or -99) < 35.0
+                         and (_m(r, "mag_align_samples") or 0) >= 100),
         why="注入 30° 应辨识出 30° 附近；偏出窗口说明磁航向计算或参考基准出了问题",
     ),
     dict(
