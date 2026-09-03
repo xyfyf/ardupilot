@@ -410,11 +410,17 @@ bool GCS_MAVLINK_Copter::params_ready() const
 void GCS_MAVLINK_Copter::send_banner()
 {
 #ifdef EFT_FIRMWARE_VERSION
-    // EFT release: only show firmware version and board ID
-    send_text(MAV_SEVERITY_INFO, "%s", AP::fwversion().fw_string);
+    // EFT release: only show firmware version and board ID once (multiple MAVLink
+    // channels each receive PARAM_REQUEST_LIST on connect).
+    static bool banner_sent;
+    if (banner_sent) {
+        return;
+    }
+    banner_sent = true;
+    gcs().send_text(MAV_SEVERITY_INFO, "%s", AP::fwversion().fw_string);
     char sysid[50];
     if (hal.util->get_system_id(sysid)) {
-        send_text(MAV_SEVERITY_INFO, "%s", sysid);
+        gcs().send_text(MAV_SEVERITY_INFO, "%s", sysid);
     }
 #else
     GCS_MAVLINK::send_banner();
