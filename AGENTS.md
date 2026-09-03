@@ -13,7 +13,24 @@
 
 只能在**仓库根目录**跑，`build/` 是产物目录，里面没有 `waf`。
 
-如果报"权限不够"，说明你在的分支上 `waf` 的执行位是丢的——它自 `b008e59941`（2026-05-09 加 EFT_CAAC hwdef 那次）起被记成 `100644`，上游一直是 `100755`。`dev-algo` 已由 `45a30e73ad` 修复，`ardupilot-ubuntu` 尚未。临时绕过用 `python3 ./waf`，根治是 `chmod +x waf` 并提交。
+如果报"权限不够"，是**整批文件的执行位在 `b008e59941`（2026-05-09 加 EFT_CAAC hwdef 那次）被误提交掉了**。那次动了 654 个文件，其中 **591 个是纯模式变更 `100755 → 100644`**（blob 前后完全相同，只掉权限，实质改动只有约 63 个），像是从不保留 POSIX 权限的路径导入代码时整批带进来的。
+
+受影响的不只是 `waf`：`Tools/autotest/sim_vehicle.py`、`Tools/autotest/run_in_terminal_window.sh`、`hwdef/scripts/*.py`、各种 `build-*.sh` 全在内。**症状是新克隆下来、切到本分支后直接跑 `sim_vehicle.py` 就报 `PermissionError: run_in_terminal_window.sh`**——而这是 ArduPilot 官方文档的标准入口。
+
+| 分支 | 状态 |
+| --- | --- |
+| `dev-algo` | **已全量修复**（601 个文件，纯模式提交） |
+| `ardupilot-ubuntu` | **尚未修复**，仍会踩 |
+
+在未修复的分支上临时绕过：`python3 ./waf`、`python3 Tools/autotest/sim_vehicle.py`，或直接调 `build/sitl/bin/arducopter`。根治办法是按 `master` 的模式整批恢复：
+
+```bash
+git ls-tree -r master | awk '$1=="100755"{print $4}' | while read -r f; do
+  git cat-file -e "HEAD:$f" 2>/dev/null && git update-index --chmod=+x -- "$f"
+done
+```
+
+提交前用 `git diff --cached --stat` 确认是 `0 insertions(+), 0 deletions(-)`——只改模式、不碰内容。
 
 Flash 余量很紧，目前只剩约 **16.8 KB**（1687107 / 1703923 已用）。加代码前先看一眼 BUILD SUMMARY 的 `Free Flash`。
 
