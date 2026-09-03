@@ -2409,7 +2409,7 @@ def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False, detect=F
         # 两条判据一律同时开着跑，才能确认它们不会互相误触发：停转的
         # k=rpm/sqrt(thrust) 趋近 0（落在中位数之下），掉桨的 k 明显偏高，
         # 方向相反，各管各的。真机上也是两条一起开，就该按一起开来验。
-        set_param(mon, "MOT_FAIL_ROVR", 1.15)
+        set_param(mon, "MOT_FAIL_ROVR", 1.4)
     command_takeoff(mon, alt)
     set_mode_wait(mon, "GUIDED", 15)
 

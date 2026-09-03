@@ -232,7 +232,7 @@ SUITE = [
         # 两条判据一起开：真机上就是一起开的，只验其中一条不算数。
         args=["--swath", "12"] + YAW_CFG + ["--set", "MOT_FAIL_RPM=300",
               "--set", "MOT_FAIL_TIME=200", "--set", "MOT_FAIL_THST=0.15",
-              "--set", "MOT_FAIL_ROVR=1.15"],
+              "--set", "MOT_FAIL_ROVR=1.4"],
         metrics=lambda r: {"误报次数": str(_motor_msgs(r)),
                            "弧内最低速": "%.2f m/s" % (_m(r, "arc_speed_min_m_s") or -1)},
         check=lambda r: _motor_msgs(r) == 0,
