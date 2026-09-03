@@ -900,6 +900,13 @@ void AP_BattMonitor::check_failsafes(void)
                 continue;
             }
 
+            // Internal-only monitors feed a merged/scripted primary backend; that
+            // backend owns user-visible failsafe (see arming_checks()).
+            if ((_params[i]._options.get() &
+                 uint16_t(AP_BattMonitor_Params::Options::InternalUseOnly)) != 0) {
+                continue;
+            }
+
             const Failsafe type = drivers[i]->update_failsafes();
             if (type <= state[i].failsafe) {
                 continue;
@@ -1235,6 +1242,11 @@ bool AP_BattMonitor::healthy() const
         }
         // allow run-time disabling; this is technically redundant
         if (configured_type(i) == Type::NONE) {
+            continue;
+        }
+        // Internal-only backends are inputs to a merged/scripted primary backend.
+        if ((_params[i]._options.get() &
+             uint16_t(AP_BattMonitor_Params::Options::InternalUseOnly)) != 0) {
             continue;
         }
         if (!healthy(i)) {

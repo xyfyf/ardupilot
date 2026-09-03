@@ -18,7 +18,7 @@
   【电池实例映射】
   单电（X6100）：
     BATT  = 脚本输出（MONITOR=29）
-    BATT2 = UAVCAN 智能电池，battery.id=1
+    BATT2 = UAVCAN 智能电池，SERIAL_NUM=-1 自动绑定首个 CAN 节点
     BATT3 = ADC 分压备用（MONITOR=3，pin=10，MULT=31）
     BATT4 = 关闭
 
@@ -28,9 +28,8 @@
     BATT3 = 自动绑定第二块 UAVCAN 电池（不限定 battery.id / CAN node ID）
     BATT4 = ADC 分压备用（MONITOR=3，pin=10，MULT=31）
 
-  BATT2/3/4 设 INTERNAL_ONLY(256)，不向地面站 MAVLink 上报 BATTERY_STATUS，
-  但 PreArm 仍会检查其 healthy；未接 CAN 智能电池时 BATT2 须关闭(MONITOR=0)。
-
+  BATT2/3/4 设 INTERNAL_ONLY(256)，不向地面站 MAVLink 上报 BATTERY_STATUS；
+  内部后端 failsafe 由脚本主输出 BATT 负责（固件已跳过 InternalUseOnly failsafe）。
   【运行时数据源优先级】
   单电：UAVCAN(BATT2) 优先 → ADC(BATT3) 回退 → 均无则 unhealthy
   双电：两路 UAVCAN 均在线 → 电压相加(串联)、电流取 A 或 B、SOC 取较小值、
@@ -48,10 +47,12 @@
   EFT_CAAC 板级：VOLT_MULT=31，VOLT_PIN=10（与 defaults.parm 一致）。
   每次循环兜底写入，防止 MONITOR=3 新建实例沿用 hwdef 旧默认 21 导致读数偏低。
 
-  【可调开关】
-  BATTS_ENABLE = 1  → 启用本脚本（地面站搜 BATTS_ENABLE）；0=完全退出，不改 BATT 参数
-  USE_UAVCAN_ONE = true  → 单电启用 UAVCAN；false 则单电纯 ADC，BATT2 关闭
+  【设计目标】
+  接上 CAN 智能电池或 ADC 分压电池均可工作，无需改参数；运行时 CAN 优先，ADC 回退。
+  BATT2(UAVCAN) 与 BATT3(ADC) 始终同时启用，脚本按 healthy 自动切换数据源。
 
+  【可调开关】
+  BATTS_ENABLE = 1  → 启用本脚本；0=完全退出
   【GCS 提示】
   识别成功：BATT: one X6100 / two E616 (型号字符串)
   运行切换：BATT: UAVCAN / ADC / UAVCAN series / fallback ADC / no source
@@ -101,9 +102,6 @@ local ADC_IDX = 2
 local adc_mult_param = "BATT3_VOLT_MULT"
 local adc_pin_param = "BATT3_VOLT_PIN"
 local wait_reboot_announced = false
-local uavcan_off_announced = false
-local uavcan_missing_ms = nil
-local UAVCAN_OFF_DELAY_MS = 15000
 local boot_state = "detect"  -- detect | apply | wait_backends | run
 
 local function required_instances()
@@ -148,6 +146,27 @@ local function battery_capacity_remaining_pct(idx)
         return nil
     end
     return battery:capacity_remaining_pct(idx)
+end
+
+local function clamp_pct(p)
+    return math.max(0, math.min(100, math.floor(p + 0.5)))
+end
+
+-- ADC 无电流传感器，按电压粗估 SOC 供 MP SYS_STATUS 显示（避免 0% / Bad Battery）
+local function voltage_to_pct(v, cells)
+    local empty_v = cells * 3.5
+    local full_v = cells * 4.2
+    if v <= empty_v then
+        return 0
+    end
+    if v >= full_v then
+        return 100
+    end
+    return clamp_pct((v - empty_v) / (full_v - empty_v) * 100)
+end
+
+local function apply_adc_soc(state, v, cells)
+    state:capacity_remaining_pct(voltage_to_pct(v, cells))
 end
 
 local function battery_get_temperature(idx)
@@ -247,6 +266,17 @@ local function detect_mode()
     return nil
 end
 
+local function apply_uavcan_one_params(capacity)
+    local changed = set_param("BATTS_NO_CAN", 0)
+    changed = set_param("BATT2_MONITOR", 8) or changed
+    changed = set_param("BATT2_SERIAL_NUM", -1) or changed
+    changed = set_param("BATT2_CAPACITY", capacity) or changed
+    changed = set_param("BATT2_LOW_VOLT", 0) or changed
+    changed = set_param("BATT2_CRT_VOLT", 0) or changed
+    changed = set_param("BATT2_OPTIONS", INTERNAL_ONLY) or changed
+    return changed
+end
+
 local function apply_params_one(quiet)
     local capacity = param:get("BATT_CAPACITY") or 22000
     local changed = false
@@ -264,19 +294,7 @@ local function apply_params_one(quiet)
     changed = set_param("BATT_ARM_VOLT", 0) or changed
 
     if USE_UAVCAN_ONE then
-        -- 已配置过脚本且 BATT2=0：说明无 CAN 电池，勿再打开 BATT2
-        local batt_mon = param:get("BATT_MONITOR") or 0
-        local batt2_mon = param:get("BATT2_MONITOR") or 0
-        if math.abs(batt_mon - 29) < 1e-4 and batt2_mon == 0 then
-            changed = set_param("BATT2_MONITOR", 0) or changed
-        else
-            changed = set_param("BATT2_MONITOR", 8) or changed
-            changed = set_param("BATT2_SERIAL_NUM", 1) or changed
-            changed = set_param("BATT2_CAPACITY", capacity) or changed
-            changed = set_param("BATT2_LOW_VOLT", 0) or changed
-            changed = set_param("BATT2_CRT_VOLT", 0) or changed
-            changed = set_param("BATT2_OPTIONS", INTERNAL_ONLY) or changed
-        end
+        changed = apply_uavcan_one_params(capacity) or changed
     else
         changed = set_param("BATT2_MONITOR", 0) or changed
     end
@@ -292,7 +310,7 @@ local function apply_params_one(quiet)
         if changed then
             gcs:send_text(4, "BATT one: params saved, reboot if MONITOR changed")
         else
-            gcs:send_text(6, "BATT one: params ok")
+            gcs:send_text(6, "BATT one: CAN+ADC ready")
         end
     end
     return changed
@@ -344,44 +362,12 @@ local function apply_params_two(quiet)
     return changed
 end
 
-local function maybe_disable_uavcan_one()
-    if not USE_UAVCAN_ONE then
-        return
-    end
-    local batt2_mon = param:get("BATT2_MONITOR") or 0
-    if batt2_mon == 0 then
-        return
-    end
-    if battery_healthy(UAVCAN_A) then
-        uavcan_missing_ms = nil
-        return
-    end
-    if not battery_healthy(ADC_IDX) then
-        return
-    end
-    local now = millis()
-    if not uavcan_missing_ms then
-        uavcan_missing_ms = now
-        return
-    end
-    if now - uavcan_missing_ms < UAVCAN_OFF_DELAY_MS then
-        return
-    end
-    if set_param("BATT2_MONITOR", 0) then
-        if not uavcan_off_announced then
-            gcs:send_text(4, "BATT: no UAVCAN, BATT2 off, reboot")
-            uavcan_off_announced = true
-        end
-    end
-end
-
 local function update_one()
     if not script_enabled() then
         return idle, 5000
     end
 
     ensure_adc_scale()
-    maybe_disable_uavcan_one()
     local state = BattMonitorScript_State()
     local can_ok = USE_UAVCAN_ONE and battery_healthy(UAVCAN_A)
     local adc_ok = battery_healthy(ADC_IDX)
@@ -408,12 +394,14 @@ local function update_one()
             last_mode = MODE_UAVCAN
         end
     elseif adc_ok then
+        local v = battery_voltage(ADC_IDX) or 0
         state:healthy(true)
-        state:voltage(battery_voltage(ADC_IDX) or 0)
+        state:voltage(v)
         local i = battery_current_amps(ADC_IDX)
         if i then
             state:current_amps(i)
         end
+        apply_adc_soc(state, v, 6)
         if last_mode ~= MODE_ADC then
             gcs:send_text(4, "BATT: ADC")
             last_mode = MODE_ADC
@@ -481,8 +469,10 @@ local function update_two()
             last_mode = MODE_UAVCAN
         end
     elseif adc_ok then
+        local v = battery_voltage(ADC_IDX) or 0
         state:healthy(true)
-        state:voltage(battery_voltage(ADC_IDX) or 0)
+        state:voltage(v)
+        apply_adc_soc(state, v, 12)
         if last_mode ~= MODE_ADC then
             gcs:send_text(4, "BATT: fallback ADC")
             last_mode = MODE_ADC
@@ -551,14 +541,12 @@ end
 local function idle()
     if script_enabled() then
         wait_reboot_announced = false
-        uavcan_off_announced = false
-        uavcan_missing_ms = nil
         last_mode = MODE_NONE
         boot_state = "detect"
-        return boot, 5000
+        return boot, 1000
     end
     boot_state = "detect"
     return idle, 5000
 end
 
-return idle, 5000
+return idle, 1000
