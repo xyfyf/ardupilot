@@ -792,7 +792,19 @@ def run_loiter_circle(mon):
     for _ in range(60):
         rc_override(mon)
         mon.recv()
-    print("LOITER 已稳定，2 m 半径逐档画圈（杆量驱动）")
+
+    # 回读真正在起作用的倾角上限，而不是照抄常量。LOITER 的飞手倾角走
+    # loiter_nav->get_angle_max_rad()，即 LOIT_ANG_MAX（为 0 时才退到 ANGLE_MAX）,
+    # 所以本机绑住这条链路的是 LOIT_ANG_MAX=15，**不是 ANGLE_MAX**。
+    # 实测：ANGLE_MAX 在 1500 与 2000 之间切换，四档结果逐位相同；而把
+    # LOIT_ANG_MAX 由 15 放到 20，指令倾角立刻从 16.4 度升到 19.9 度、实测半径
+    # 由 1.80 m 撑到 2.24 m。用硬编码的 15 度去判饱和，一旦有人动 LOIT_ANG_MAX
+    # 就会静默量错——那次 20 度的架次照样报“饱和占比 100%”。
+    angle_max_deg = get_param(mon, "LOIT_ANG_MAX")
+    if angle_max_deg is None or angle_max_deg <= 0.0:
+        angle_max_raw = get_param(mon, "ANGLE_MAX")
+        angle_max_deg = (angle_max_raw / 100.0) if angle_max_raw else LOITER_ANGLE_MAX_DEG
+    print("LOITER 已稳定，2 m 半径逐档画圈（杆量驱动）；生效倾角上限 %.1f°" % angle_max_deg)
 
     steps = []
     for speed in CIRCLE_SPEEDS_MS:
@@ -800,9 +812,9 @@ def run_loiter_circle(mon):
         need_deg = math.degrees(math.atan(
             speed * speed / (CIRCLE_RADIUS_M * 9.80665)))
         # 满杆对应 LOIT_ANG_MAX / ANGLE_MAX 的较小者，本机为 15°
-        frac = min(need_deg / LOITER_ANGLE_MAX_DEG, 1.0)
+        frac = min(need_deg / angle_max_deg, 1.0)
         amp = int(round(frac * 500))
-        saturated_cmd = need_deg > LOITER_ANGLE_MAX_DEG
+        saturated_cmd = need_deg > angle_max_deg
 
         lap_s = 2.0 * math.pi / omega
         hold_ms = int(2 * lap_s * 1000)
@@ -840,7 +852,7 @@ def run_loiter_circle(mon):
             step["target_tilt_max_deg"] = max(tilts)
             step["target_tilt_mean_deg"] = sum(tilts) / len(tilts)
             step["tilt_saturated_frac"] = sum(
-                t >= LOITER_ANGLE_MAX_DEG - 0.3 for t in tilts) / len(tilts)
+                t >= angle_max_deg - 0.3 for t in tilts) / len(tilts)
         if errs:
             step["att_err_mean_deg"] = sum(errs) / len(errs)
             step["att_err_p95_deg"] = errs[int(len(errs) * 0.95)]
@@ -871,7 +883,8 @@ def run_loiter_circle(mon):
 
     set_mode_wait(mon, "LAND")
     wait_disarmed(mon, 120)
-    return {"circle_radius_m": CIRCLE_RADIUS_M, "mode": "LOITER", "steps": steps}
+    return {"circle_radius_m": CIRCLE_RADIUS_M, "mode": "LOITER",
+            "lean_limit_deg": angle_max_deg, "steps": steps}
 
 
 # P05：圆形围栏接近。围栏圆心即 Home，从圆心向外加速接近边界，
