@@ -289,6 +289,13 @@ const AP_Param::GroupInfo AP_MotorsMulticopter::var_info[] = {
     // @Increment: 0.05
     AP_GROUPINFO("FAIL_YSUP", 52, AP_MotorsMulticopter, _fail_yaw_suppress, 0.7),
 
+    // @Param: FAIL_ROVR
+    // @DisplayName: Shed propeller overspeed ratio
+    // @Description: A motor turning this many times faster than it normally does for the thrust it is being asked for, held for MOT_FAIL_TIME, is treated as having lost its propeller, and the mixer degrades via the same path as a stopped motor. MOT_FAIL_RPM cannot see this case: it looks for a motor turning slower, and a thrown prop leaves the motor turning faster, because the load that was holding it back is gone. What is watched is rpm/sqrt(thrust) - thrust goes as rpm squared, so that ratio is flat across a motor's operating range - held as a share of the fleet median so that battery sag and air density, which move every motor together, cancel out. Each motor is judged against its own share, learned over the preceding few seconds of flight, not against the fleet directly: even a healthy airframe puts every motor at its own operating point, and the six spread over 1.33 to 1 in SITL with no build tolerance in the model at all, so one fixed ratio to the fleet fires on whichever motor rides high and never sees the one that rides low. Needs at least four motors reading, and about five seconds of flight before it will judge a motor. Set to 0 to disable. Requires working ESC rpm telemetry. Unvalidated on a real airframe - default off; a false positive here removes a motor that was working.
+    // @Range: 0 3
+    // @User: Advanced
+    AP_GROUPINFO("FAIL_ROVR", 53, AP_MotorsMulticopter, _fail_shed_ratio, 0),
+
     AP_GROUPEND
 };
 

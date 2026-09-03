@@ -206,6 +206,8 @@ public:
     AP_Float drift_time;  // period in minutes
     AP_Float engine_mul;  // engine multiplier
     AP_Int32 engine_fail; // mask of engine/motor servo outputs to fail
+    AP_Int32 shed_mask;   // mask of motors that have thrown their propeller
+    AP_Float shed_ratio;  // rpm multiplier for a motor in shed_mask
 
     // initial offset on GPS lat/lon, used to shift origin
     AP_Float gps_init_lat_ofs;

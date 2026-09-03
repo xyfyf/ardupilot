@@ -253,6 +253,19 @@ const AP_Param::GroupInfo SIM::var_info[] = {
     // @Description: mask of motors which SIM_ENGINE_MUL will be applied to
     // @Bitmask: 0: Servo 1, 1: Servo 2, 2: Servo 3, 3: Servo 4, 4: Servo 5, 5: Servo 6, 6: Servo 7, 7: Servo 8, 8: Servo 9, 9: Servo 10, 10: Servo 11, 11: Servo 12, 12: Servo 13, 13: Servo 14, 14: Servo 15, 15: Servo 16, 16: Servo 17, 17: Servo 18, 18: Servo 19, 19: Servo 20, 20: Servo 21, 21: Servo 22, 22: Servo 23, 23: Servo 24, 24: Servo 25, 25: Servo 26, 26: Servo 27, 27: Servo 28, 28: Servo 29, 29: Servo 30, 30: Servo 31, 31: Servo 32
     AP_GROUPINFO("ENGINE_FAIL",   58, SIM,  engine_fail,  0),
+
+    // @Param: SHED_MASK
+    // @DisplayName: Motors that have thrown their propeller
+    // @Description: Mask of motors to simulate as having lost the propeller. Unlike SIM_ENGINE_FAIL, which scales the servo output and so takes the motor's speed down with its thrust, this leaves the command alone and removes only what the prop was doing: thrust and torque go to zero while the motor keeps turning, faster than before, by SIM_SHED_ROVR. That is the case a stopped-motor detector cannot see, because it is looking for the opposite sign.
+    // @User: Advanced
+    AP_GROUPINFO("SHED_MASK",     43, SIM,  shed_mask,  0),
+
+    // @Param: SHED_ROVR
+    // @DisplayName: Shed propeller overspeed ratio
+    // @Description: How much faster a motor in SIM_SHED_MASK turns once the propeller is gone, as a multiple of its loaded speed at the same command. A real unloaded motor accelerates until back-EMF balances the applied voltage, which is well above the speed a prop-matched setup settles at, but how far above depends on the motor, prop and battery. This is a stand-in for that number, not a prediction of it: measure it on a bench before reading anything quantitative into a result that depends on it.
+    // @Range: 1 3
+    // @User: Advanced
+    AP_GROUPINFO("SHED_ROVR",     44, SIM,  shed_ratio,  1.5),
     AP_SUBGROUPINFO(models, "",   59, SIM, SIM::ModelParm),
     AP_SUBGROUPEXTENSION("",      60, SIM,  var_mag),
 #if AP_SIM_GPS_ENABLED

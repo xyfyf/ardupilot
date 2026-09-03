@@ -602,12 +602,29 @@ void AP_MotorsMatrix::remove_motor(int8_t motor_num)
     }
 }
 
+// Below this command the square root turns telemetry noise into a huge
+// swing in k, so the reading is not a usable reference however low
+// MOT_FAIL_THST has been set.
+#define AP_MOTORS_SHED_MIN_THRUST 0.05f
+
+// Time constant for learning each motor's own k, expressed as a share of the
+// fleet.  Long compared with the confirm window, so a thrown prop shows up as
+// a step the detector catches long before the reference has moved to meet it.
+#define AP_MOTORS_SHED_LEARN_TAU_S 10.0f
+
+// How much flight a motor's reference needs before it is worth judging
+// against.  Below this the reference is still the first few samples.
+#define AP_MOTORS_SHED_LEARN_MIN_S 5.0f
+
 void AP_MotorsMatrix::update_failure_detection()
 {
 #if HAL_WITH_ESC_TELEM
+    const bool stop_check = is_positive(_fail_rpm_min);
+    const bool shed_check = is_positive(_fail_shed_ratio);
+
     // One degradation per flight: the change is irreversible, and a second
     // pass could only remove a motor the vehicle still needs.
-    if (_failed_motor >= 0 || !is_positive(_fail_rpm_min) || !armed()) {
+    if (_failed_motor >= 0 || !armed() || (!stop_check && !shed_check)) {
         return;
     }
 
@@ -617,6 +634,16 @@ void AP_MotorsMatrix::update_failure_detection()
 
     uint8_t suspect_count = 0;
     int8_t suspect = -1;
+    bool suspect_shed = false;
+
+    // Per-motor load factor k = rpm / sqrt(thrust), gathered in the same pass
+    // as the stopped check.  Thrust goes as rpm squared, so every healthy
+    // motor swinging the same prop in the same air shares one k whatever the
+    // airframe's rpm constant happens to be.  Judging each motor against the
+    // fleet median of k therefore needs no calibration, and rides out battery
+    // sag and air density, which move all of them together.
+    float k[AP_MOTORS_MAX_NUM_MOTORS];
+    bool k_valid[AP_MOTORS_MAX_NUM_MOTORS] {};
 
     for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
         if (!motor_enabled[i]) {
@@ -629,9 +656,17 @@ void AP_MotorsMatrix::update_failure_detection()
         if (_thrust_rpyt_out[i] < _fail_thrust_min ||
             !telem.get_rpm(i, rpm)) {
             _fail_timer_s[i] = 0.0f;
+            _shed_timer_s[i] = 0.0f;
             continue;
         }
-        if (rpm < _fail_rpm_min) {
+        if (_thrust_rpyt_out[i] >= AP_MOTORS_SHED_MIN_THRUST) {
+            k[i] = rpm / sqrtf(_thrust_rpyt_out[i]);
+            k_valid[i] = true;
+        }
+
+        if (!stop_check) {
+            _fail_timer_s[i] = 0.0f;
+        } else if (rpm < _fail_rpm_min) {
             _fail_timer_s[i] += dt;
             if (_fail_timer_s[i] >= confirm_s) {
                 suspect_count++;
@@ -642,13 +677,94 @@ void AP_MotorsMatrix::update_failure_detection()
         }
     }
 
+    // A thrown propeller leaves the motor spinning faster, not slower, so the
+    // check above cannot see it - it is looking for the opposite sign.  The
+    // signature is a motor whose k has climbed away from where that motor
+    // normally sits: same command, no load, higher rpm.  What the mixer has to
+    // do about it is the same either way, because either way that point makes
+    // no thrust, so this ends at the same set_motor_failed().
+    //
+    // Judged against the motor's own history, not against the fleet.  Every
+    // motor sits at its own k even on a healthy airframe - measured in SITL,
+    // where there is no manufacturing spread at all, the six spread over
+    // 1.33:1, because geometry alone puts each motor at a different operating
+    // point.  A fixed ratio to the fleet median therefore fires on whichever
+    // motor naturally rides high while staying blind to the one that rides
+    // low; on a real airframe, with build tolerance on top, it is worse.  What
+    // is learned is each motor's k as a share of the fleet's, so the reference
+    // still rides out battery sag and air density - those move every motor
+    // together and cancel in the ratio - while the per-motor offset that broke
+    // the fleet comparison is exactly what the reference absorbs.
+    //
+    // Only when the stopped check found nothing: it has already decided, and
+    // one degradation per flight means there is nothing left to add.
+    if (shed_check && suspect_count == 0) {
+        float sorted[AP_MOTORS_MAX_NUM_MOTORS];
+        uint8_t n = 0;
+        for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
+            if (!k_valid[i]) {
+                continue;
+            }
+            uint8_t m = n++;
+            while (m > 0 && sorted[m - 1] > k[i]) {
+                sorted[m] = sorted[m - 1];
+                m--;
+            }
+            sorted[m] = k[i];
+        }
+        // Under four readings the median is not a fleet consensus - with three
+        // it sits on one motor, so a single bad reading becomes the reference
+        // every other motor is judged against.  Hold off rather than guess.
+        if (n >= 4) {
+            const float median = (n & 1) ? sorted[n / 2]
+                                         : 0.5f * (sorted[n / 2 - 1] + sorted[n / 2]);
+            if (is_positive(median)) {
+                for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
+                    if (!k_valid[i]) {
+                        continue;
+                    }
+                    const float share = k[i] / median;
+                    const bool ready = _shed_learn_s[i] >= AP_MOTORS_SHED_LEARN_MIN_S;
+                    if (ready && share > _shed_ref[i] * _fail_shed_ratio) {
+                        // Suspect: hold the reference still.  Letting it keep
+                        // learning here would walk it up to meet the fault and
+                        // clear the very condition being confirmed.
+                        _shed_timer_s[i] += dt;
+                        if (_shed_timer_s[i] >= confirm_s) {
+                            suspect_count++;
+                            suspect = i;
+                            suspect_shed = true;
+                        }
+                    } else {
+                        _shed_timer_s[i] = 0.0f;
+                        if (_shed_learn_s[i] <= 0.0f) {
+                            // First reading: start at it rather than ramping
+                            // up from zero, which would read as a motor
+                            // climbing and be indistinguishable from the fault.
+                            _shed_ref[i] = share;
+                        } else {
+                            _shed_ref[i] += (share - _shed_ref[i]) *
+                                            (dt / AP_MOTORS_SHED_LEARN_TAU_S);
+                        }
+                        _shed_learn_s[i] += dt;
+                    }
+                }
+            }
+        }
+    }
+
     if (suspect_count == 1) {
         if (set_motor_failed(uint8_t(suspect))) {
-            gcs().send_text(MAV_SEVERITY_CRITICAL,
-                            "Motor %d stopped: mixer degraded", int(suspect) + 1);
+            if (suspect_shed) {
+                gcs().send_text(MAV_SEVERITY_CRITICAL,
+                                "Motor %d lost its prop: mixer degraded", int(suspect) + 1);
+            } else {
+                gcs().send_text(MAV_SEVERITY_CRITICAL,
+                                "Motor %d stopped: mixer degraded", int(suspect) + 1);
+            }
         }
     } else if (suspect_count > 1) {
-        // Several motors reading stopped at once is far more likely to be the
+        // Several motors failing at once is far more likely to be the
         // telemetry link or a channel mapping error than a simultaneous
         // multiple failure - and removing motors on that basis would cause the
         // crash it is meant to prevent.  Warn, do not act.
@@ -662,8 +778,13 @@ void AP_MotorsMatrix::update_failure_detection()
         const uint32_t now_ms = AP_HAL::millis();
         if (_fail_warn_count == 0 || now_ms - _fail_warn_last_ms >= 1000U) {
             _fail_warn_last_ms = now_ms;
-            gcs().send_text(MAV_SEVERITY_WARNING,
-                            "Motor: %u read stopped, check ESC telem", suspect_count);
+            if (suspect_shed) {
+                gcs().send_text(MAV_SEVERITY_WARNING,
+                                "Motor: %u read unloaded, check ESC telem", suspect_count);
+            } else {
+                gcs().send_text(MAV_SEVERITY_WARNING,
+                                "Motor: %u read stopped, check ESC telem", suspect_count);
+            }
         }
         _fail_warn_count = suspect_count;
     } else if (_fail_warn_count != 0) {

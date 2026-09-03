@@ -2381,7 +2381,7 @@ def estimate_mag_yaw_offset_gps(path, declination_deg=None):
 
 
 def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False, detect=False,
-                   land_on_fail=False):
+                   land_on_fail=False, shed=False):
     """P04：单个电机停转后的可控性。
 
     注入用 `SIM_ENGINE_FAIL` + `SIM_ENGINE_MUL=0`，它缩放的是 servo PWM
@@ -2394,6 +2394,11 @@ def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False, detect=F
     而是偏航是否失控、姿态还保不保得住。
 
     motor 为 1..6（对应 SERVO1..6），内部转成 SIM_ENGINE_FAIL 的位掩码。
+
+    `shed=True` 换成**掉桨**：用 `SIM_SHED_MASK`，指令不动，只把桨带走的东西
+    带走——推力力矩归零，转速反而脱开负载往上跑（`SIM_SHED_ROVR` 倍）。这一条
+    `MOT_FAIL_RPM` 看不见，因为它找的是转速变低，而掉桨是变高。对混控来说两
+    者后果相同（那个点不出力），所以降级路径是同一条，差别只在检测判据。
     """
     alt = ROUTE_ALT_M if alt is None else alt
     if detect:
@@ -2401,6 +2406,10 @@ def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False, detect=F
         set_param(mon, "MOT_FAIL_RPM", 300)
         set_param(mon, "MOT_FAIL_TIME", 200)
         set_param(mon, "MOT_FAIL_THST", 0.15)
+        # 两条判据一律同时开着跑，才能确认它们不会互相误触发：停转的
+        # k=rpm/sqrt(thrust) 趋近 0（落在中位数之下），掉桨的 k 明显偏高，
+        # 方向相反，各管各的。真机上也是两条一起开，就该按一起开来验。
+        set_param(mon, "MOT_FAIL_ROVR", 1.15)
     command_takeoff(mon, alt)
     set_mode_wait(mon, "GUIDED", 15)
 
@@ -2417,13 +2426,16 @@ def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False, detect=F
             pre.append(-mon.local.z)
 
     fail_ms = mon.sim_ms
-    set_param(mon, "SIM_ENGINE_MUL", 0)
-    set_param(mon, "SIM_ENGINE_FAIL", 1 << (motor - 1))
+    if shed:
+        set_param(mon, "SIM_SHED_MASK", 1 << (motor - 1))
+    else:
+        set_param(mon, "SIM_ENGINE_MUL", 0)
+        set_param(mon, "SIM_ENGINE_FAIL", 1 << (motor - 1))
     if degrade:
         # 同时告诉飞控哪台电机失效。真机上这一步由检测器完成；这里直接给出
         # 答案，先把「降级混控本身管不管用」与「检测得准不准」两件事分开验证。
         set_param(mon, "MOT_FAIL_IDX", motor)
-    print("  === 电机 %d 停转注入于 t=%.1fs ===" % (motor, fail_ms / 1000.0))
+    print("  === 电机 %d %s注入于 t=%.1fs ===" % (motor, "掉桨" if shed else "停转", fail_ms / 1000.0))
 
     if land_on_fail:
         # 切 LAND 让它尽快下来，而不是继续悬停等着。
@@ -2780,6 +2792,8 @@ def main(argv=None):
                         help="失效后切 LAND，放弃定点——受控应急着陆不要求定点")
     parser.add_argument("--detect", action="store_true",
                         help="打开基于转速的停转检测器，由它自己发现失效电机")
+    parser.add_argument("--shed", action="store_true",
+                        help="掉桨而非停转：指令不动，推力归零而转速升高（MOT_FAIL_RPM 看不见的那一类）")
     parser.add_argument("--degrade", action="store_true",
                         help="失效同时写 MOT_FAIL_IDX，启用降级混控（剔除失效电机并放弃偏航）")
     parser.add_argument("--polyfence-radius", type=float, default=None, metavar="M",
@@ -2917,7 +2931,7 @@ def main(argv=None):
             result.update(run_uturn_auto(mon, args.swath, turns=args.turns))
         elif args.case == "motor-fail":
             result.update(run_motor_fail(mon, args.motor, degrade=args.degrade, detect=args.detect,
-                                         land_on_fail=args.land_on_fail,
+                                         land_on_fail=args.land_on_fail, shed=args.shed,
                                          alt=args.fail_alt))
         elif args.case == "mag-align":
             result.update(run_mag_align(mon))

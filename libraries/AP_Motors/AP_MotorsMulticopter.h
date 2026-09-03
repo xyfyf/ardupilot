@@ -195,6 +195,7 @@ protected:
     AP_Float        _fail_rpm_min;
     AP_Int16        _fail_time_ms;
     AP_Float        _fail_thrust_min;
+    AP_Float        _fail_shed_ratio;
     AP_Float            _spool_down_time;
 
     // scaling for booster motor throttle

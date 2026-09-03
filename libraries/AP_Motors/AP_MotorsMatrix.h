@@ -228,6 +228,18 @@ protected:
 
     // seconds each motor has been commanded but not turning
     float               _fail_timer_s[AP_MOTORS_MAX_NUM_MOTORS];
+
+    // Separate from _fail_timer_s: the stopped and shed checks look for
+    // opposite signs of the same reading, so one sharing the other's timer
+    // would reset exactly what the other is trying to accumulate.
+    float               _shed_timer_s[AP_MOTORS_MAX_NUM_MOTORS];
+
+    // Each motor's own k as a share of the fleet's, learned in flight, and how
+    // long it has been learning.  The share is what makes the reference
+    // immune to battery sag and air density while still absorbing the
+    // per-motor offset that a fleet comparison cannot see past.
+    float               _shed_ref[AP_MOTORS_MAX_NUM_MOTORS];
+    float               _shed_learn_s[AP_MOTORS_MAX_NUM_MOTORS];
     // Rate limiting for the multi-motor telemetry warning.  That branch warns
     // without acting, so _failed_motor stays -1 and the early return in
     // update_failure_detection() never engages: unthrottled, the message

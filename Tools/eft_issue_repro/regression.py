@@ -212,9 +212,27 @@ SUITE = [
         why="4 m/s 风下失效后须保持姿态可控、检测在 0.5 s 内；不降级的基线是 16.8 s 后坠毁",
     ),
     dict(
+        pid="P04", name="掉桨-检测与降级", case="motor-fail", tag="prop_shed",
+        # 掉桨与停转是两个方向相反的信号：停转是转速掉下去，掉桨是桨没了、
+        # 负载没了、转速反而冲上去。MOT_FAIL_RPM 只认前者，这一条守的是后者。
+        # 对混控来说两者后果相同（那个点不出力），所以降级路径共用，判据分开。
+        args=["--motor", "6", "--detect", "--shed", "--set", "SIM_WIND_SPD=4",
+              "--set", "SIM_WIND_DIR=90"],
+        metrics=lambda r: {"检测延迟": "%.2f s" % _detect_delay(r),
+                           "滚转稳态": "%.1f°" % (_m(r, "roll_steady_deg") or -1),
+                           "水平漂移": "%.1f m/s" % (_m(r, "horiz_drift_max_m_s") or -1),
+                           "掉高": "%.2f m" % _alt_loss(r)},
+        check=lambda r: (bool(_m(r, "still_armed_after_watch")) and _detect_delay(r) < 0.5
+                         and abs(_m(r, "roll_steady_deg") or 999) < 10.0)
+                        and _alt_loss(r) < 2.0,
+        why="掉桨须在 0.5 s 内检出并降级；判据与停转同为姿态可控，因为失去的是同一维",
+    ),
+    dict(
         pid="P04", name="检测器误报", case="uturn-auto",
+        # 两条判据一起开：真机上就是一起开的，只验其中一条不算数。
         args=["--swath", "12"] + YAW_CFG + ["--set", "MOT_FAIL_RPM=300",
-              "--set", "MOT_FAIL_TIME=200", "--set", "MOT_FAIL_THST=0.15"],
+              "--set", "MOT_FAIL_TIME=200", "--set", "MOT_FAIL_THST=0.15",
+              "--set", "MOT_FAIL_ROVR=1.15"],
         metrics=lambda r: {"误报次数": str(_motor_msgs(r)),
                            "弧内最低速": "%.2f m/s" % (_m(r, "arc_speed_min_m_s") or -1)},
         check=lambda r: _motor_msgs(r) == 0,

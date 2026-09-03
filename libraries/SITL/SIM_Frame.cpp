@@ -666,6 +666,18 @@ void Frame::calculate_forces(const Aircraft &aircraft,
     for (uint8_t i=0; i<num_motors; i++) {
         Vector3f mtorque, mthrust;
         motors[i].calculate_forces(input, motor_offset, mtorque, mthrust, vel_air_bf, gyro, air_density, battery->get_voltage(), use_drag);
+        // A thrown propeller.  The motor still turns and the ESC still drives
+        // it - what is gone is the blade, so what goes with it is the thrust
+        // and the torque, not the command.  SIM_ENGINE_FAIL cannot stand in
+        // for this: it scales the servo output, which takes the motor's speed
+        // down along with its thrust, and a shed prop leaves the motor turning
+        // faster than before, not slower.  That opposite sign is the whole
+        // reason a stopped-motor check cannot see this failure.
+        const bool shed = (uint32_t(_sitl->shed_mask.get()) & (1U << i)) != 0;
+        if (shed) {
+            mtorque.zero();
+            mthrust.zero();
+        }
         torque += mtorque;
         thrust += mthrust;
         // Simulate motor rpm for ESC telemetry.
@@ -686,6 +698,12 @@ void Frame::calculate_forces(const Aircraft &aircraft,
                 safe_sqrt((1.0f - model.propExpo) * cmd + model.propExpo * sq(cmd));
         } else if (!is_zero(_sitl->vibe_motor)) {
             rpm[motor_offset+i] = motors[i].get_command() * AP::sitl()->vibe_motor * 60.0f;
+        }
+        if (shed) {
+            // Freed of its load, the motor runs away from the speed that load
+            // was setting.  See SIM_SHED_ROVR on why this is a knob and not a
+            // derived quantity.
+            rpm[motor_offset+i] *= _sitl->shed_ratio.get();
         }
     }
 
