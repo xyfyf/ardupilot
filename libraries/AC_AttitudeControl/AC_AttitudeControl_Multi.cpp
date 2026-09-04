@@ -319,7 +319,7 @@ const AP_Param::GroupInfo AC_AttitudeControl_Multi::var_info[] = {
 
     // @Param: VFF_RLL
     // @DisplayName: Roll airflow torque feedforward
-    // @Description: Normalised roll torque fed forward per m/s of body-right velocity, cancelling the moment that translational airflow across the rotor discs produces. Large-diameter props on heavy multirotors generate a moment roughly proportional to airspeed; with this at zero only the rate-loop integrator trims it, and on a velocity reversal the integrator is still trimmed for the old direction, giving a lasting attitude error. Set it to the slope of a regression of the logged PIDR.I against body-right velocity - the sign is part of the gain. Zero disables.
+    // @Description: Normalised roll torque fed forward per m/s of body-right velocity, cancelling the moment that translational airflow across the rotor discs produces. Large-diameter props on heavy multirotors generate a moment roughly proportional to airspeed; with this at zero only the rate-loop integrator trims it, and on a velocity reversal the integrator is still trimmed for the old direction, giving a lasting attitude error. Calibrate in two steps, and do not skip the first. SIGN: regress the logged PIDR.I against body-right velocity; the slope's sign is the gain's sign and for a conventional multirotor this comes out negative. Getting it backwards is worse than leaving the feedforward off - measured in SITL, a sign-flipped gain roughly doubled the attitude error against the no-feedforward baseline, because the term then adds to the moment it was meant to cancel. MAGNITUDE: the regression slope is a lower bound, not the answer - it assumes the integrator has fully trimmed, which it never quite has, and measured about a third low. Scan upward from the slope and take the value that minimises the integrator's span; going past the optimum makes things worse again. Confirm on a separate flight: refit and check the residual slope has collapsed toward zero. Airframe-specific - there is no portable default. Zero disables.
     // @Range: -0.05 0.05
     // @Increment: 0.001
     // @User: Advanced
@@ -327,7 +327,7 @@ const AP_Param::GroupInfo AC_AttitudeControl_Multi::var_info[] = {
 
     // @Param: VFF_PIT
     // @DisplayName: Pitch airflow torque feedforward
-    // @Description: Normalised pitch torque fed forward per m/s of body-forward velocity. See ATC_VFF_RLL. Obtain it from a regression of the logged PIDP.I against body-forward velocity; it is typically opposite in sign to ATC_VFF_RLL. Zero disables.
+    // @Description: Normalised pitch torque fed forward per m/s of body-forward velocity. Calibrate exactly as ATC_VFF_RLL - read its description for the two-step procedure and the warning about sign. Regress the logged PIDP.I against body-forward velocity; this axis comes out opposite in sign to the roll one, positive where roll is negative. Zero disables.
     // @Range: -0.05 0.05
     // @Increment: 0.001
     // @User: Advanced
