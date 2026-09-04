@@ -156,6 +156,16 @@ GUIDED 只检查速度大小达到目标的 70%，不检查速度方向是否与
 
 建议在接受前对整条参数曲线做围栏/禁飞区采样和地形裕度检查，运行时继续监测；需要 OA 时拒绝恒速弧或切换到受约束的局部规划器。明确支持命令高度和 terrain frame，不能静默保持旧高度。
 
+> **状态复核（2026-09-04）：部分关闭。**
+>
+> | 建议的三项约束 | 状态 | 依据 |
+> | :-- | :-- | :-- |
+> | 围栏 | **已做** | `d77cb9757b`「AUTO/GUIDED：接受协调转弯前先按围栏采样整条弧」，提交信息自称即为「R-08 的围栏部分」 |
+> | 避障（OA / BendyRuler / `AC_Avoid::adjust_velocity()`） | **未做** | 在 `AC_ArcNav.cpp` 中检索 `avoid` / `Avoid` **零命中** |
+> | 地形裕度与命令高度 / terrain frame | **未做** | 同上，检索 `terrain` / `Terrain` 零命中 |
+>
+> 因此本条**不得记为已关闭**。圆弧仍会绕过避障与地形约束；坡地作业与需要 OA 的场景下行为与普通 WPNAV 不同，且高度仍静默保持进入时的 `pos_desired_U`。
+
 ### R-09（P1）GUIDED 圆弧回传的是陈旧目标
 
 位置：`GCS_MAVLink_Copter.cpp:169-176`；`mode_guided.cpp:1281-1293`；`AC_ArcNav.cpp:399-402`
@@ -220,6 +230,58 @@ AUTO 还把所有 `LOITER_TURNS <= 0.5` 自动解释为协调圆弧，改变了�
 - Guided 接口注释把负 radius 写成顺时针，而实际行为和 MAVLink XML都是“正值顺时针、负值逆时针”。
 
 建议把方向约定统一写成“NE/NED 航向角正方向”和 MAVLink param3 规范，并给 CW/CCW 各加一个自动化测试，避免只改注释又掩盖真实符号错误。
+
+> **状态复核（2026-09-04）：部分关闭，四条做了两条。**
+>
+> | 原列的四处 | 状态 | 依据 |
+> | :-- | :-- | :-- |
+> | `README.md` 仍只称支持两个场景 | **未做** | `reproduce.py` 现支持 **14 个** 场景（`landing` `reverse` `circle` `loiter-circle` `fence` `fence-sprint` `route` `uturn` `uturn-guided` `uturn-arcnav` `uturn-auto` `yaw-step` `mag-align` `motor-fail`），README 里仍只出现 `landing` 与 `reverse` |
+> | `README.md` 列出已被替换的旧地效字段 | **已做** | 现已列出 `ground_effect_collapse_height` 等新字段 |
+> | `reproduce.py` 称 ALT_HOLD/STABILIZE 原理上无法主动围控 | **未做，且现已成为错误陈述** | 见下 |
+> | `AC_ArcNav.h` 正 sweep 方向写反 | **已做** | `AC_ArcNav.h:143`「increases N->E->S->W, i.e. clockwise on a map」，`:351`「+1 clockwise, -1 counter-clockwise」 |
+> | GUIDED 负半径注释与实际相反 | **已做** | `mode_guided.cpp:233`「Positive radius selects a clockwise arc, matching CIRCLE_RATE's sign convention」 |
+>
+> **第三条需要单独说明。** `reproduce.py:1015` 至今写着：
+>
+> ```
+> ALT_HOLD / STABILIZE / SPORT 无位置控制，**原理上无法**主动围控
+> ```
+>
+> 而姿态层围栏此后已经实现并进入集中回归——`regression.py` 里有 `姿态层围栏-ALT_HOLD-无风`、`-ALT_HOLD-2m/s风`、`-STABILIZE-2m/s风`、`-POSHOLD-2m/s风`、`-DRIFT-2m/s风`、`-冲刺-ALT_HOLD-无风` 六条在跑。
+>
+> **这已经不是「注释落后」，而是一句现在读起来会把人引向错误结论的断言**：照它字面理解，会认为姿态层围栏这条路走不通，而它其实已经走通并有六条回归守着。优先级应高于其余三条。
+
+## 5.5 十六项的复核状态（2026-09-04）
+
+逐条对照当前 `dev-p04`（含 `dev-algo` 全部内容）的代码复核，不只看提交信息自称。
+
+| R | 状态 | 依据 |
+| :-- | :-- | :-- |
+| R-01 | ✅ 已关闭 | `AC_Avoid.cpp:566` 以 `g·tan(veh_angle_max)` 取代固定 1.0 m/s²，注释含 A/B 实测 |
+| R-02 | ✅ 已关闭 | `have_solution` 为假时返回 `false`；注释记录了"曾把六个电机全部置零并掉下去" |
+| R-03 | ✅ 已关闭 | `FAIL_ALLOC>0` 且 `FAIL_YAW≠0` 时**解锁拒绝**，不静默忽略 |
+| R-04 | ✅ 已关闭 | `set_limits_from_allocation()` 已实现并接入 |
+| R-05 | ✅ 已关闭 | 见 `5d1a8b7dbf` 等 |
+| R-06 | ✅ 已关闭 | `276ac52d45`「ArcNav: 入弧状态校验与目标回传」 |
+| R-07 | ✅ 已关闭 | `ac4e5f7ef2`「AUTO: 前视承诺与圆弧可行性判定合一」 |
+| **R-08** | ⚠️ **部分关闭** | 围栏已做（`d77cb9757b`），**避障与地形未做**——`AC_ArcNav.cpp` 检索 `avoid`/`terrain` 零命中 |
+| R-09 | ✅ 已关闭 | `276ac52d45` |
+| R-10 | ✅ 已关闭 | 见 `5d1a8b7dbf` |
+| R-11 | ✅ 已关闭 | 超时、`returncode`、结果时间戳三道判据均在 `regression.py` 的 `run_one()` 中 |
+| R-12 | ✅ 已关闭 | `99907a46c1`「fit_vel_ff 按 primary lane 取速度」 |
+| R-13 | ✅ 已关闭 | 多台可疑告警 1 Hz 节流（`_fail_warn_last_ms`） |
+| R-14 | ✅ 已关闭 | `FAIL_IDX≠0` 时解锁拒绝，提示 "clear it to fly" |
+| R-15 | ✅ 已关闭 | 见 `5d1a8b7dbf` |
+| **R-16** | ⚠️ **部分关闭** | 四处做了两处；未做的一处已成为**错误陈述**，见该条 |
+
+**十四条已关闭，两条部分关闭。** 此前提交信息中「审查 16 项全部关闭」的说法不成立。
+
+两条未尽事项的性质不同：
+
+- **R-08** 是**功能缺口**——圆弧仍绕过避障与地形约束，坡地作业与需要 OA 的场景下行为与普通 WPNAV 不同。
+- **R-16** 是**文档缺口，但其中一条已升级为错误陈述**——`reproduce.py:1015` 仍断言 ALT_HOLD/STABILIZE「原理上无法」主动围控，而姿态层围栏已实现并有六条回归在守。照字面读会得出与事实相反的结论，优先级应高于其余文档项。
+
+> **顺带记一条方法教训**：R-02、R-04、R-14 实际上早已由降级分配器的实现关闭（对应其防护 C、回喂、解锁联锁），但当时的提交信息里没有写 R 编号，因此 `git log --grep="R-02"` 查不到关闭它的提交——**从 P 那一侧看代码已经很完善，从 R 那一侧看却像还开着**。这正是 `AGENTS.md` 第 8 节要求"关闭评审发现时末行单列 R 编号"的由来。
 
 ## 6. 当前回归结果
 
