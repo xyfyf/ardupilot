@@ -1975,7 +1975,7 @@ def run_uturn_arcnav(mon, swath=SWATH_M, speed=2.0, leg=SPRAY_LEG_M):
         in_arc = mon.sim_ms <= arc_end_ms
         samples.append((math.hypot(mon.local.vx, mon.local.vy),
                         target_tilt_deg(mon),
-                        math.hypot(mon.local.x - (leg), mon.local.y - R) if in_arc else None))
+                        (mon.local.x, mon.local.y) if in_arc else None))
     set_mode_wait(mon, "LAND")
     wait_disarmed(mon, 120)
 
@@ -1985,7 +1985,26 @@ def run_uturn_arcnav(mon, swath=SWATH_M, speed=2.0, leg=SPRAY_LEG_M):
     core = samples[int(n * 0.15):int(n * 0.85)] or samples
     sps = [s[0] for s in core]
     tilts = [s[1] for s in core if s[1] is not None]
-    radii = [s[2] for s in core if s[2] is not None]
+    # 实飞半径用三点定圆（R = abc/4·面积）量局部曲率，**不假定圆心**。
+    #
+    # 原先是量「到 (leg, R) 的距离」。那个圆心按固定 10 m 前视距离推出来，R-07
+    # 把前视改成按过渡长度算之后入弧点沿航段移动，圆心跟着移，而这把尺子没动
+    # ——量出来从 11.3 m 跳到 13.6 m，读起来像掉头占地大了 20%。实际对弧内轨迹
+    # 做圆拟合是 12.22 m（指令 12.00，+1.8%），残差均值 0.076 m，跟踪本身很好。
+    # 指标不该依赖「弧在哪儿起步」这种会被规划改动挪走的前提。
+    # 同文件 run_uturn() 早就是这么量的，这里跟上。
+    pts = [s[2] for s in core if s[2] is not None]
+    radii = []
+    step = max(1, len(pts) // 200)
+    for i in range(step, len(pts) - step, step):
+        (x1, y1), (x2, y2), (x3, y3) = pts[i - step], pts[i], pts[i + step]
+        a_ = math.hypot(x2 - x1, y2 - y1)
+        b_ = math.hypot(x3 - x2, y3 - y2)
+        c_ = math.hypot(x3 - x1, y3 - y1)
+        area2 = abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1))
+        if area2 > 1e-6 and a_ > 0.05 and b_ > 0.05:
+            radii.append(a_ * b_ * c_ / (2 * area2))
+    radii = [r for r in radii if r < 100.0]
     res = {"accepted": True, "swath_m": swath, "uturn_radius_m": R,
            "target_speed_m_s": speed,
            "speed_min_m_s": min(sps), "speed_mean_m_s": sum(sps) / len(sps),
