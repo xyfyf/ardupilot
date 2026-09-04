@@ -622,9 +622,24 @@ void AP_MotorsMatrix::update_failure_detection()
     const bool stop_check = is_positive(_fail_rpm_min);
     const bool shed_check = is_positive(_fail_shed_ratio);
 
+    if (!armed()) {
+        // Relearn from scratch each flight.  Carrying a reference across a
+        // disarm would judge this flight's motors against the last one's -
+        // and a stale low reference is not self-correcting, because the
+        // suspicion it creates freezes the very learning that would fix it.
+        //
+        // Clearing the learn time is enough to reset the whole state: it makes
+        // `ready` false, which sends the next pass down the else branch, and
+        // that branch re-seeds _shed_ref from the first fresh reading and zeros
+        // both timers.  Writing the other three arrays here as well cost 1.1 kB
+        // of flash on a budget with 4 kB in it.
+        memset(_shed_learn_s, 0, sizeof(_shed_learn_s));
+        return;
+    }
+
     // One degradation per flight: the change is irreversible, and a second
     // pass could only remove a motor the vehicle still needs.
-    if (_failed_motor >= 0 || !armed() || (!stop_check && !shed_check)) {
+    if (_failed_motor >= 0 || (!stop_check && !shed_check)) {
         return;
     }
 
@@ -916,10 +931,38 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
         if (!mat_inverse(bbt, bbt_inv, rows)) {
             break;
         }
+        // MOT_FAIL_YTRK moves the target of that same term off zero and onto
+        // the yaw demand: the objective becomes
+        //   |T|^2 + ysup * (yaw moment - ytrk * yaw demand)^2
+        // Working the Lagrangian through, the only thing a non-zero target
+        // changes is one scalar.  With the substitution the code already makes
+        // (alpha = ysup / n_free absorbing the Sherman-Morrison denominator) it
+        // comes out as gamma = alpha * target, entering in two places: the
+        // right-hand side of the solve loses gamma*s, and each thrust gains
+        // gamma*y.
+        //
+        // The residual check below still validates against the unmodified rem,
+        // and that is not a slip.  Substituting back,
+        //   B*t = (B B^T - alpha*s*s^T)*lambda + gamma*s
+        //       = (rem - gamma*s) + gamma*s
+        //       = rem
+        // so the identity the check relies on survives the change untouched.
+        //
+        // Note what this does NOT do: throttle, roll and pitch stay as hard
+        // equality constraints in B, so yaw is served only out of the null
+        // space they leave behind.  It cannot trade attitude away for heading -
+        // which is exactly what MOT_FAIL_YAW does, and why that one crashed the
+        // airframe in 2 m/s of wind while this cannot.  When the null space
+        // runs out, motors clamp, the active set shrinks, and the solve falls
+        // back toward the plain suppression case on its own.
+        const float gamma = (is_positive(alpha) && rows == 3)
+                            ? alpha * constrain_float(_fail_yaw_track, 0.0f, 1.0f) * demand[3]
+                            : 0.0f;
+
         float lambda[4] = {};
         for (uint8_t a = 0; a < rows; a++) {
             for (uint8_t b = 0; b < rows; b++) {
-                lambda[a] += bbt_inv[a * rows + b] * rem[b];
+                lambda[a] += bbt_inv[a * rows + b] * (rem[b] - gamma * syaw[b]);
             }
         }
 
@@ -958,6 +1001,7 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
                 t += _yaw_factor[m] * lambda[3];
             }
             t -= alpha * _yaw_geom[m] * slam;
+            t += gamma * _yaw_geom[m];
             if (!isfinite(t)) {
                 // constrain_float() turns a NaN into (low+high)/2, i.e. half
                 // throttle on every motor - louder than zero and just as wrong.

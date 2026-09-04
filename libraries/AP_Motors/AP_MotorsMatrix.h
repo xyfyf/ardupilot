@@ -238,8 +238,12 @@ protected:
     // long it has been learning.  The share is what makes the reference
     // immune to battery sag and air density while still absorbing the
     // per-motor offset that a fleet comparison cannot see past.
-    float               _shed_ref[AP_MOTORS_MAX_NUM_MOTORS];
-    float               _shed_learn_s[AP_MOTORS_MAX_NUM_MOTORS];
+    // Zero-initialised: the object is plain new'd, so without this the arrays
+    // start indeterminate.  Garbage that happens to read as a learned
+    // reference would be judged against on the very first pass and could
+    // remove a working motor before any real reading has been taken.
+    float               _shed_ref[AP_MOTORS_MAX_NUM_MOTORS] {};
+    float               _shed_learn_s[AP_MOTORS_MAX_NUM_MOTORS] {};
     // Rate limiting for the multi-motor telemetry warning.  That branch warns
     // without acting, so _failed_motor stays -1 and the early return in
     // update_failure_detection() never engages: unthrottled, the message

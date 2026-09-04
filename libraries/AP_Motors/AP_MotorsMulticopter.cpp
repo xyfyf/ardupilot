@@ -296,6 +296,13 @@ const AP_Param::GroupInfo AP_MotorsMulticopter::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("FAIL_ROVR", 53, AP_MotorsMulticopter, _fail_shed_ratio, 0),
 
+    // @Param: FAIL_YTRK
+    // @DisplayName: Degraded allocator yaw tracking
+    // @Description: How much of the yaw demand the degraded allocator chases once a motor has been removed. Throttle, roll and pitch are solved exactly first; only the freedom left over after that is spent on yaw, so unlike MOT_FAIL_YAW this cannot take authority away from attitude - that is the whole reason it is safe to try where MOT_FAIL_YAW was not. With five motors and three hard constraints two degrees of freedom remain, and how much yaw they are worth depends on where the survivors sit in their 0..1 range: there is room at a light collective and none at a heavy one, and the active-set clamping degrades it to the old behaviour automatically as motors reach their limits. 0 keeps the existing behaviour, where the leftover freedom drives the parasitic yaw moment toward zero rather than toward the demand. 1 chases the demand in full. Whatever this is set to, a hexacopter down one motor cannot hold heading in steady state - the four-constraint trim sits on the edge of the feasible set - so what this buys is partial yaw authority when conditions allow, not a held heading. Requires MOT_FAIL_ALLOC=1 and a non-zero MOT_FAIL_YSUP, which supplies the weight this rides on. Unvalidated on a real airframe - default off.
+    // @Range: 0 1
+    // @User: Advanced
+    AP_GROUPINFO("FAIL_YTRK", 54, AP_MotorsMulticopter, _fail_yaw_track, 0),
+
     AP_GROUPEND
 };
 

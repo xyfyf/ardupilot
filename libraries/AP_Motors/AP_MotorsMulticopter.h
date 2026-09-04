@@ -190,6 +190,9 @@ protected:
     // 0 = forward mixing, 1 = redistributed pseudoinverse after a failure
     AP_Int8         _fail_alloc_mode;
     AP_Float        _fail_yaw_suppress;
+    // How much of the yaw demand the degraded allocator chases with whatever
+    // freedom is left after throttle, roll and pitch are satisfied exactly.
+    AP_Float        _fail_yaw_track;
 
     // rpm-based stopped-motor detection
     AP_Float        _fail_rpm_min;
