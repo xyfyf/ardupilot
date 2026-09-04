@@ -206,6 +206,7 @@ public:
     AP_Float drift_time;  // period in minutes
     AP_Float engine_mul;  // engine multiplier
     AP_Int32 engine_fail; // mask of engine/motor servo outputs to fail
+    AP_Float engine_tau;  // seconds for a failed motor to decay to engine_mul; 0 steps
 
     // initial offset on GPS lat/lon, used to shift origin
     AP_Float gps_init_lat_ofs;
