@@ -37,26 +37,6 @@ local CFG_ONE_OFS_Y = -0.32
 local CFG_TWO_OFS_Y = -0.7
 local OFS_EPS = 0.02
 
--- 失效保护电压阈值：按实测母线电压推算串数，不再按机型分支硬编码。
---
--- 起因：X6100F 的 GPS2_MB_OFS_Y 为 -0.32，被判为「单电 6S」分支，于是每次
--- 启动都被写入 LOW=22.2 / CRT=21.6；而该机实际跑 12S（日志实测母线
--- 45.64–50.35 V，MOT_BAT_VOLT_MIN 42 / MAX 50.4）。阈值永远够不着，
--- 等于没有电池失效保护；手工改回去也会被本脚本在下次启动覆盖。
---
--- GPS2_MB_OFS_Y 是 GPS 动基线的真实 Y 偏移，不能为了改电池分支去动它。
--- 因此改为按电压判串数：6S（21–25.2 V）与 12S（42–50.4 V）区间不重叠，
--- 取 33 V 为门限即可无歧义区分。
---
--- 对分类正确的机型，本改动不改变结果：
---   6S  → 6 × 3.70 = 22.2，6 × 3.60 = 21.6   与原「单电」分支同值
---   12S → 12 × 3.70 = 44.4，12 × 3.60 = 43.2 与原「双电」分支同值
-local CELL_LOW_V = 3.70   -- 带载。标准 LiPo；半固态/Li-ion 需按实际放电曲线重取
-local CELL_CRT_V = 3.60   -- 带载。高于 MOT_BAT_VOLT_MIN 的每片值（42/12 = 3.50）
-local S_DETECT_V = 33.0   -- 6S 与 12S 之间的判别门限
-local V_MIN_VALID = 16.0  -- 低于此值认为电压源未就绪，不做判定
-local volt_thresholds_done = false
-
 local is_two = false
 -- one: BATT2=UAVCAN, BATT3=ADC
 -- two: BATT2/BATT3=UAVCAN, BATT4=ADC
@@ -89,25 +69,6 @@ end
 
 local function near(a, b)
     return math.abs((a or 0) - b) <= OFS_EPS
-end
-
--- 按实测母线电压设定 LOW/CRT 阈值，只设一次。
--- 在 update 循环里调用而不是 apply_params_*()：启动那一刻电池后端未必就绪，
--- 拿不到有效电压；等到第一次读到可信电压再写，避免按 0 V 误判成 6S。
-local function apply_volt_thresholds(v)
-    if volt_thresholds_done then
-        return
-    end
-    if v == nil or v < V_MIN_VALID then
-        return
-    end
-    local cells = (v > S_DETECT_V) and 12 or 6
-    local low = cells * CELL_LOW_V
-    local crt = cells * CELL_CRT_V
-    set_param("BATT_LOW_VOLT", low)
-    set_param("BATT_CRT_VOLT", crt)
-    volt_thresholds_done = true
-    gcs:send_text(6, string.format("BATT: %dS by %.1fV, LOW=%.1f CRT=%.1f", cells, v, low, crt))
 end
 
 local function detect_mode()
@@ -143,8 +104,8 @@ local function apply_params_one()
 
     changed = set_param("BATT_MONITOR", 29) or changed
     changed = set_param("BATT_CAPACITY", capacity) or changed
-    -- LOW/CRT 阈值改由 apply_volt_thresholds() 按实测母线电压设定，
-    -- 不再按机型分支硬编码 —— 原值 22.2/21.6 在跑 12S 的 X6100F 上永远触发不了
+    changed = set_param("BATT_LOW_VOLT", 22.2) or changed
+    changed = set_param("BATT_CRT_VOLT", 21.6) or changed
     changed = set_param("BATT_LOW_TIMER", 10) or changed
     changed = set_param("BATT_ARM_VOLT", 0) or changed
 
@@ -182,8 +143,8 @@ local function apply_params_two()
 
     changed = set_param("BATT_MONITOR", 29) or changed
     changed = set_param("BATT_CAPACITY", capacity) or changed
-    -- LOW/CRT 阈值改由 apply_volt_thresholds() 按实测母线电压设定；
-    -- 12S 下算得 44.4/43.2，与此处原硬编码同值
+    changed = set_param("BATT_LOW_VOLT", 44.4) or changed
+    changed = set_param("BATT_CRT_VOLT", 43.2) or changed
     changed = set_param("BATT_LOW_TIMER", 10) or changed
     changed = set_param("BATT_ARM_VOLT", 0) or changed
 
@@ -221,10 +182,8 @@ local function update_one()
     local adc_ok = battery:healthy(ADC_IDX)
 
     if can_ok then
-        local v = battery:voltage(UAVCAN_A) or 0
         state:healthy(true)
-        state:voltage(v)
-        apply_volt_thresholds(v)
+        state:voltage(battery:voltage(UAVCAN_A) or 0)
 
         local i = battery:current_amps(UAVCAN_A)
         if i then
@@ -244,10 +203,8 @@ local function update_one()
             last_mode = MODE_UAVCAN
         end
     elseif adc_ok then
-        local v = battery:voltage(ADC_IDX) or 0
         state:healthy(true)
-        state:voltage(v)
-        apply_volt_thresholds(v)
+        state:voltage(battery:voltage(ADC_IDX) or 0)
         local i = battery:current_amps(ADC_IDX)
         if i then
             state:current_amps(i)
@@ -281,7 +238,6 @@ local function update_two()
         local vb = battery:voltage(UAVCAN_B) or 0
         state:healthy(true)
         state:voltage(va + vb)
-        apply_volt_thresholds(va + vb)
 
         local ia = battery:current_amps(UAVCAN_A)
         local ib = battery:current_amps(UAVCAN_B)
@@ -316,10 +272,8 @@ local function update_two()
             last_mode = MODE_UAVCAN
         end
     elseif adc_ok then
-        local v = battery:voltage(ADC_IDX) or 0
         state:healthy(true)
-        state:voltage(v)
-        apply_volt_thresholds(v)
+        state:voltage(battery:voltage(ADC_IDX) or 0)
         if last_mode ~= MODE_ADC then
             gcs:send_text(4, "BATT: fallback ADC")
             last_mode = MODE_ADC
