@@ -148,27 +148,6 @@ local function battery_capacity_remaining_pct(idx)
     return battery:capacity_remaining_pct(idx)
 end
 
-local function clamp_pct(p)
-    return math.max(0, math.min(100, math.floor(p + 0.5)))
-end
-
--- ADC 无电流传感器，按电压粗估 SOC 供 MP SYS_STATUS 显示（避免 0% / Bad Battery）
-local function voltage_to_pct(v, cells)
-    local empty_v = cells * 3.5
-    local full_v = cells * 4.2
-    if v <= empty_v then
-        return 0
-    end
-    if v >= full_v then
-        return 100
-    end
-    return clamp_pct((v - empty_v) / (full_v - empty_v) * 100)
-end
-
-local function apply_adc_soc(state, v, cells)
-    state:capacity_remaining_pct(voltage_to_pct(v, cells))
-end
-
 local function battery_get_temperature(idx)
     if not battery_instance_ok(idx) then
         return nil
@@ -401,7 +380,6 @@ local function update_one()
         if i then
             state:current_amps(i)
         end
-        apply_adc_soc(state, v, 6)
         if last_mode ~= MODE_ADC then
             gcs:send_text(4, "BATT: ADC")
             last_mode = MODE_ADC
@@ -472,7 +450,6 @@ local function update_two()
         local v = battery_voltage(ADC_IDX) or 0
         state:healthy(true)
         state:voltage(v)
-        apply_adc_soc(state, v, 12)
         if last_mode ~= MODE_ADC then
             gcs:send_text(4, "BATT: fallback ADC")
             last_mode = MODE_ADC
