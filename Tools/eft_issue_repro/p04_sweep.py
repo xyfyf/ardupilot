@@ -86,6 +86,9 @@ FIELDS = [
     ("yaw_rate_max_degs", "偏航速率峰 °/s", 1),
     ("yaw_drift_max_deg", "偏航漂移 °", 1),
     ("horiz_drift_max_m_s", "水平漂移 m/s", 3),
+    # 掉高有判据，上冲没有，而降级瞬态恰恰可能造成上冲——只记 alt_min 时
+    # 这一路看不见，而"看不见"和"没发生"在结果里长得一样。
+    ("alt_rise_3s_m", "3s上冲 m", 3),
     ("motor_saturation_frac", "电机饱和", 3),
 ]
 

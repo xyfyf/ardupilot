@@ -2525,6 +2525,19 @@ def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False, detect=F
     if samples:
         res["alt_min_after_fail_m"] = min(s[1] for s in samples)
         res["alt_end_m"] = samples[-1][1]
+        # 掉高有判据，上冲没有——而降级本身就可能造成上冲：混控器把失效电机
+        # 的推力勾销掉、把其余几台顶上去，若那台还在惰走、还在出力，总推力就
+        # 会短暂偏高。只记 alt_min 的话这一路是看不见的，而"看不见"和"没发生"
+        # 在结果里长得一模一样。
+        #
+        # 分两个量：整窗最高值用来发现慢漂；失效后 3 s 内相对失效前的上冲量
+        # 才是降级瞬态本身——3 s 覆盖 SIM_ENGINE_TAU 到 1 s 的三个时间常数。
+        res["alt_max_after_fail_m"] = max(s[1] for s in samples)
+        before = res.get("alt_before_m")
+        if before is not None:
+            early = [s[1] for s in samples if s[0] <= 3.0]
+            if early:
+                res["alt_rise_3s_m"] = max(early) - before
         res["horiz_drift_max_m_s"] = max(s[2] for s in samples)
         # 自失效点起的水平位移：峰值与末值。末值是落地/观察结束时的偏离，
         # 峰值覆盖中途荡出去又荡回来的情形——围栏要按峰值留裕度。
