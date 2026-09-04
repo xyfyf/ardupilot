@@ -34,6 +34,7 @@ local declare_to_mixer = Parameter()
 assert(declare_to_mixer:init("MOT_STOP_DECL"), "could not find param")
 
 local declared = false
+local warned_empty = false
 
 -- read spin min param, we set motors to this PWM to stop them
 local pwm_min
@@ -90,7 +91,6 @@ local function declare_failure(bitmask)
   if declared or declare_to_mixer:get() ~= 1 then
     return
   end
-  declared = true
 
   local first, count = nil, 0
   for i = 1, 12 do
@@ -100,11 +100,41 @@ local function declare_failure(bitmask)
     end
   end
 
-  if count ~= 1 then
+  -- Empty mask: keep waiting, do not latch.  MOT_STOP_BITMASK arrives from the
+  -- ground station and the switch is thrown by hand, so the two can land in
+  -- either order - and the switch getting there first is the ordinary case when
+  -- a parameter write is still in flight.  Latching here would consume the one
+  -- declaration this flight gets on a mask that names nobody, and the real
+  -- injection a moment later would then degrade nothing at all, silently.
+  -- Warn on the rising edge only; this runs at 100 Hz.
+  if count == 0 then
+    if not warned_empty then
+      warned_empty = true
+      gcs:send_text(4, "MotorFail: switch high, MOT_STOP_BITMASK empty - waiting")
+    end
+    return
+  end
+  warned_empty = false
+
+  -- Several motors named: refuse, and latch.  MOT_FAIL_IDX takes one motor, so
+  -- degrading on a guess about which is meant would remove a healthy column -
+  -- the same reason update_failure_detection() warns instead of acting when
+  -- several ESCs read stopped.  Latching is deliberate here: the mask was set
+  -- wrong, and quietly acting on a later correction mid-flight is worse than
+  -- making the operator land and fix it.
+  declared = true
+  if count > 1 then
     gcs:send_text(2, string.format("MotorFail: %d motors in mask, not declaring", count))
     return
   end
 
+  -- param:set writes RAM only.  Saving it would leave the value across a reboot,
+  -- and arming is refused while MOT_FAIL_IDX is non-zero, so a saved value would
+  -- block the next flight.  The degradation itself is deliberately one-way:
+  -- clearing MOT_FAIL_IDX does not bring the motor back, and the vehicle stays
+  -- degraded until rebooted.  That is what makes the arming refusal the right
+  -- interlock - do not "helpfully" zero this on disarm, or the next takeoff
+  -- starts degraded with nothing on screen to say so.
   if param:set("MOT_FAIL_IDX", first) then
     gcs:send_text(4, string.format("MotorFail: declared motor %d to mixer", first))
   else
