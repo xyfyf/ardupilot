@@ -187,8 +187,38 @@ public:
     /// committing to it.
     float required_lean_angle_rad() const { return _required_lean_rad; }
 
-    /// Largest speed that the given radius can be flown at within the budget.
-    /// Use it to pick a speed for a radius that geometry has already fixed.
+    /// Everything the pre-flight feasibility math reads.  Two numbers the
+    /// position controller owns, two the yaw channel does, and the heading
+    /// look-ahead; nothing else about the vehicle enters the decision.
+    ///
+    /// Naming them is not tidying.  Whether a turn is flyable is decidable from
+    /// a mission file and a parameter file, with no vehicle present - but a
+    /// signature that takes an AC_PosControl can only be called from inside a
+    /// flying one, which is why the only caller today is a leg away from the
+    /// turn.  Splitting the five scalars out lets the same arithmetic answer
+    /// the question on the ground and in the air, instead of being written a
+    /// second time somewhere else and drifting from this one.
+    struct Limits {
+        float lean_angle_max_rad;   // pos_control.get_lean_angle_max_rad()
+        float jerk_ne_msss;         // pos_control.get_shaping_jerk_NE_msss()
+
+        // Yaw rate the airframe can actually hold, at the lean angle it will be
+        // working at.  This is a measured capability and not ATC_SLEW_YAW: a
+        // limit parameter says what the vehicle is *allowed* to ask for, which
+        // is not what it *can do*.  Set above what the airframe can deliver and
+        // this check waves through turns it cannot fly.  Lean angle also costs
+        // yaw authority - roll and pitch take the mixer headroom first - so the
+        // hover figure is an upper bound, not the working one.  Zero leaves the
+        // limit unchecked.
+        float yaw_rate_max_rads;
+        float yaw_accel_max_radss;  // zero leaves it unchecked
+        float heading_lead_s;
+    };
+
+    /// The limits this generator is currently working to.  Combines what the
+    /// position controller reports with what set_yaw_limits() was told.
+    Limits limits(const AC_PosControl& pos_control) const;
+
     /// Everything about a turn that can be decided before the vehicle reaches
     /// it: whether the lean angle and the yaw rate it needs fit inside what the
     /// airframe has.  Both depend only on radius, speed and the limits, so they
@@ -205,6 +235,15 @@ public:
     /// On success lead_in_m is how far past the entry point the previous leg
     /// should aim, taken from the transition length the generator will really
     /// use.  Requires set_yaw_limits() to have been called.
+    ///
+    /// Note what lead_in_m is and is not.  It is a *requirement placed on the
+    /// caller*: the previous leg has to be at least this long and must not
+    /// decelerate over it.  Nothing here checks that it is.  A short working
+    /// leg with a wide turn at the end of it gets true back from this function
+    /// and still cannot fly the planned arc, because the run-up it was promised
+    /// does not physically exist.  Whoever lays out the mission has to compare
+    /// lead_in_m against the leg it belongs to; see AC_ArcNav::Limits for why
+    /// that comparison belongs on the ground.
     bool plan_feasible(const AC_PosControl& pos_control, float radius_m,
                        float speed_ms, float& lead_in_m) const;
 
@@ -213,11 +252,23 @@ public:
     float required_spiral_len_m(const AC_PosControl& pos_control,
                                 float radius_m, float speed_ms) const;
 
+    /// Largest speed that the given radius can be flown at within the budget.
+    /// Use it to pick a speed for a radius that geometry has already fixed.
     float max_speed_for_radius_ms(const AC_PosControl& pos_control, float radius_m) const;
 
     /// Smallest radius that the given speed can be flown at within the budget.
     /// Use it to pick a turn radius, e.g. how many swath lines to skip.
     float min_radius_for_speed_m(const AC_PosControl& pos_control, float speed_ms) const;
+
+    /// The same four decisions, off explicit limits rather than a live
+    /// controller.  These are the primitives; the members above are wrappers
+    /// that read the limits off pos_control and call straight through, so a
+    /// ground check and the vehicle cannot answer differently.
+    static bool  plan_feasible(const Limits& lim, float radius_m,
+                               float speed_ms, float& lead_in_m);
+    static float required_spiral_len_m(const Limits& lim, float radius_m, float speed_ms);
+    static float max_speed_for_radius_ms(const Limits& lim, float radius_m);
+    static float min_radius_for_speed_m(const Limits& lim, float speed_ms);
 
     /// Tangential speed the turn was set up to hold.
     float commanded_speed_ms() const { return _speed_ms; }
@@ -335,7 +386,7 @@ public:
 
 private:
     // Lean angle a turn may consume, radians.
-    static float tilt_budget_rad(const AC_PosControl& pos_control);
+    static float tilt_budget_rad(const Limits& lim);
 
     // Curvature at distance s along the path, 1/m, unsigned.  Ramps 0 -> 1/r
     // over the entry spiral, holds 1/r, ramps back to 0 over the exit spiral.
