@@ -180,65 +180,53 @@ python3 Tools/eft_log_analysis/log_control_metrics.py <log.bin> [...] --csv out.
 
 ---
 
-## 7. 分支划分
+## 7. 分支：主干开发
 
-### 分支：四条，按 GNC 分层
+**日常开发全部在 `dev-algo` 上做。** 不按问题开分支，也不按领域开分支。
 
-问题编号与代码边界不是一回事。**问题会骑在边界上，文件不会**——所以归属按**文件**判定，不按问题判定。
+### 为什么不按领域分
 
-| 分支 | 拥有的文件 | 覆盖的问题 |
-| :-- | :-- | :-- |
-| **`dev-algo`** | 主干，以及下面「共享层」列出的全部 | — |
-| **`dev-control`** | `libraries/AC_PosControl*`、`libraries/AC_AttitudeControl*`、`libraries/AP_Motors*`、`ArduCopter/mode_land*`、`crash_check*`、`motors*` | P01、P02、P04、P08 |
-| **`dev-planning`** | `libraries/AC_WPNav*`（含 `AC_ArcNav`）、`libraries/AC_Fence*`、`ArduCopter/mode_auto*`、`mode_circle*` | P06 |
-| **`dev-nav`** | `libraries/AP_Compass*`、`libraries/AP_NavEKF3*`、`libraries/AP_AHRS*` | P03 |
+2026-09-04 试过一版按 GNC 分层的方案（`dev-control` / `dev-planning` / `dev-nav`），推演到实际使用时立刻垮掉：
 
-GNC 三层：**导航**回答"我在哪"，**制导 / planning** 回答"我该去哪、走什么轨迹"，**控制**回答"怎么跟上那条轨迹"。
+**P05 电子围栏要同时改 `AC_Avoid`/`AC_PosControl`（限速器）和 `AC_Fence`（几何、越界动作）。** 分到两条分支上，开发时要来回切分支或 stash；更要命的是**没法验证**——围栏修复必须限速器与几何同时在场才能测，拆开后哪条分支都跑不出正确结果。
 
-> 为什么要有 `dev-nav`：只有 control 和 planning 两条时，P03（磁力计与 IMU 坐标对齐）无处可去——它既不是控制也不是规划，是导航。
+**一个连自己都验证不了的分支划分没有存在价值。** P07 圆周抽动同理，跨 `AC_ArcNav` 与姿态环。
 
-### 骑在边界上的问题怎么判
+### 隔离本身买到的东西也比预期少
 
-P05（电子围栏）与 P07（圆周抽动）都同时涉及两层。**按改动落在哪个文件判，不按症状出现在哪判**：
-
-```
-限速器 / 制动加速度     AC_PosControl   → dev-control
-围栏几何 / 越界动作     AC_Fence        → dev-planning
-入弧判据 / 曲率生成     AC_ArcNav       → dev-planning
-弧内姿态跟踪            AttitudeControl → dev-control
-```
-
-这条规则的好处是**可判定**：`git diff --name-only` 一看就知道该去哪，不必争论"围栏到底算控制还是规划"。
-
-**一次改动若跨了两个文件组，整个放在 `dev-algo` 上做**，不进任何专题分支。这是跨领域问题的唯一特殊处理方式——**专题分支之间永不直接互相合并**，那会把两条线的历史缠在一起。
-
-### 共享层永不在专题分支上停留
-
-这是本节最要紧的一条。统计近 80 个提交，**真正被多个问题编号动过的文件只有测试工具**：
+统计近 80 个提交，**真正被多个问题编号动过的文件只有测试工具**：
 
 ```
 Tools/eft_issue_repro/reproduce.py    P03、P04 与未标号提交都在改
 Tools/eft_issue_repro/regression.py   P02、P04 与未标号提交都在改
 ```
 
-算法代码本身基本是单问题的。**所以分支之间的耦合几乎全部来自共享层，而不是来自算法。**
+算法代码基本是单问题的——**不同问题本来就不太会碰同一个文件，分支提供的隔离大部分是冗余的**。而它的成本是实的：切换、stash、分叉、反向合并（2026-09-04 一天内三次）。
 
-共享层清单，改动一律直接提交到 `dev-algo`：
+### 主干开发在这里为什么安全
+
+前提是本仓库已经形成的习惯：**新能力一律参数门控、默认关闭**。
 
 ```
-Tools/                    复现与回归工具
-libraries/SITL/           仿真模型
-libraries/AP_HAL_SITL/    故障注入等仿真钩子
-AGENTS.md、docs/          文档
+MOT_FAIL_RPM 0    MOT_FAIL_ROVR 0    MOT_FAIL_YTRK 0
+MOT_STOP_DECL 0   SIM_ENGINE_TAU 0   MOT_FAIL_IDX 0
 ```
 
-把共享层压在专题分支上，等于让别的问题用不上它，同时保证将来合并时冲突。
+这些默认值使代码进主干后**行为与合并前逐位相同**，启用与否是参数的事。上游 ArduPilot 也是这么做的——EKF、控制、导航、驱动全在一个 `master` 上，没有任何按子系统划分的长期分支，只有短命的 `pr-*` 分支和发布分支。
 
-### 节奏
+### 什么时候才开分支
 
-- 专题分支**每天从 `dev-algo` 同步一次**，单向；问题收口即合回并删除分支。
-- 新能力一律**参数门控、默认关闭**——`MOT_FAIL_RPM`、`MOT_FAIL_ROVR`、`MOT_FAIL_YTRK`、`MOT_STOP_DECL`、`SIM_ENGINE_TAU` 的默认值都使行为与合并前逐位相同。这是分支能安全早合的前提。
-- 只有**无法参数门控**的改动才需要长期分支：改默认值、重构共享路径、动 EKF 这类关不掉的东西。
+只有**无法参数门控**的改动才需要：
+
+- 改既有参数的默认值
+- 重构共享路径
+- 动 EKF 这类关不掉的东西
+
+**短命**：做完即合即删，不长期存在。命名 `pr-<一句话>`，与上游习惯一致。
+
+### 并发靠目录，不靠分支
+
+见第 9 节。分支解决不了两个 agent 共用一个目录的问题，独立目录才能。
 
 ## 8. 提交信息与问题挂靠
 
