@@ -170,10 +170,12 @@ def set_message_interval(mav, msg_id, hz):
 
 
 def prepare_run(case, baseline, output, overrides=None, variant_name=None, model_overrides=None):
+    global CURRENT_RUN_DIR
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     variant = variant_name or ("baseline" if baseline else "coupled")
     out = os.path.abspath(output or os.path.join(HERE, "runs", "%s-%s-%s" % (stamp, case, variant)))
     os.makedirs(out, exist_ok=True)
+    CURRENT_RUN_DIR = out
     model = json.load(open(MODEL, encoding="utf-8"))
     if baseline:
         model["ground_effect_height"] = 0.0
@@ -337,8 +339,47 @@ def _upload_fence_items(mon, items, label):
     print("  已上传 polyfence %s（飞控已确认 %d 项）" % (label, len(sent)))
 
 
+# 本次运行的输出目录，由 prepare_run() 设置。upload_mission() 用它决定任务转储
+# 落在哪；单独调用而未经 prepare_run 时为 None，此时不转储。
+CURRENT_RUN_DIR = None
+
+
+def dump_mission_wpl(items, path):
+    """把 items 写成 QGC WPL 110。
+
+    存在的理由是判据的独立性：地面校验工具要校验的必须是**飞机实际飞的那条**
+    航线，而不是照同样入参再生成一条。再生成的那条与实际上传的差一个字段，
+    校验就是在校验另一条航线，而且这种偏差不会有任何提示。items 是上传的唯一
+    入口，从这里落盘就没有第二条路径可以分叉。
+    """
+    frame = mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+    with open(path, "w") as fh:
+        fh.write("QGC WPL 110\n")
+        for seq, item in enumerate(items):
+            command, lat, lon, alt = item[:4]
+            if len(item) >= 8:
+                p1, p2, p3, p4 = item[4:8]
+            else:
+                p1 = p2 = p3 = 0.0
+                p4 = (0.0 if command == mavutil.mavlink.MAV_CMD_NAV_SPLINE_WAYPOINT
+                      else float("nan"))
+            # NaN 在 WPL 里没有表示法，写 0；接收端对 param4 的语义与 NaN 一致。
+            p4 = 0.0 if p4 != p4 else p4
+            fh.write("%d\t%d\t%d\t%d\t%.8f\t%.8f\t%.8f\t%.8f\t"
+                     "%.8f\t%.8f\t%.6f\t1\n"
+                     % (seq, 1 if seq == 0 else 0, frame, command,
+                        p1, p2, p3, p4, lat, lon, alt))
+
+
 def upload_mission(mon, items):
     mav = mon.mav
+    # 上传前落盘，而不是上传后：上传失败时那份任务同样值得看。
+    # 默认落进本次运行目录，与 model.json / algo.parm / logs 并排——判定这条航线
+    # 用的参数、模型、日志、任务本身，事后要能在同一个目录里对齐。
+    dump_dir = os.environ.get("EFT_MISSION_DUMP_DIR") or CURRENT_RUN_DIR
+    if dump_dir:
+        os.makedirs(dump_dir, exist_ok=True)
+        dump_mission_wpl(items, os.path.join(dump_dir, "mission.waypoints"))
     mav.mav.mission_clear_all_send(
         mav.target_system, mav.target_component,
         mavutil.mavlink.MAV_MISSION_TYPE_MISSION)
