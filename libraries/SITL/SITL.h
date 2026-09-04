@@ -206,6 +206,7 @@ public:
     AP_Float drift_time;  // period in minutes
     AP_Float engine_mul;  // engine multiplier
     AP_Int32 engine_fail; // mask of engine/motor servo outputs to fail
+    AP_Float engine_tau;  // seconds for a failed motor to decay to engine_mul; 0 steps
     AP_Int32 shed_mask;   // mask of motors that have thrown their propeller
     AP_Float shed_ratio;  // rpm multiplier for a motor in shed_mask
 

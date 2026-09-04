@@ -254,6 +254,14 @@ const AP_Param::GroupInfo SIM::var_info[] = {
     // @Bitmask: 0: Servo 1, 1: Servo 2, 2: Servo 3, 3: Servo 4, 4: Servo 5, 5: Servo 6, 6: Servo 7, 7: Servo 8, 8: Servo 9, 9: Servo 10, 10: Servo 11, 11: Servo 12, 12: Servo 13, 13: Servo 14, 14: Servo 15, 15: Servo 16, 16: Servo 17, 17: Servo 18, 18: Servo 19, 19: Servo 20, 20: Servo 21, 21: Servo 22, 22: Servo 23, 23: Servo 24, 24: Servo 25, 25: Servo 26, 26: Servo 27, 27: Servo 28, 28: Servo 29, 29: Servo 30, 30: Servo 31, 31: Servo 32
     AP_GROUPINFO("ENGINE_FAIL",   58, SIM,  engine_fail,  0),
 
+    // @Param: ENGINE_TAU
+    // @DisplayName: Engine failure time constant
+    // @Description: Seconds for a motor in SIM_ENGINE_FAIL to reach SIM_ENGINE_MUL, as first-order decay rather than a step. 0 steps, which is the historical behaviour and what every existing result was measured with. The frame model has no rotor inertia - rpm there is an algebraic function of the command - so without this a failed motor loses its thrust within the command slew limit, a couple of milliseconds, and the interval that a real rotor spends still turning after the drive is gone simply does not exist in the simulation. That interval is where anything acting on the failure gets its timing wrong: the mixer writes the motor off and pushes the survivors up while the motor is still lifting. Size it from a real spin-down, and note it depends on the ESC as much as the rotor - one that brakes on stop takes a fraction of the time one that lets the prop windmill does.
+    // @Units: s
+    // @Range: 0 5
+    // @User: Advanced
+    AP_GROUPINFO("ENGINE_TAU",    57, SIM,  engine_tau,  0),
+
     // @Param: SHED_MASK
     // @DisplayName: Motors that have thrown their propeller
     // @Description: Mask of motors to simulate as having lost the propeller. Unlike SIM_ENGINE_FAIL, which scales the servo output and so takes the motor's speed down with its thrust, this leaves the command alone and removes only what the prop was doing: thrust and torque go to zero while the motor keeps turning, faster than before, by SIM_SHED_ROVR. That is the case a stopped-motor detector cannot see, because it is looking for the opposite sign.

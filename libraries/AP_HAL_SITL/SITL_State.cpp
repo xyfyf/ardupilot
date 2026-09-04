@@ -356,15 +356,53 @@ void SITL_State::_simulator_servos(struct sitl_input &input)
 
     const float engine_mul = _sitl->engine_mul.get();
     const uint32_t engine_fail = _sitl->engine_fail.get();
+    const float engine_tau = _sitl->engine_tau.get();
+
+    // SIM_ENGINE_TAU spreads the failure out in time instead of stepping to it.
+    //
+    // Without it a failed motor loses all its thrust in one frame, and the frame
+    // model has no rotor inertia to slow that down - rpm there is an algebraic
+    // function of the command, so it follows within the command slew limit, a
+    // couple of milliseconds.  A real rotor takes far longer: once the drive is
+    // gone the only thing decelerating it is aerodynamic drag, unless the ESC
+    // brakes.  That gap matters for anything that acts on the failure, because
+    // in the air the mixer degrades while the motor is still producing thrust,
+    // and it is exactly the interval a stepped model cannot show.
+    //
+    // Modelled as first-order decay of the effective command toward the failed
+    // value, which is the tractable shape - a windmilling rotor's true decay is
+    // not a single exponential, but the thing being sized here is how long the
+    // survivors spend compensating for thrust the mixer has already written off.
+    //
+    // Default 0 keeps the old stepped behaviour, so existing results stand.
+    static uint64_t last_fail_us;
+    static float fail_frac[ARRAY_SIZE(input.servos)];
+    const uint64_t now_us = AP_HAL::micros64();
+    float fail_dt = 0.0f;
+    if (last_fail_us != 0 && now_us > last_fail_us) {
+        fail_dt = (now_us - last_fail_us) * 1.0e-6f;
+    }
+    last_fail_us = now_us;
 
     // apply engine multiplier to motor defined by the SIM_ENGINE_FAIL parameter
     for (uint8_t i=0; i<ARRAY_SIZE(input.servos); i++) {
         if (engine_fail & (1<<i)) {
-            if (_vehicle != Rover) {
-                input.servos[i] = ((input.servos[i]-1000) * engine_mul) + 1000;
+            // frac walks 0 -> 1 as the failure takes hold.  Clearing the mask
+            // resets it, so a test that puts the motor back and fails it again
+            // gets a fresh decay rather than resuming a half-finished one.
+            if (is_positive(engine_tau) && fail_dt > 0.0f) {
+                fail_frac[i] += (1.0f - fail_frac[i]) * (fail_dt / MAX(engine_tau, fail_dt));
             } else {
-                input.servos[i] = static_cast<uint16_t>(((input.servos[i] - 1500) * engine_mul) + 1500);
+                fail_frac[i] = 1.0f;
             }
+            const float mul = 1.0f + (engine_mul - 1.0f) * constrain_float(fail_frac[i], 0.0f, 1.0f);
+            if (_vehicle != Rover) {
+                input.servos[i] = ((input.servos[i]-1000) * mul) + 1000;
+            } else {
+                input.servos[i] = static_cast<uint16_t>(((input.servos[i] - 1500) * mul) + 1500);
+            }
+        } else {
+            fail_frac[i] = 0.0f;
         }
     }
 
