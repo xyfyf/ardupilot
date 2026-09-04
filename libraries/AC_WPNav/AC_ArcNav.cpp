@@ -23,27 +23,48 @@ static float smoothstep_integral(float u)
     return u3 - 0.5f * u3 * u;
 }
 
-float AC_ArcNav::tilt_budget_rad(const AC_PosControl& pos_control)
+AC_ArcNav::Limits AC_ArcNav::limits(const AC_PosControl& pos_control) const
 {
-    return pos_control.get_lean_angle_max_rad() * constrain_float(AC_ARCNAV_TILT_FRACTION, 0.1f, 1.0f);
+    Limits lim {};
+    lim.lean_angle_max_rad  = pos_control.get_lean_angle_max_rad();
+    lim.jerk_ne_msss        = pos_control.get_shaping_jerk_NE_msss();
+    lim.yaw_rate_max_rads   = _yaw_rate_max_rads;
+    lim.yaw_accel_max_radss = _yaw_accel_max_radss;
+    lim.heading_lead_s      = _heading_lead_s;
+    return lim;
 }
 
-float AC_ArcNav::max_speed_for_radius_ms(const AC_PosControl& pos_control, float radius_m) const
+float AC_ArcNav::tilt_budget_rad(const Limits& lim)
+{
+    return lim.lean_angle_max_rad * constrain_float(AC_ARCNAV_TILT_FRACTION, 0.1f, 1.0f);
+}
+
+float AC_ArcNav::max_speed_for_radius_ms(const Limits& lim, float radius_m)
 {
     if (!is_positive(radius_m)) {
         return 0.0f;
     }
     // a = g*tan(tilt), and holding a circle needs a = v^2 / r
-    return safe_sqrt(GRAVITY_MSS * tanf(tilt_budget_rad(pos_control)) * radius_m);
+    return safe_sqrt(GRAVITY_MSS * tanf(tilt_budget_rad(lim)) * radius_m);
 }
 
-float AC_ArcNav::min_radius_for_speed_m(const AC_PosControl& pos_control, float speed_ms) const
+float AC_ArcNav::min_radius_for_speed_m(const Limits& lim, float speed_ms)
 {
-    const float a_max = GRAVITY_MSS * tanf(tilt_budget_rad(pos_control));
+    const float a_max = GRAVITY_MSS * tanf(tilt_budget_rad(lim));
     if (!is_positive(a_max)) {
         return 0.0f;
     }
     return sq(speed_ms) / a_max;
+}
+
+float AC_ArcNav::max_speed_for_radius_ms(const AC_PosControl& pos_control, float radius_m) const
+{
+    return max_speed_for_radius_ms(limits(pos_control), radius_m);
+}
+
+float AC_ArcNav::min_radius_for_speed_m(const AC_PosControl& pos_control, float speed_ms) const
+{
+    return min_radius_for_speed_m(limits(pos_control), speed_ms);
 }
 
 // Curvature at distance s along the path, 1/m and unsigned.  This is the whole
@@ -183,38 +204,51 @@ AC_ArcNav::UTurnPlan AC_ArcNav::plan_from_yaw_capability(float speed_ms, float s
 bool AC_ArcNav::plan_feasible(const AC_PosControl& pos_control, float radius_m,
                               float speed_ms, float& lead_in_m) const
 {
+    return plan_feasible(limits(pos_control), radius_m, speed_ms, lead_in_m);
+}
+
+bool AC_ArcNav::plan_feasible(const Limits& lim, float radius_m,
+                              float speed_ms, float& lead_in_m)
+{
     lead_in_m = 0.0f;
     if (!is_positive(radius_m) || !is_positive(speed_ms)) {
         return false;
     }
     // Lean.  The constant-curvature part is the tightest the path gets, so
     // radius_m is what has to be checked - same test set_arc() applies.
-    if (speed_ms > max_speed_for_radius_ms(pos_control, radius_m)) {
+    if (speed_ms > max_speed_for_radius_ms(lim, radius_m)) {
         return false;
     }
     // Yaw rate.  Binding the nose to the tangent costs v/r for the whole arc,
     // and on a multirotor yaw is the weakest axis, so this bites first on a
     // tight turn.  Half the budget is left as headroom for the entry transient.
-    if (is_positive(_yaw_rate_max_rads) &&
-        speed_ms / radius_m > _yaw_rate_max_rads * AC_ARCNAV_YAW_RATE_FRACTION) {
+    if (is_positive(lim.yaw_rate_max_rads) &&
+        speed_ms / radius_m > lim.yaw_rate_max_rads * AC_ARCNAV_YAW_RATE_FRACTION) {
         return false;
     }
     // Aim one transition past the entry point, plus the look-ahead the heading
     // uses.  That is the distance over which the path is still straightening
     // out, so it is exactly the distance the previous leg must not decelerate
-    // over.
-    lead_in_m = required_spiral_len_m(pos_control, radius_m, speed_ms)
-                + speed_ms * _heading_lead_s;
+    // over.  Whether the previous leg is actually that long is not checked
+    // here and cannot be - this function is handed one turn, not the mission.
+    lead_in_m = required_spiral_len_m(lim, radius_m, speed_ms)
+                + speed_ms * lim.heading_lead_s;
     return true;
 }
 
 float AC_ArcNav::required_spiral_len_m(const AC_PosControl& pos_control,
                                        float radius_m, float speed_ms) const
 {
+    return required_spiral_len_m(limits(pos_control), radius_m, speed_ms);
+}
+
+float AC_ArcNav::required_spiral_len_m(const Limits& lim,
+                                       float radius_m, float speed_ms)
+{
     if (!is_positive(radius_m) || !is_positive(speed_ms)) {
         return 0.0f;
     }
-    const float jerk = pos_control.get_shaping_jerk_NE_msss();
+    const float jerk = lim.jerk_ne_msss;
     float spiral_len_m = 0.0f;
     if (is_positive(jerk)) {
         spiral_len_m = (sq(speed_ms) * speed_ms) / (radius_m * jerk);
@@ -225,13 +259,13 @@ float AC_ArcNav::required_spiral_len_m(const AC_PosControl& pos_control,
     // measured in SITL, exactly what happened with a 1.0 m look-ahead over a
     // 0.53 m spiral.  Sizing the ramp to cover the look-ahead keeps the yaw
     // command a ramp, which is the whole point of the transition.
-    spiral_len_m = MAX(spiral_len_m, speed_ms * _heading_lead_s);
+    spiral_len_m = MAX(spiral_len_m, speed_ms * lim.heading_lead_s);
     // With the nose on the tangent, yaw accelerates at v^2/(r*L_s) through a
     // spiral.  A short spiral therefore asks for a yaw acceleration the vehicle
     // may not have; lengthening it is the only way to lower that demand without
     // slowing down or opening the radius, both of which are ruled out here -
     // the speed is fixed by the spray rate and the radius by the swath.
-    if (is_positive(_yaw_accel_max_radss)) {
+    if (is_positive(lim.yaw_accel_max_radss)) {
         // The commanded heading rate is v*curvature evaluated at the look-ahead
         // point, so its rate of change carries two factors:
         //
@@ -243,8 +277,8 @@ float AC_ArcNav::required_spiral_len_m(const AC_PosControl& pos_control,
         // have followed into one it cannot.  Requiring the peak to fit gives a
         // quadratic in L_s, whose positive root is the shortest transition that
         // keeps the commanded yaw acceleration inside what the vehicle has.
-        const float a = AC_ARCNAV_SMOOTHSTEP_PEAK * sq(speed_ms) / (radius_m * _yaw_accel_max_radss);
-        const float lead_m = speed_ms * _heading_lead_s;
+        const float a = AC_ARCNAV_SMOOTHSTEP_PEAK * sq(speed_ms) / (radius_m * lim.yaw_accel_max_radss);
+        const float lead_m = speed_ms * lim.heading_lead_s;
         const float min_len_m = 0.5f * (a + safe_sqrt(sq(a) + 4.0f * a * lead_m));
         spiral_len_m = MAX(spiral_len_m, min_len_m);
     }
@@ -265,13 +299,17 @@ bool AC_ArcNav::set_arc(const AC_PosControl& pos_control,
         return false;
     }
 
+    // Read the limits once, so the acceptance test here and the pre-flight test
+    // in plan_feasible() are demonstrably working from the same five numbers.
+    const Limits lim = limits(pos_control);
+
     // Refuse a turn the vehicle cannot hold speed on.  Accepting it would just
     // move the failure into flight, where it shows up as the speed loss this
     // generator exists to remove.  The tightest part of the path is the
     // constant-curvature arc, so radius_m is what has to be checked.
     const float accel_needed = sq(speed_ms) / radius_m;
     _required_lean_rad = atanf(accel_needed / GRAVITY_MSS);
-    if (_required_lean_rad > tilt_budget_rad(pos_control)) {
+    if (_required_lean_rad > tilt_budget_rad(lim)) {
         return false;
     }
 
@@ -281,8 +319,8 @@ bool AC_ArcNav::set_arc(const AC_PosControl& pos_control,
     // bites long before the lean angle does on a tight turn.  Leave half the
     // available rate as headroom: a turn that asks for all of it has nothing
     // left to recover the entry transient with.
-    if (is_positive(_yaw_rate_max_rads) &&
-        speed_ms / radius_m > _yaw_rate_max_rads * AC_ARCNAV_YAW_RATE_FRACTION) {
+    if (is_positive(lim.yaw_rate_max_rads) &&
+        speed_ms / radius_m > lim.yaw_rate_max_rads * AC_ARCNAV_YAW_RATE_FRACTION) {
         return false;
     }
 
@@ -335,7 +373,7 @@ bool AC_ArcNav::set_arc(const AC_PosControl& pos_control,
     // v^2/r at that jerk takes v^2/(r*jerk) seconds, hence v^3/(r*jerk) metres.
     // Same sizing the planner used to place the lead-in point; see
     // required_spiral_len_m().
-    float spiral_len_m = required_spiral_len_m(pos_control, radius_m, speed_ms);
+    float spiral_len_m = required_spiral_len_m(lim, radius_m, speed_ms);
 
     const float nominal_len_m = radius_m * _sweep_rad;
     spiral_len_m = MIN(spiral_len_m, nominal_len_m);
