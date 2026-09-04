@@ -289,14 +289,15 @@ dev-algo    集成主干，试飞固件从这里打 tag（v3.0.xx）
 ### 7.8 分支命名
 
 ```
-<类别>/<问题编号>-<在做什么>
+<类别>/<问题编号>-<基线表的文件简称>
 
-fix/P05-fence-brake        修已知问题
-feat/P04-yaw-track         新增能力
-feat/esc-current-sum       不属于任何问题的新能力（少见），不带编号
+feat/P04-motor-failure     P04 = motor-prop-failure
+feat/P06-smooth-route      P06 = smooth-route
+fix/P05-geofence           P05 = geofence
+feat/esc-current-sum       不属于任何问题时不带编号
 ```
 
-与业界通行式样一致——类别前缀 + 工单号 + 关键词，`/` 分类别、`-` 分号与描述。忌只用数字、忌结尾带 `-`。
+**命的是问题，不是这一块工作。** 简称取自基线文件《当前问题、标准命名与目标总表》的「文件简称」列，与 `regression.py` 的 `case` 名同源。后续在同一个问题下做别的部分（P06 再做避障或机上 pre-arm）时**分支名不必改**。
 
 #### 类别怎么选
 
@@ -309,38 +310,24 @@ feat/esc-current-sum       不属于任何问题的新能力（少见），不�
   否 → feat    以前做不到 → 现在能做
 ```
 
-**`fix` 的起点是一个现象，`feat` 的起点是一个需求。**
+**`fix` 的起点是一个现象，`feat` 的起点是一个需求。** 以 2026-09-04 的实际提交为例：修掉桨检测的未初始化数组是 `fix`；`MOT_FAIL_YTRK`、`MOT_STOP_DECL` 是 `feat`；`SIM_ENGINE_TAU`、`p04_sweep.py`、`alt_rise_3s_m` 是 `infra`；601 个文件恢复可执行位是 `chore`。
 
-以 2026-09-04 这一轮的实际提交为例：
+按 7.4，`infra/docs/chore` 直接进主干不开分支，**所以分支实际只有 `fix/` 与 `feat/` 两个类别**。
 
-| 改动 | 类别 |
-| :-- | :-- |
-| 修掉桨检测的未初始化数组（垃圾值可能凭空摘掉一台好电机） | `fix` |
-| `MOT_FAIL_YTRK` 偏航跟踪（以前无条件放弃偏航） | `feat` |
-| `MOT_STOP_DECL` 前馈申报（以前没有这条路径） | `feat` |
-| 前馈申报在掩码为空时误锁 | `fix` |
-| `SIM_ENGINE_TAU` 惰走仿真（只动 SITL，飞控行为不变） | `infra` |
-| `p04_sweep.py`、`alt_rise_3s_m` 指标 | `infra` |
-| 601 个文件恢复可执行位 | `chore` |
-| `AGENTS.md` 约定 | `docs` |
+#### 分支变成筐的真正原因是不合，不是命名
 
-#### 分支实际只有两个类别
+`dev-p04` 曾积到 25 个独有提交，装进了 P06 的三点定圆、两条电池提交和 14 条共享层改动。**病因是四十多小时没有合回主干，不是名字里有 P04**——同样按问题命名的 `feat/P06-smooth-route` 没有这个问题，因为它的内容在持续排空。
 
-按 7.4，共享层改动直接进 `dev-algo` 不开分支，所以：
+因此约束落在 7.5 的**合并节奏**上：
 
 ```
-infra/ docs/ chore/   一次提交就完整，直接进主干 —— 只出现在提交信息里
-fix/   feat/          才需要分支
+每天    从 dev-algo 单向同步一次
+每完成一块能独立验证的改动就合回主干，不等整个问题做完
 ```
 
-#### 两半都要有
+分支可以跟着问题活很久，**但它上面的内容不能积压**。判断标准不是分支存在多久，而是**主干与分支的差异有多大**——`git diff --stat dev-algo..<branch>` 长期超过几百行就该拆着合了。
 
-- **问题编号**——`git ls-remote --heads origin` 一眼看出谁在做哪个问题，且与提交信息的 `P04:`、`regression.py` 的 `pid="P04"` 三处一致；
-- **在做什么**——界定范围。`dev-p04` 之所以变成筐，是因为名字**只有**编号，任何 P04 沾边的东西都能往里塞（最终装进了 P06 的三点定圆与两条电池提交）。
-
-> **为什么不用 `pr-`**：`pr` = pull request，是上游 ArduPilot 的习惯（子模块里可见 `pr-canfd-lencheck`、`pr-cxx-wrappers`）。但本仓库近 200 个提交里 `Merge pull request` **零次**，合并全是本地 `git merge`——用它会暗示一个不存在的流程。
-
-> **防止分支变成筐的不是名字，是 7.5 的三天寿命规则。** 名字只界定意图，寿命才是强制力。
+> **前缀为什么不用 `pr-`**：`pr` = pull request，是上游 ArduPilot 的习惯（子模块里可见 `pr-canfd-lencheck`）。本仓库近 200 个提交里 `Merge pull request` **零次**，合并全是本地 `git merge`——用它会暗示一个不存在的流程。
 
 ## 8. 提交信息与问题挂靠
 
