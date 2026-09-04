@@ -33,6 +33,31 @@
 
 离散度用**极差占均值的比例**（`(max-min)/|mean|`），不用标准差：三轮的标准差
 自由度只有 2，极差更直白，且我们关心的正是「最坏能差多少」。
+
+差值型指标要单独看
+------------------
+
+实测下来，波动大小与场景无关，与**指标怎么算出来的**有关：
+
+    差值 / 误差型    前四大波动全在这一组（4.65% / 4.38% / 2.99% / 1.71%）
+    原始极值 / 计数型  全部 < 1%
+
+机制是**两个几乎相等的数相减，再除以一个与差值同量级的量**。例如
+`掉速% = 1 − min/目标`：底层 `min` 只变 0.1%（3.000 → 2.997），相减后剩下的量
+只有 0.003，读数就从 0.05% 摆到 0.15%——三倍。**不是噪声大，是这个指标把噪声
+放大了三个数量级。**
+
+放大发生在「差值再除以一个接近它的量」这一步，不在「取极值」这一步：
+`arc_hdg_err_max_deg` 是极值，但底层就是误差量本身、没有再被小分母除一次，
+所以它只波动 0.05%。
+
+**后果：差值型指标的相对波动不能直接拿来算安全系数。** 用绝对量才有意义——
+`弧内掉速` 门槛 10% 对应 `min = 2.7 m/s`，实测 `min` 在 2.994–3.000 之间摆动
+0.006 m/s，绝对余量 0.3 m/s 对 0.006 m/s 是 **50 倍**；而按相对量算只有 17 倍。
+本工具因此分组输出，并对差值型标注「相对波动会被放大，判据余量请按绝对量核」。
+
+分组靠指标名匹配，是**启发式**：认不出的一律归入原始量组，宁可漏标也不误标
+——误标会让一个真有问题的指标被当成「只是分母小」而放过。
 """
 import argparse
 import glob
@@ -43,6 +68,17 @@ import sys
 from collections import OrderedDict
 
 NUM_RE = re.compile(r'^\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)')
+
+
+# 差值 / 误差型指标的名字特征。命中即认为「两个几乎相等的数相减」，其相对波动
+# 被放大、不可直接用于算安全系数。宁可漏标不可误标，见 docstring。
+DIFF_PAT = ('掉速', '误差', '余量', '越界', '跨度', '偏差', '漂移', '冲入',
+            'dip', 'err', 'margin', 'span', 'overshoot', 'drift', 'breach')
+
+
+def is_diff_metric(name):
+    low = name.lower()
+    return any(p in name or p in low for p in DIFF_PAT)
 
 
 def parse_value(s):
@@ -130,16 +166,26 @@ def main(argv=None):
         stats.append((frac, k, vals, mean, lo, hi, spread))
 
     stats.sort(reverse=True)
-    print('%-6s %-24s %-18s %9s %9s %9s' % ('问题', '条目', '指标', '均值', '极差', '极差/均值'))
-    print('-' * 78)
-    for frac, k, vals, mean, lo, hi, spread in stats:
-        flag = ''
-        if frac == float('inf'):
-            flag = '  ← 均值为零而有波动'
-        elif frac >= args.warn_frac:
-            flag = '  ← 波动 %.1f%%' % (frac * 100)
-        print('%-6s %-24s %-18s %9.4f %9.4f %8.2f%%%s'
-              % (k[0], k[1][:24], k[2][:18], mean, spread, frac * 100, flag))
+    groups = [('差值 / 误差型（相对波动被放大，余量请按绝对量核）',
+               [x for x in stats if is_diff_metric(x[1][2])]),
+              ('原始极值 / 计数型（相对波动可直接用）',
+               [x for x in stats if not is_diff_metric(x[1][2])])]
+    for title, rows in groups:
+        if not rows:
+            continue
+        print(title)
+        print('%-6s %-24s %-18s %9s %9s %9s'
+              % ('问题', '条目', '指标', '均值', '极差', '极差/均值'))
+        print('-' * 78)
+        for frac, k, vals, mean, lo, hi, spread in rows:
+            flag = ''
+            if frac == float('inf'):
+                flag = '  ← 均值为零而有波动'
+            elif frac >= args.warn_frac:
+                flag = '  ← 波动 %.1f%%' % (frac * 100)
+            print('%-6s %-24s %-18s %9.4f %9.4f %8.2f%%%s'
+                  % (k[0], k[1][:24], k[2][:18], mean, spread, frac * 100, flag))
+        print()
 
     if non_numeric:
         print()
@@ -161,6 +207,10 @@ def main(argv=None):
     print('怎么用这张表：把某条判据的「实测距门槛的余量」除以该指标这里的波动，')
     print('得到的倍数就是它的安全系数。倍数接近 1 的判据随时会被噪声掀翻，')
     print('而它通过与否与代码对错无关。')
+    print()
+    print('差值型那一组要用**绝对量**算，不能用上表的百分比：分子分母同时被放大，')
+    print('相对量会低估安全系数。例：弧内掉速门槛 10% 对应 min=2.7 m/s，实测 min')
+    print('摆动 0.006 m/s，绝对余量 0.3 / 0.006 = 50 倍；按相对量只算出 17 倍。')
 
     if args.csv:
         import csv
