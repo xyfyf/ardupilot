@@ -1651,6 +1651,10 @@ def run_uturn(mon, swath=SWATH_M, style="square", leg=SPRAY_LEG_M):
     prepare_for_arm(mon)
     mon.mav.arducopter_arm()
     wait_armed(mon)
+    # 饱和阈值回读，不写字面量——与 run_circle / run_loiter_circle 里那两处同一类。
+    # 参数一改就静默量错：阈值仍按 15° 判，而实际上限已经不是 15°。
+    angle_max_raw = get_param(mon, "ANGLE_MAX")
+    angle_max_deg = (angle_max_raw / 100.0) if angle_max_raw else 15.0
     # 作业段 1 = seq2（飞向 wps[0]），作业段 2 = 最后一个航点段
     spray1_seq = 2
     spray2_seq = 2 + len(wps) - 1
@@ -1679,7 +1683,7 @@ def run_uturn(mon, swath=SWATH_M, style="square", leg=SPRAY_LEG_M):
         by.setdefault(seq, []).append((t, x, y, sp, e, tilt))
 
     res = {"swath_m": swath, "uturn_radius_m": swath / 2.0, "style": style,
-           "spray_leg_m": leg,
+           "spray_leg_m": leg, "lean_limit_deg": angle_max_deg,
            "waypoints_ne_m": [(n, e) for n, e, _ in wps]}
 
     # U 转段 = 两个作业段之间的全部航段
@@ -1708,7 +1712,8 @@ def run_uturn(mon, swath=SWATH_M, style="square", leg=SPRAY_LEG_M):
             "speed_min_m_s": min(sps),
             "speed_mean_m_s": sum(sps) / len(sps),
             "tilt_max_deg": max(tilts) if tilts else None,
-            "tilt_saturated_frac": (sum(t >= 14.7 for t in tilts) / len(tilts)) if tilts else None,
+            "tilt_saturated_frac": (sum(t >= angle_max_deg - 0.3 for t in tilts)
+                                    / len(tilts)) if tilts else None,
             "att_err_mean_deg": (sum(errs) / len(errs)) if errs else None,
             "att_err_max_deg": max(errs) if errs else None,
             "flown_radius_min_m": min(radii) if radii else None,
