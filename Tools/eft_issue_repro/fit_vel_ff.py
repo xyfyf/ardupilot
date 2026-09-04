@@ -36,7 +36,13 @@ VFF 消息（若存在）
 拟合出的增益飞第二架次，再跑一次本工具，看 I 项是否已被前馈接管（斜率应
 显著趋近于零）。只用同一架次拟合并验收是不成立的。
 
-用真机日志时注意：ATT/PID 至少要 10 Hz（bit12），速度取自 XKF1/NKF1。
+速度来源按 VFF > XKF1/NKF1 > PSCN/PSCE 的顺序取。真机现场用的
+LOG_BITMASK=145407 并不写 XKF1，所以第三条不是备份而是常态路径：PSCN/PSCE
+的 VN/VE 是位置控制器读到的同一个 EKF 输出，用于本拟合等价，但只在位置
+控制器运行的模式下记录（LOITER/AUTO/GUIDED 有，STABILIZE/ALT_HOLD 没有），
+且不带 lane 信息，切换保护失效。
+
+用真机日志时注意：ATT/PID 至少要 10 Hz（bit12）。
 """
 
 import argparse
@@ -111,11 +117,12 @@ def fit(xs, ys):
 def collect(path):
     m = DFReader.DFReader_binary(path)
     att, pidr, pidp, vff = [], [], [], []
+    psc_n, psc_e = [], []
     vel_by_core = {}
     primary = []
     while True:
         msg = m.recv_match(type=["ATT", "XKF1", "NKF1", "XKF4", "NKF4",
-                                 "PIDR", "PIDP", "VFF"])
+                                 "PIDR", "PIDP", "VFF", "PSCN", "PSCE"])
         if msg is None:
             break
         t = msg.TimeUS * 1e-6
@@ -136,7 +143,11 @@ def collect(path):
             pidp.append((t, msg.I))
         elif mt == "VFF":
             vff.append((t, msg.FF, msg.FR, msg.Scl))
-    return att, vel_by_core, primary, pidr, pidp, vff
+        elif mt == "PSCN":
+            psc_n.append((t, msg.VN))
+        elif mt == "PSCE":
+            psc_e.append((t, msg.VE))
+    return att, vel_by_core, primary, pidr, pidp, vff, psc_n, psc_e
 
 
 def body_vel_from_ekf(t, att, vel_series_by_core, primary, cores_seen):
@@ -147,7 +158,7 @@ def body_vel_from_ekf(t, att, vel_series_by_core, primary, cores_seen):
             # 早于第一条 XKF4 的样本：沿用最早记录的 primary，而不是丢掉
             core = primary[0][1]
     else:
-        core = 0 if 0 in cores_seen else min(cores_seen)
+        core = 0 if (not cores_seen or 0 in cores_seen) else min(cores_seen)
     if core not in vel_series_by_core:
         return None
     vn_s, ve_s = vel_series_by_core[core]
@@ -162,7 +173,7 @@ def body_vel_from_ekf(t, att, vel_series_by_core, primary, cores_seen):
 
 
 def analyse(path):
-    att, vel_by_core, primary, pidr, pidp, vff = collect(path)
+    att, vel_by_core, primary, pidr, pidp, vff, psc_n, psc_e = collect(path)
     if not pidr and not pidp:
         return None, "缺少 PIDR/PIDP（LOG_BITMASK 需开 bit12）"
 
@@ -177,12 +188,27 @@ def analyse(path):
         vff_fr = [(t, fr) for t, _, fr, _ in vff]
         vff_scl = [(t, s) for t, _, _, s in vff]
     else:
-        if not att or not vel_by_core:
-            return None, "缺少 ATT 或 XKF1/NKF1，且日志中无 VFF，无法换算机体速度"
-        info["source"] = "XKF1/NKF1 primary lane" if primary else "XKF1/NKF1 (无 PI 字段，退回单 lane)"
-        prepared = {c: ([(t, a) for t, a, _ in rows], [(t, b) for t, _, b in rows])
-                    for c, rows in vel_by_core.items()}
-        switch_times = [t for t, _ in primary[1:]]
+        if not att:
+            return None, "缺少 ATT，无法把 NED 速度转到机体系"
+        if vel_by_core:
+            info["source"] = ("XKF1/NKF1 primary lane" if primary
+                              else "XKF1/NKF1 (无 PI 字段，退回单 lane)")
+            prepared = {c: ([(t, a) for t, a, _ in rows], [(t, b) for t, _, b in rows])
+                        for c, rows in vel_by_core.items()}
+            switch_times = [t for t, _ in primary[1:]]
+        elif len(psc_n) >= 20 and len(psc_e) >= 20:
+            # 现场默认的 LOG_BITMASK 不写 XKF1——EKF 那组消息要另外开位。
+            # PSCN/PSCE 的 VN/VE 是位置控制器读到的 NED 实测速度，同一个
+            # EKF 的输出，只是走了控制器这条路记下来，用于本拟合等价。
+            # 代价有二：只有位置控制器在跑的模式才写（LOITER/AUTO/GUIDED 有，
+            # STABILIZE/ALT_HOLD 没有），且拿不到 lane 信息，切换保护失效。
+            info["source"] = "PSCN/PSCE（位置控制器实测速度，无 lane 信息）"
+            info["cores"] = []
+            prepared = {0: (psc_n, psc_e)}
+            switch_times = []
+        else:
+            return None, ("缺少 XKF1/NKF1 与 PSCN/PSCE，且日志中无 VFF，"
+                          "无法换算机体速度")
 
     samples = {"roll": ([], []), "pitch": ([], [])}
     for axis, pid in (("roll", pidr), ("pitch", pidp)):
@@ -233,7 +259,10 @@ def main(argv=None):
         out, info = res
 
         print("  速度来源: %s" % info["source"])
-        if info["source"] != "VFF":
+        if info["source"].startswith("PSCN"):
+            print("            日志没有 XKF1/NKF1，退回位置控制器实测速度；"
+                  "该消息只在位置控制器运行的模式下记录")
+        elif info["source"] != "VFF":
             print("  EKF lane: 见到 core %s；primary 切换 %d 次"
                   % (info["cores"], info["switches"]))
             if info["switches"]:
