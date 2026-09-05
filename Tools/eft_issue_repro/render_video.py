@@ -791,16 +791,241 @@ def motor_fail_video(off_result, on_result, outdir, watch_s=24.0):
     return [path]
 
 
+
+# ── P04 三维姿态视频 ──────────────────────────────────────────────────
+W3, H3 = 1600, 900
+
+
+def _rot_body_to_world(roll_d, pitch_d, yaw_d):
+    """机体→世界（NED）。航空标准 3-2-1：先滚转，再俯仰，最后偏航。"""
+    r, p, y = (math.radians(v) for v in (roll_d, pitch_d, yaw_d))
+    cr, sr, cp, sp, cy, sy = (math.cos(r), math.sin(r), math.cos(p),
+                              math.sin(p), math.cos(y), math.sin(y))
+    return np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp,     cp * sr,                cp * cr],
+    ])
+
+
+class Cam:
+    """固定机位的透视相机。
+
+    NED 转成显示坐标：右=东(y)、上=-下(-z)、进屏=北(x)。相机绕方位角与俯仰角
+    转动后做透视投影。机位固定不动，飞机才是动的——这样滚转、俯仰、偏航都能
+    直接看出来，而地面网格提供参照，否则光看飞机分不清是它在转还是视角在转。
+    """
+
+    def __init__(self, az_deg=38.0, el_deg=24.0, dist=13.0, f=900.0,
+                 center=(W3 // 4, 300)):
+        self.az, self.el, self.d, self.f, self.c = (math.radians(az_deg),
+                                                    math.radians(el_deg),
+                                                    dist, f, center)
+
+    def project(self, pts):
+        p = np.atleast_2d(np.asarray(pts, float))
+        disp = np.stack([p[:, 1], -p[:, 2], p[:, 0]], axis=1)   # 右, 上, 进屏
+        ca, sa = math.cos(self.az), math.sin(self.az)
+        x = disp[:, 0] * ca - disp[:, 2] * sa
+        z = disp[:, 0] * sa + disp[:, 2] * ca
+        ce, se = math.cos(self.el), math.sin(self.el)
+        y = disp[:, 1] * ce - z * se
+        z = disp[:, 1] * se + z * ce
+        zc = np.maximum(z + self.d, 0.35)
+        return np.stack([self.c[0] + self.f * x / zc,
+                         self.c[1] - self.f * y / zc], axis=1)
+
+
+def _draw_ground(frame, cam, half=6.0, step=1.0, z=1.9, clip_y=None):
+    """地面网格：没有它，飞机在转还是视角在转分不出来。
+
+    clip_y 把网格限制在三维区内。不限的话线会一路铺到下面的曲线区，
+    读数时背景全是斜网格，比没有网格更糟。
+    """
+    sub = frame if clip_y is None else frame[:clip_y]
+    n = int(half / step)
+    for i in range(-n, n + 1):
+        for seg in (cam.project([[i * step, -half, z], [i * step, half, z]]),
+                    cam.project([[-half, i * step, z], [half, i * step, z]])):
+            cv2.line(sub, tuple(seg[0].astype(int)), tuple(seg[1].astype(int)),
+                     (58, 46, 36), 1, cv2.LINE_AA)
+
+
+def _draw_craft3d(frame, cam, roll, pitch, yaw, pwms, failed, arm=1.5):
+    R = _rot_body_to_world(roll, pitch, yaw)
+    hub = np.zeros(3)
+    order = []
+    for i, a in enumerate(HEXA_ARM_DEG):
+        th = math.radians(a)
+        tip_b = np.array([arm * math.cos(th), arm * math.sin(th), 0.0])
+        tip_w = R @ tip_b
+        order.append((float((R @ tip_b)[0]), i, tip_b, tip_w))
+    order.sort(key=lambda t: t[0])            # 远的先画，近的压在上面
+    ph = cam.project([hub])[0]
+    for _, i, tip_b, tip_w in order:
+        pt = cam.project([tip_w])[0]
+        dead = failed is not None and i == failed
+        cv2.line(frame, tuple(ph.astype(int)), tuple(pt.astype(int)),
+                 GRID if dead else WHITE, 3, cv2.LINE_AA)
+        # 桨盘：机体系里的圆，跟着姿态一起转
+        ring = []
+        for k in range(0, 361, 12):
+            t = math.radians(k)
+            ring.append(tip_b + np.array([0.42 * math.cos(t), 0.42 * math.sin(t), 0.0]))
+        rp = cam.project([R @ q for q in ring]).astype(np.int32)
+        if dead:
+            cv2.polylines(frame, [rp], True, RED, 2, cv2.LINE_AA)
+            d = 12
+            cv2.line(frame, (int(pt[0] - d), int(pt[1] - d)),
+                     (int(pt[0] + d), int(pt[1] + d)), RED, 3, cv2.LINE_AA)
+            cv2.line(frame, (int(pt[0] + d), int(pt[1] - d)),
+                     (int(pt[0] - d), int(pt[1] + d)), RED, 3, cv2.LINE_AA)
+        else:
+            frac = max(0.0, min(1.0, (pwms[i] - 1050.0) / 855.0))
+            col = GREEN if frac < 0.55 else (AMBER if frac < 0.8 else RED)
+            cv2.fillPoly(frame, [rp], tuple(int(c * (0.25 + 0.75 * frac)) for c in col))
+            cv2.polylines(frame, [rp], True, col, 2, cv2.LINE_AA)
+    nose_w = R @ np.array([arm * 1.5, 0.0, 0.0])
+    arrow(frame, ph, cam.project([nose_w])[0], CYAN, 3)
+    cv2.circle(frame, tuple(ph.astype(int)), 7, CYAN, -1, cv2.LINE_AA)
+
+
+def _chart(frame, rect, series, t_now, span, lo, hi, title, hint=None):
+    """一张曲线图，两条轨迹叠在一起。series = [(数组, 颜色, 名字)]。"""
+    x, y, w, h = rect
+    cv2.rectangle(frame, (x, y), (x + w, y + h), (30, 22, 16), -1)
+    cv2.rectangle(frame, (x, y), (x + w, y + h), GRID, 1)
+    zero = int(y + h * (hi - 0.0) / (hi - lo)) if lo < 0 < hi else None
+    if zero is not None:
+        cv2.line(frame, (x, zero), (x + w, zero), (70, 56, 44), 1)
+    if hint is not None:
+        for sgn in (1, -1):
+            yy = int(y + h * (hi - sgn * hint) / (hi - lo))
+            if y < yy < y + h:
+                cv2.line(frame, (x, yy), (x + w, yy), (64, 78, 96), 1)
+    for arr, col, _ in series:
+        pts = []
+        for k in range(w):
+            tt = (k / float(w)) * span
+            if tt > t_now:
+                break
+            v = float(np.interp(tt, arr[:, 0], arr[:, 1]))
+            v = max(lo, min(hi, v))
+            pts.append((x + k, int(y + h * (hi - v) / (hi - lo))))
+        if len(pts) > 1:
+            cv2.polylines(frame, [np.asarray(pts, np.int32)], False, col, 2, cv2.LINE_AA)
+    px = x + int(w * min(1.0, t_now / span))
+    cv2.line(frame, (px, y), (px, y + h), (120, 100, 80), 1)
+    return title
+
+
+def motor_fail_3d(on_result, ref_result, outdir, watch_s=22.0):
+    """三维姿态 + 同步曲线，主角是**我们的策略**：降级重分配。
+
+    ref_result（不降级）只作为曲线里的淡色参照，不占画面——策略已经定了，
+    要看的是它工作时飞机是什么状态，而不是再论证一遍该不该用它。
+    """
+    def load(path):
+        res = load_result(path)
+        ov = res.get("param_overrides") or {}
+        logs = sorted(glob.glob(os.path.join(os.path.dirname(path), "logs", "*.EFT")) +
+                      glob.glob(os.path.join(os.path.dirname(path), "logs", "*.BIN")))
+        d = read_motor_fail_log(logs[-1])
+        t_fail = (res.get("fail_time_ms") or
+                  res.get("metrics", {}).get("fail_time_ms") or 0) / 1000.0
+        ts, unw = _unwrap_yaw(d["att"], t_fail)
+        att = d["att"]
+        rel = att[:, 0] - t_fail
+        return {"res": res, "ov": ov, "d": d, "t_fail": t_fail,
+                "failed": (res.get("failed_motor") or 6) - 1,
+                "roll": np.stack([rel, att[:, 1]], 1),
+                "pitch": np.stack([rel, att[:, 2]], 1),
+                "rot": np.stack([ts - t_fail, unw], 1)}
+
+    m = load(on_result)
+    ref = load(ref_result) if ref_result else None
+    fi = m["failed"]
+
+    path = os.path.join(outdir, "motor_fail_3d.mp4")
+    out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"avc1"), FPS, (W3, H3))
+    if not out.isOpened():
+        out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), FPS, (W3, H3))
+    pre, DIM = 3.0, (70, 58, 96)
+    for f in range(int(FPS * (watch_s + pre))):
+        rel = f / float(FPS) - pre
+        fired = rel >= 0.0
+        frame = np.full((H3, W3, 3), BG, np.uint8)
+        t = m["t_fail"] + rel
+        att, rcou = m["d"]["att"], m["d"]["rcou"]
+        roll, pitch, yaw = interp(att, t, 1), interp(att, t, 2), interp(att, t, 3)
+        pwms = [interp(rcou, t, c) for c in range(1, 7)]
+        rot = float(np.interp(rel, m["rot"][:, 0], m["rot"][:, 1]))
+
+        cam = Cam(az_deg=36.0, el_deg=22.0, dist=11.5, f=1050.0, center=(470, 300))
+        _draw_ground(frame, cam, clip_y=520)
+        _draw_craft3d(frame, cam, roll, pitch, yaw, pwms, fi if fired else None, arm=1.6)
+
+        texts = [("P04 单动力失效 — 降级重分配", (44, 20), 34, WHITE, True),
+                 ("HEXA/DJI_X · %d 号电机停转 · 4 m/s 侧风 · MOT_FAIL_ALLOC=1  YTRK=%g"
+                  % (fi + 1, float(m["ov"].get("MOT_FAIL_YTRK", 0))), (44, 62), 18, GRID, False),
+                 ("失效前" if not fired else "失效后 %+.1f s" % rel, (44, 96), 26,
+                  GRID if not fired else GREEN, True)]
+
+        # 右上：逐电机推力再分配——这是策略本身在做的事
+        px, py = 960, 120
+        cv2.rectangle(frame, (px, py), (px + 580, py + 330), PANEL, -1)
+        cv2.rectangle(frame, (px, py), (px + 580, py + 330), GRID, 1)
+        texts.append(("推力再分配（PWM 1050 → 1905 有效上限）", (px + 18, py + 12), 19, WHITE, True))
+        for i in range(6):
+            yy = py + 56 + i * 44
+            dead = fired and i == fi
+            frac = 0.0 if dead else max(0.0, min(1.0, (pwms[i] - 1050.0) / 855.0))
+            col = RED if dead else (GREEN if frac < 0.55 else (AMBER if frac < 0.8 else RED))
+            _bar(frame, (px + 92, yy, 380, 24), frac, col)
+            texts += [("%d 号 %s" % (i + 1, HEXA_SPIN[i]), (px + 18, yy + 2), 17,
+                       RED if dead else GRID, dead),
+                      ("停转" if dead else "%d" % int(pwms[i]), (px + 486, yy + 2), 17,
+                       RED if dead else WHITE, True)]
+        texts.append(("正对失效那台（%d 号）被压向零推力——滚转平衡要求对侧减载"
+                      % (((fi + 3) % 6) + 1), (px + 18, py + 300), 15, GRID, False))
+
+        texts.append(("滚转 %+.1f°    俯仰 %+.1f°    累计转动 %+.0f°"
+                      % (roll, pitch, rot), (44, 470), 26,
+                      RED if abs(roll) > 10 else WHITE, True))
+
+        cv2.rectangle(frame, (0, 524), (W3, H3), BG, -1)
+        base = 566
+        specs = [("滚转角 °（细线 = ±10° 判据）", "roll", -20.0, 20.0, 10.0),
+                 ("俯仰角 °", "pitch", -20.0, 20.0, None),
+                 ("累计转动 °", "rot", -60.0, 480.0, None)]
+        for i, (title, key, lo, hi, hint) in enumerate(specs):
+            rect = (60, base + i * 108, 1480, 88)
+            series = ([(ref[key], DIM, "ref")] if ref else []) + [(m[key], GREEN, "on")]
+            _chart(frame, rect, series, rel + pre, watch_s + pre, lo, hi, title, hint)
+            texts.append((title, (66, base + i * 108 - 21), 17, GRID, False))
+            mx = 60 + int(1480 * (pre / (watch_s + pre)))
+            cv2.line(frame, (mx, base + i * 108), (mx, base + i * 108 + 88), RED, 1)
+        texts += [("注入", (60 + int(1480 * (pre / (watch_s + pre))) - 18, base - 42),
+                   15, RED, True),
+                  ("绿 = 降级重分配（本策略）　　灰 = 不降级（仅作参照）",
+                   (60, base + 3 * 108 - 16), 16, GRID, False)]
+        out.write(add_text(frame, texts))
+    out.release()
+    return [path]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("case", choices=("landing", "reverse", "uturn", "motor-fail"))
+    parser.add_argument("case", choices=("landing", "reverse", "uturn", "motor-fail", "motor-fail-3d"))
     parser.add_argument("coupled_result")
     parser.add_argument("baseline_result", nargs="?",
                         help="uturn 不需要基线架次")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     os.makedirs(args.output, exist_ok=True)
-    if args.case == "motor-fail":
+    if args.case == "motor-fail-3d":
+        paths = motor_fail_3d(args.coupled_result, args.baseline_result, args.output)
+    elif args.case == "motor-fail":
         paths = motor_fail_video(args.coupled_result, args.baseline_result, args.output)
     elif args.case == "landing":
         paths = landing_video(args.coupled_result, args.baseline_result, args.output)
