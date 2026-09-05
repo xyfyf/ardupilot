@@ -2602,7 +2602,20 @@ def run_motor_fail(mon, motor=3, alt=None, watch_s=35.0, degrade=False, detect=F
     # 失效后不再尝试正常降落：此时的可控性正是被测对象，强行切模式会掩盖结果
     if mon.armed and not land_on_fail:
         set_mode_wait(mon, "LAND")
-        wait_disarmed(mon, 120)
+        # 收尾等待**不能**吞掉整架次的测量。wait_disarmed() 超时会抛异常，而它在
+        # return res 之前——于是上面辛苦采到的姿态、掉高、饱和全部随异常消失，
+        # main() 也不再写 result.json，那一架次在汇总表里只是「不见了」。
+        #
+        # 而这恰恰是最该留下证据的架次：动力余量不足时飞机会以数 m/s 触地且始终
+        # 不上锁，超时正是那个故障的表现，不是清理阶段的小麻烦。所以把它记成
+        # 数据而不是异常。
+        try:
+            wait_disarmed(mon, 120)
+            res["cleanup_disarmed"] = True
+        except RuntimeError as exc:
+            res["cleanup_disarmed"] = False
+            res["cleanup_error"] = str(exc)
+            print("  ⚠ 收尾未上锁：%s（测量结果已保留）" % exc)
     print("  掉高 %.1f m，水平漂移峰值 %.1f m/s，%s"
           % ((res.get("alt_before_m") or 0) - (res.get("alt_min_after_fail_m") or 0),
              res.get("horiz_drift_max_m_s", -1),
@@ -2617,10 +2630,17 @@ def summarise_motor_fail(path, fail_time_ms=None):
     from pymavlink import DFReader
     m = DFReader.DFReader_binary(path)
     att, rate, rcou, msgs = [], [], [], []
+    # 输出上限必须从**本架次的** PARM 里取，不能写死。曾经写死 1990，而本模型
+    # MOT_PWM_MAX=1950——门限比裸 PWM_MAX 还高，饱和占比恒为 0，读起来像「没饱和」
+    # 实则从未测量。这类「判据永远不成立」的错误在结果里和「一切正常」长得一样。
+    parm = {}
     while True:
-        msg = m.recv_match(type=["ATT", "RATE", "RCOU", "MSG"])
+        msg = m.recv_match(type=["ATT", "RATE", "RCOU", "MSG", "PARM"])
         if msg is None:
             break
+        if msg.get_type() == "PARM":
+            parm[msg.Name] = msg.Value
+            continue
         t = msg.TimeUS * 1e-6
         typ = msg.get_type()
         if typ == "ATT":
@@ -2667,6 +2687,17 @@ def summarise_motor_fail(path, fail_time_ms=None):
     yaw0 = win[0][3]
     yaw_drift = [abs(_wrap180(a[3] - yaw0)) for a in win]
 
+    # wrap180 的漂移**看不出转圈**：转两圈也只报 180 度。失一台电机后机头是持续
+    # 旋转的，这个量因此严重低估自旋。另外展开一份累计航向：相邻两帧取最短弧
+    # 累加，不折回。
+    #
+    # 同理，ATT.Yaw-ATT.DesYaw 也不能当作「稳在某个偏差上」——
+    # AC_AttitudeControl::thrust_heading_rotation_angles() 会对航向误差限幅并改写
+    # 内部姿态目标，所以它可以在机头一直转的同时停在一个有限值上。
+    yaw_unwrapped = [0.0]
+    for i in range(1, len(win)):
+        yaw_unwrapped.append(yaw_unwrapped[-1] + _wrap180(win[i][3] - win[i - 1][3]))
+
     # 切换到降级混控是一次控制结构的突变，必然有过渡过程。把它和稳态分开
     # 评价，否则一个数字同时背着「超调多大」和「最后稳在哪」两件事，两边
     # 都说不清：实测航向误差峰值 24 度而末值 12 度，前者是过渡超调，后者才
@@ -2691,10 +2722,19 @@ def summarise_motor_fail(path, fail_time_ms=None):
     roll_prof = _profile(roll_err, band=10.0)
     yr = [abs(r[1]) for r in rate if t_fail <= r[0] <= t_fail + 20]
     ch_win = [c for t, c in rcou if t_fail <= t <= t_fail + 20]
+    # 有效上限 = pwm_min + (pwm_max-pwm_min)*spin_max，缺参数时退回机型默认。
+    pwm_min = parm.get("MOT_PWM_MIN", 1000.0)
+    pwm_max = parm.get("MOT_PWM_MAX", 2000.0)
+    spin_max = parm.get("MOT_SPIN_MAX", 0.95)
+    pwm_ceiling = pwm_min + (pwm_max - pwm_min) * spin_max
+    # 距上限 5 PWM 以内即算近饱和：推力映射在此已经压平，再要更多也给不出。
+    sat_thresh = pwm_ceiling - 5.0
     sat = 0
+    peak = None
     if ch_win:
-        # 剩余电机是否顶到上限：饱和意味着推力已经不够，掉高不可避免
-        sat = sum(1 for ch in ch_win if max(ch) >= 1990) / len(ch_win)
+        # max() 天然取到幸存电机——失效那路被压在最低值。
+        peak = max(max(ch) for ch in ch_win)
+        sat = sum(1 for ch in ch_win if max(ch) >= sat_thresh) / len(ch_win)
 
     # 内置推力丢失检测的触发延迟
     det = None
@@ -2712,6 +2752,9 @@ def summarise_motor_fail(path, fail_time_ms=None):
             "yaw_err_max_deg": round(max(yaw_err), 2),
             "yaw_err_end_deg": round(yaw_err[-1], 2),
             "yaw_drift_max_deg": round(max(yaw_drift), 2),
+            # 下面两个才反映真实自旋；yaw_drift_max_deg 因 wrap180 上限 180 度
+            "yaw_unwrapped_end_deg": round(yaw_unwrapped[-1], 1),
+            "yaw_total_rotation_deg": round(max(abs(v) for v in yaw_unwrapped), 1),
             "yaw_overshoot_deg": yaw_prof["overshoot_deg"],
             "yaw_settle_s": yaw_prof["settle_s"],
             "yaw_steady_deg": yaw_prof["steady_deg"],
@@ -2722,7 +2765,11 @@ def summarise_motor_fail(path, fail_time_ms=None):
             "roll_steady_osc_deg": roll_prof["steady_osc_deg"],
             "yaw_rate_max_degs": round(max(yr), 1) if yr else None,
             "yaw_rate_mean_degs": round(sum(yr) / len(yr), 1) if yr else None,
-            "motor_saturation_frac": round(sat, 3)}
+            "motor_saturation_frac": round(sat, 3),
+            # 把判据本身写进结果，否则「饱和 0.000」无从复核是真没饱和还是门限错了
+            "motor_pwm_peak": round(peak, 0) if peak is not None else None,
+            "motor_pwm_ceiling": round(pwm_ceiling, 0),
+            "motor_sat_threshold": round(sat_thresh, 0)}
 
 
 def run_yaw_step(mon, alt=None):
