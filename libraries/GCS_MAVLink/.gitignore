@@ -14,3 +14,6 @@ include/mavlink/v1.0/minimal/
 include/mavlink/v1.0/test/
 include/mavlink/v1.0/pixhawk/
 include/mavlink/v1.0/sensoar/
+
+# v2.0 headers are mavgen build output (see Tools/ardupilotwaf/mavgen.py); do not commit
+include/mavlink/v2.0/

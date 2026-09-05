@@ -177,5 +177,23 @@ autotest_result_*_junit.xml
 # EFT log decrypt tools/docs (local + GCS pack; not for git)
 /Tools/eft_log/
 
+# Local one-off log analysis / decrypt / ad-hoc test scripts (not for git)
+/_*.py
+/check_*.py
+/Tools/analyze_*.py
+/_mavlink_analysis.txt
+/log_paths.txt
+/mcp-servers/
+
+# Local one-off log analysis artifacts at repo root
+/drop_detail*.py
+/ekf_vacc_*.png
+/jitter_detail.png
+/stops_attitude.png
+/uv.lock
+
+# EFT local dev docs (consolidated under docs/md/, not for git)
+/docs/md/
+
 # Cursor IDE local config and rules (do not commit)
 /.cursor/
