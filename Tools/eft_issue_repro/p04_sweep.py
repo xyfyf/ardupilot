@@ -50,6 +50,16 @@ def _m(result, key, default=None):
         return result[key]
     return result.get("metrics", {}).get(key, default)
 
+def _num(result, key, missing):
+    """取数值指标；**只有真的缺失才用 missing 兜底**。
+
+    曾经写成 `_m(r, key) or 999`：0.0 在 Python 里是假值，于是一次滚转稳态
+    恰好为 0 的完美架次会被当成「没测到」判为不合格。判据里凡是「没有就当很差」
+    的写法都要显式判 None，否则最好的结果和最坏的结果走同一条分支。
+    """
+    v = _m(result, key)
+    return missing if v is None else v
+
 
 def _alt_loss(r):
     before = _m(r, "alt_before_m")
@@ -72,7 +82,7 @@ def _detect_delay(r):
 def _passed(r):
     return (bool(_m(r, "still_armed_after_watch"))
             and _detect_delay(r) < 0.5
-            and abs(_m(r, "roll_steady_deg") or 999) < 10.0
+            and abs(_num(r, "roll_steady_deg", 999)) < 10.0
             and _alt_loss(r) < 2.0)
 
 

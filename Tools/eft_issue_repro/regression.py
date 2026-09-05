@@ -34,6 +34,16 @@ def _m(result, key, default=None):
         return result[key]
     return result.get("metrics", {}).get(key, default)
 
+def _num(result, key, missing):
+    """取数值指标；**只有真的缺失才用 missing 兜底**。
+
+    曾经写成 `_m(r, key) or 999`：0.0 在 Python 里是假值，于是一次滚转稳态
+    恰好为 0 的完美架次会被当成「没测到」判为不合格。判据里凡是「没有就当很差」
+    的写法都要显式判 None，否则最好的结果和最坏的结果走同一条分支。
+    """
+    v = _m(result, key)
+    return missing if v is None else v
+
 
 # 掉头场景共用的偏航配置。协调转弯把约束压在多旋翼最弱的偏航轴上，默认增益
 # 下 R=6 m/3 m/s 会被 ArcNav 以「偏航速率超预算」正当拒绝，那不是回归失败。
@@ -237,7 +247,7 @@ SUITE = [
         # 判据落在**姿态**上。航向在单发失效后是被放弃的那一维——权限只够
         # 保姿态或保航向，不能兼得，实测保航向在 2 m/s 风下即坠毁。
         check=lambda r: (bool(_m(r, "still_armed_after_watch")) and _detect_delay(r) < 0.5
-                         and abs(_m(r, "roll_steady_deg") or 999) < 10.0)
+                         and abs(_num(r, "roll_steady_deg", 999)) < 10.0)
                         and _alt_loss(r) < 2.0,
         why="4 m/s 风下失效后须保持姿态可控、检测在 0.5 s 内；不降级的基线是 16.8 s 后坠毁",
     ),
@@ -264,7 +274,7 @@ SUITE = [
         metrics=lambda r: {"弧内掉速": "%.1f%%" % (_m(r, "arc_speed_dip_pct") or -1),
                            "航向误差均值": "%.1f°" % (_m(r, "arc_hdg_err_mean_deg") or -1),
                            "实飞半径": "%.1f m" % (_m(r, "flown_radius_mean_m") or -1)},
-        check=lambda r: bool(_m(r, "accepted")) and (_m(r, "arc_speed_dip_pct") or 99) < 10.0,
+        check=lambda r: bool(_m(r, "accepted")) and _num(r, "arc_speed_dip_pct", 99) < 10.0,
         why="匀速掉头的立身之本；航点式掉头在同条件下掉速 53%",
     ),
     dict(
