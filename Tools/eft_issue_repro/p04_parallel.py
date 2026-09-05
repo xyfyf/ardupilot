@@ -31,14 +31,15 @@ REPRO = os.path.join(HERE, "reproduce.py")
 
 
 def run_case(case, inst, outdir, timeout_s):
-    m, w, d, y = case
-    variant = "par_m%d_w%d_d%d_y%d" % (m, w, d, y)
+    m, w, d, y, alloc = case
+    variant = "par_m%d_w%d_d%d_y%d_a%d" % (m, w, d, y, alloc)
     cmd = [sys.executable, REPRO, "motor-fail", "--variant", variant,
            "--motor", str(m), "--degrade",          # 先验申报，与现场第一阶段一致
            "--instance", str(inst),
            "--set", "SIM_WIND_SPD=%d" % w,
            "--set", "SIM_WIND_DIR=%d" % d,
-           "--set", "MOT_FAIL_YTRK=%d" % y]
+           "--set", "MOT_FAIL_YTRK=%d" % y,
+           "--set", "MOT_FAIL_ALLOC=%d" % alloc]
     log = os.path.join(outdir, "%s.log" % variant)
     started = time.time()
     with open(log, "w", encoding="utf-8") as fh:
@@ -66,12 +67,14 @@ def main():
     ap.add_argument("--wind", nargs="+", type=int, default=[0])
     ap.add_argument("--wind-dir", nargs="+", type=int, default=[90])
     ap.add_argument("--ytrk", nargs="+", type=int, default=[0, 1])
+    ap.add_argument("--alloc", nargs="+", type=int, default=[1],
+                    help="MOT_FAIL_ALLOC：1=重分配求解器，0=前向混控")
     ap.add_argument("--jobs", type=int, default=4, help="并行度，默认 4")
     ap.add_argument("--timeout", type=int, default=1200)
     args = ap.parse_args()
 
-    cases = [(m, w, d, y) for m in args.motors for w in args.wind
-             for d in args.wind_dir for y in args.ytrk]
+    cases = [(m, w, d, y, a) for m in args.motors for w in args.wind
+             for d in args.wind_dir for y in args.ytrk for a in args.alloc]
     stamp = time.strftime("%Y%m%d-%H%M%S")
     outdir = os.path.join(HERE, "runs", "par-%s" % stamp)
     os.makedirs(outdir, exist_ok=True)

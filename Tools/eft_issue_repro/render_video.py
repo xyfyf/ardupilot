@@ -938,8 +938,11 @@ def motor_fail_3d(on_result, ref_result, outdir, watch_s=22.0):
         rel = att[:, 0] - t_fail
         return {"res": res, "ov": ov, "d": d, "t_fail": t_fail,
                 "failed": (res.get("failed_motor") or 6) - 1,
-                "roll": np.stack([rel, att[:, 1]], 1),
-                "pitch": np.stack([rel, att[:, 2]], 1),
+                # 用**误差**（实际−期望）而不是原始角：侧风下飞机要压向风，
+                # 原始滚转里含着配平量，与 result.json 的「滚转稳态」不是一回事，
+                # 直接显示会出现"最好那栏数字更大"的自相矛盾。
+                "roll": np.stack([rel, att[:, 1] - att[:, 4]], 1),
+                "pitch": np.stack([rel, att[:, 2] - att[:, 5]], 1),
                 "rot": np.stack([ts - t_fail, unw], 1)}
 
     m = load(on_result)
@@ -957,13 +960,16 @@ def motor_fail_3d(on_result, ref_result, outdir, watch_s=22.0):
         frame = np.full((H3, W3, 3), BG, np.uint8)
         t = m["t_fail"] + rel
         att, rcou = m["d"]["att"], m["d"]["rcou"]
-        roll, pitch, yaw = interp(att, t, 1), interp(att, t, 2), interp(att, t, 3)
+        roll = interp(att, t, 1) - interp(att, t, 4)
+        pitch = interp(att, t, 2) - interp(att, t, 5)
+        yaw = interp(att, t, 3)
         pwms = [interp(rcou, t, c) for c in range(1, 7)]
         rot = float(np.interp(rel, m["rot"][:, 0], m["rot"][:, 1]))
 
         cam = Cam(az_deg=36.0, el_deg=22.0, dist=11.5, f=1050.0, center=(470, 300))
         _draw_ground(frame, cam, clip_y=520)
-        _draw_craft3d(frame, cam, roll, pitch, yaw, pwms, fi if fired else None, arm=1.6)
+        _draw_craft3d(frame, cam, interp(att, t, 1), interp(att, t, 2), yaw, pwms,
+                      fi if fired else None, arm=1.6)
 
         texts = [("P04 单动力失效 — 降级重分配", (44, 20), 34, WHITE, True),
                  ("HEXA/DJI_X · %d 号电机停转 · 4 m/s 侧风 · MOT_FAIL_ALLOC=1  YTRK=%g"
@@ -989,14 +995,14 @@ def motor_fail_3d(on_result, ref_result, outdir, watch_s=22.0):
         texts.append(("正对失效那台（%d 号）被压向零推力——滚转平衡要求对侧减载"
                       % (((fi + 3) % 6) + 1), (px + 18, py + 300), 15, GRID, False))
 
-        texts.append(("滚转 %+.1f°    俯仰 %+.1f°    累计转动 %+.0f°"
+        texts.append(("滚转误差 %+.1f°    俯仰误差 %+.1f°    累计转动 %+.0f°"
                       % (roll, pitch, rot), (44, 470), 26,
                       RED if abs(roll) > 10 else WHITE, True))
 
         cv2.rectangle(frame, (0, 524), (W3, H3), BG, -1)
         base = 566
-        specs = [("滚转角 °（细线 = ±10° 判据）", "roll", -20.0, 20.0, 10.0),
-                 ("俯仰角 °", "pitch", -20.0, 20.0, None),
+        specs = [("滚转误差 °（细线 = ±10° 判据）", "roll", -20.0, 20.0, 10.0),
+                 ("俯仰误差 °", "pitch", -20.0, 20.0, None),
                  ("累计转动 °", "rot", -60.0, 480.0, None)]
         for i, (title, key, lo, hi, hint) in enumerate(specs):
             rect = (60, base + i * 108, 1480, 88)
@@ -1014,16 +1020,126 @@ def motor_fail_3d(on_result, ref_result, outdir, watch_s=22.0):
     return [path]
 
 
+
+def motor_fail_3d_pair(a_result, b_result, outdir, watch_s=20.0):
+    """两个失效位置的三维对照。都开降级重分配，差别只在停的是哪一台。
+
+    用来回答"最好与最差差多少"。左右由**滚转稳态**排序决定，不由参数顺序决定
+    ——按位置贴标签的图一旦传参颠倒就会说反话，而画面看起来完全正常。
+    """
+    def load(path):
+        res = load_result(path)
+        ov = res.get("param_overrides") or {}
+        logs = sorted(glob.glob(os.path.join(os.path.dirname(path), "logs", "*.EFT")) +
+                      glob.glob(os.path.join(os.path.dirname(path), "logs", "*.BIN")))
+        d = read_motor_fail_log(logs[-1])
+        tf = (res.get("fail_time_ms") or
+              res.get("metrics", {}).get("fail_time_ms") or 0) / 1000.0
+        ts, unw = _unwrap_yaw(d["att"], tf)
+        att = d["att"]
+        rel = att[:, 0] - tf
+        met = res.get("metrics", {})
+        gm = lambda k: res.get(k, met.get(k))
+        return {"res": res, "ov": ov, "d": d, "t_fail": tf,
+                "failed": (res.get("failed_motor") or 6) - 1,
+                "steady": abs(gm("roll_steady_deg") or 0.0),
+                "peak": gm("roll_err_max_deg"), "rot": gm("yaw_total_rotation_deg"),
+                "wind": float(ov.get("SIM_WIND_SPD", 0)),
+                "roll": np.stack([rel, att[:, 1] - att[:, 4]], 1),
+                "pitch": np.stack([rel, att[:, 2] - att[:, 5]], 1),
+                "rotc": np.stack([ts - tf, unw], 1)}
+
+    runs = sorted((load(a_result), load(b_result)), key=lambda r: abs(r["peak"]))
+    a0 = float(runs[0]["ov"].get("MOT_FAIL_ALLOC", 1))
+    wind = runs[0]["wind"]
+    global TITLE3, SUB3
+    TITLE3 = ("P04 %s — 最好与最差的失效位置"
+              % ("降级重分配" if a0 > 0.5 else "前向混控（未降级）"))
+    SUB3 = ("%s、MOT_FAIL_ALLOC=%d，唯一差别是停的哪一台"
+            % ("无风" if wind < 0.5 else "%g m/s 侧风" % wind, int(a0)))
+    runs[0]["tag"], runs[0]["col"] = "表现最好", GREEN
+    runs[1]["tag"], runs[1]["col"] = "表现最差", RED
+    # 按**滚转误差峰值**排序：稳态在无风下都接近 0，分不出来；峰值才是几何差异所在。
+
+    path = os.path.join(outdir, "motor_fail_3d_best_worst.mp4")
+    out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"avc1"), FPS, (W3, H3))
+    if not out.isOpened():
+        out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), FPS, (W3, H3))
+    pre = 3.0
+    for f in range(int(FPS * (watch_s + pre))):
+        rel = f / float(FPS) - pre
+        fired = rel >= 0.0
+        frame = np.full((H3, W3, 3), BG, np.uint8)
+        texts = [(TITLE3, (44, 18), 34, WHITE, True),
+                 (SUB3, (44, 60), 18, GRID, False),
+                 ("失效前" if not fired else "失效后 %+.1f s" % rel, (1360, 26), 26,
+                  GRID if not fired else WHITE, True)]
+        for side, r in enumerate(runs):
+            cam = Cam(az_deg=36.0, el_deg=22.0, dist=12.5, f=980.0,
+                      center=(410 + side * 790, 300))
+            _draw_ground(frame, cam, clip_y=500)
+            t = r["t_fail"] + rel
+            att, rcou = r["d"]["att"], r["d"]["rcou"]
+            roll = interp(att, t, 1) - interp(att, t, 4)
+            pitch = interp(att, t, 2) - interp(att, t, 5)
+            pwms = [interp(rcou, t, c) for c in range(1, 7)]
+            _draw_craft3d(frame, cam, interp(att, t, 1), interp(att, t, 2), interp(att, t, 3), pwms,
+                          r["failed"] if fired else None, arm=1.5)
+            x0 = 70 + side * 790
+            rot = float(np.interp(rel, r["rotc"][:, 0], r["rotc"][:, 1]))
+            texts += [
+                ("%s ─ 停 %d 号 (%s)" % (r["tag"], r["failed"] + 1,
+                                        HEXA_SPIN[r["failed"]]),
+                 (x0, 96), 27, r["col"], True),
+                ("滚转峰值 %.2f°   稳态 %.2f°   累计转 %.0f°"
+                 % (r["peak"], r["steady"], r["rot"]), (x0, 132), 17, GRID, False),
+                ("滚转误差 %+.1f°    俯仰误差 %+.1f°    累计转动 %+.0f°"
+                 % (roll, pitch, rot), (x0, 452), 23,
+                 RED if abs(roll) > 10 else WHITE, True),
+            ]
+            for i in range(6):
+                bx = x0 + i * 110
+                dead = fired and i == r["failed"]
+                frac = 0.0 if dead else max(0.0, min(1.0, (pwms[i] - 1050.0) / 855.0))
+                _bar(frame, (bx, 492, 88, 18), frac,
+                     RED if dead else (GREEN if frac < 0.55 else AMBER))
+                texts.append(("%d" % (i + 1), (bx + 38, 514), 15,
+                              RED if dead else GRID, dead))
+        cv2.line(frame, (790, 92), (790, 470), GRID, 1)
+        cv2.rectangle(frame, (0, 540), (W3, H3), BG, -1)
+        base = 578
+        for i, (title, key, lo, hi, hint) in enumerate(
+                [("滚转误差 °（细线 = ±10° 判据）", "roll", -20.0, 20.0, 10.0),
+                 ("累计转动 °", "rotc", -60.0, 420.0, None)]):
+            rect = (60, base + i * 150, 1480, 118)
+            _chart(frame, rect, [(r[key], r["col"], r["tag"]) for r in runs],
+                   rel + pre, watch_s + pre, lo, hi, title, hint)
+            texts.append((title, (66, base + i * 150 - 22), 17, GRID, False))
+            mx = 60 + int(1480 * (pre / (watch_s + pre)))
+            cv2.line(frame, (mx, base + i * 150), (mx, base + i * 150 + 118), RED, 1)
+        texts += [("注入", (60 + int(1480 * (pre / (watch_s + pre))) - 18, base - 44),
+                   15, RED, True),
+                  ("绿 = %s（停 %d 号）    红 = %s（停 %d 号）"
+                   % (runs[0]["tag"], runs[0]["failed"] + 1,
+                      runs[1]["tag"], runs[1]["failed"] + 1),
+                   (60, base + 2 * 150 - 18), 16, GRID, False)]
+        out.write(add_text(frame, texts))
+    out.release()
+    return [path]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("case", choices=("landing", "reverse", "uturn", "motor-fail", "motor-fail-3d"))
+    parser.add_argument("case", choices=("landing", "reverse", "uturn", "motor-fail", "motor-fail-3d", "motor-fail-3d-pair"))
     parser.add_argument("coupled_result")
     parser.add_argument("baseline_result", nargs="?",
                         help="uturn 不需要基线架次")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     os.makedirs(args.output, exist_ok=True)
-    if args.case == "motor-fail-3d":
+    if args.case == "motor-fail-3d-pair":
+        paths = motor_fail_3d_pair(args.coupled_result, args.baseline_result, args.output)
+    elif args.case == "motor-fail-3d":
         paths = motor_fail_3d(args.coupled_result, args.baseline_result, args.output)
     elif args.case == "motor-fail":
         paths = motor_fail_video(args.coupled_result, args.baseline_result, args.output)
