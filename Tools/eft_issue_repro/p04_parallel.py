@@ -30,16 +30,18 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPRO = os.path.join(HERE, "reproduce.py")
 
 
-def run_case(case, inst, outdir, timeout_s):
-    m, w, d, y, alloc = case
-    variant = "par_m%d_w%d_d%d_y%d_a%d" % (m, w, d, y, alloc)
+def run_case(case, inst, outdir, timeout_s, speedup):
+    m, w, d, y, alloc, ysup = case
+    variant = "par_m%d_w%d_d%d_y%d_a%d_s%03d" % (m, w, d, y, alloc, round(ysup*100))
     cmd = [sys.executable, REPRO, "motor-fail", "--variant", variant,
            "--motor", str(m), "--degrade",          # 先验申报，与现场第一阶段一致
            "--instance", str(inst),
            "--set", "SIM_WIND_SPD=%d" % w,
            "--set", "SIM_WIND_DIR=%d" % d,
            "--set", "MOT_FAIL_YTRK=%d" % y,
-           "--set", "MOT_FAIL_ALLOC=%d" % alloc]
+           "--set", "MOT_FAIL_ALLOC=%d" % alloc,
+           "--set", "MOT_FAIL_YSUP=%g" % ysup,
+           "--speedup", str(speedup)]
     log = os.path.join(outdir, "%s.log" % variant)
     started = time.time()
     with open(log, "w", encoding="utf-8") as fh:
@@ -69,12 +71,20 @@ def main():
     ap.add_argument("--ytrk", nargs="+", type=int, default=[0, 1])
     ap.add_argument("--alloc", nargs="+", type=int, default=[1],
                     help="MOT_FAIL_ALLOC：1=重分配求解器，0=前向混控")
+    ap.add_argument("--ysup", nargs="+", type=float, default=[0.7],
+                    help="MOT_FAIL_YSUP：零空间里抑制寄生偏航的权重")
+    ap.add_argument("--speedup", type=float, default=10.0,
+                    help="SITL 仿真加速倍率。默认 10——实测 2/6/12 三档结果一致"
+                         "（滚转峰 0.13/0.17/0.16，偏航均 19.6/19.4/19.6，差异在"
+                         "架次间散布内），而墙钟从 70s 降到 13s。SITL 走仿真时钟，"
+                         "加速只改墙钟不改物理步进；真正会被拖垮的是墙钟超时，"
+                         "所以并行度仍要留余量")
     ap.add_argument("--jobs", type=int, default=4, help="并行度，默认 4")
     ap.add_argument("--timeout", type=int, default=1200)
     args = ap.parse_args()
 
-    cases = [(m, w, d, y, a) for m in args.motors for w in args.wind
-             for d in args.wind_dir for y in args.ytrk for a in args.alloc]
+    cases = [(m, w, d, y, a, u) for m in args.motors for w in args.wind
+             for d in args.wind_dir for y in args.ytrk for a in args.alloc for u in args.ysup]
     stamp = time.strftime("%Y%m%d-%H%M%S")
     outdir = os.path.join(HERE, "runs", "par-%s" % stamp)
     os.makedirs(outdir, exist_ok=True)
@@ -92,7 +102,7 @@ def main():
                 c = work.get_nowait()
             except queue.Empty:
                 return
-            v, r, note = run_case(c, inst, outdir, args.timeout)
+            v, r, note = run_case(c, inst, outdir, args.timeout, args.speedup)
             with lock:
                 results[v] = (r, note)
                 print("  [%d/%d] %-22s %s" % (len(results), len(cases), v,

@@ -1021,7 +1021,8 @@ def motor_fail_3d(on_result, ref_result, outdir, watch_s=22.0):
 
 
 
-def motor_fail_3d_pair(a_result, b_result, outdir, watch_s=20.0):
+def motor_fail_3d_pair(a_result, b_result, outdir, watch_s=20.0,
+                       labels=None, title=None, sub=None):
     """两个失效位置的三维对照。都开降级重分配，差别只在停的是哪一台。
 
     用来回答"最好与最差差多少"。左右由**滚转稳态**排序决定，不由参数顺序决定
@@ -1049,16 +1050,23 @@ def motor_fail_3d_pair(a_result, b_result, outdir, watch_s=20.0):
                 "pitch": np.stack([rel, att[:, 2] - att[:, 5]], 1),
                 "rotc": np.stack([ts - tf, unw], 1)}
 
-    runs = sorted((load(a_result), load(b_result)), key=lambda r: abs(r["peak"]))
+    runs = [load(a_result), load(b_result)]
+    if labels is None:
+        runs.sort(key=lambda r: abs(r["peak"]))
     a0 = float(runs[0]["ov"].get("MOT_FAIL_ALLOC", 1))
     wind = runs[0]["wind"]
     global TITLE3, SUB3
-    TITLE3 = ("P04 %s — 最好与最差的失效位置"
-              % ("降级重分配" if a0 > 0.5 else "前向混控（未降级）"))
-    SUB3 = ("%s、MOT_FAIL_ALLOC=%d，唯一差别是停的哪一台"
-            % ("无风" if wind < 0.5 else "%g m/s 侧风" % wind, int(a0)))
-    runs[0]["tag"], runs[0]["col"] = "表现最好", GREEN
-    runs[1]["tag"], runs[1]["col"] = "表现最差", RED
+    TITLE3 = title or ("P04 %s — 最好与最差的失效位置"
+                       % ("降级重分配" if a0 > 0.5 else "前向混控（未降级）"))
+    SUB3 = sub or ("%s、MOT_FAIL_ALLOC=%d，唯一差别是停的哪一台"
+                   % ("无风" if wind < 0.5 else "%g m/s 侧风" % wind, int(a0)))
+    if labels:
+        for r, lab in zip(runs, labels):
+            r["tag"] = lab
+        runs[0]["col"], runs[1]["col"] = RED, GREEN
+    else:
+        runs[0]["tag"], runs[0]["col"] = "表现最好", GREEN
+        runs[1]["tag"], runs[1]["col"] = "表现最差", RED
     # 按**滚转误差峰值**排序：稳态在无风下都接近 0，分不出来；峰值才是几何差异所在。
 
     path = os.path.join(outdir, "motor_fail_3d_best_worst.mp4")
@@ -1088,8 +1096,8 @@ def motor_fail_3d_pair(a_result, b_result, outdir, watch_s=20.0):
             x0 = 70 + side * 790
             rot = float(np.interp(rel, r["rotc"][:, 0], r["rotc"][:, 1]))
             texts += [
-                ("%s ─ 停 %d 号 (%s)" % (r["tag"], r["failed"] + 1,
-                                        HEXA_SPIN[r["failed"]]),
+                (r["tag"] if labels else "%s ─ 停 %d 号 (%s)"
+                 % (r["tag"], r["failed"] + 1, HEXA_SPIN[r["failed"]]),
                  (x0, 96), 27, r["col"], True),
                 ("滚转峰值 %.2f°   稳态 %.2f°   累计转 %.0f°"
                  % (r["peak"], r["steady"], r["rot"]), (x0, 132), 17, GRID, False),
@@ -1119,9 +1127,7 @@ def motor_fail_3d_pair(a_result, b_result, outdir, watch_s=20.0):
             cv2.line(frame, (mx, base + i * 150), (mx, base + i * 150 + 118), RED, 1)
         texts += [("注入", (60 + int(1480 * (pre / (watch_s + pre))) - 18, base - 44),
                    15, RED, True),
-                  ("绿 = %s（停 %d 号）    红 = %s（停 %d 号）"
-                   % (runs[0]["tag"], runs[0]["failed"] + 1,
-                      runs[1]["tag"], runs[1]["failed"] + 1),
+                  ("红 = %s    绿 = %s" % (runs[0]["tag"], runs[1]["tag"]),
                    (60, base + 2 * 150 - 18), 16, GRID, False)]
         out.write(add_text(frame, texts))
     out.release()
@@ -1135,10 +1141,16 @@ def main():
     parser.add_argument("baseline_result", nargs="?",
                         help="uturn 不需要基线架次")
     parser.add_argument("--output", required=True)
+    parser.add_argument("--labels", help="两栏标签，用 | 分隔；给了就按参数顺序排")
+    parser.add_argument("--title")
+    parser.add_argument("--sub")
     args = parser.parse_args()
     os.makedirs(args.output, exist_ok=True)
     if args.case == "motor-fail-3d-pair":
-        paths = motor_fail_3d_pair(args.coupled_result, args.baseline_result, args.output)
+        paths = motor_fail_3d_pair(
+            args.coupled_result, args.baseline_result, args.output,
+            labels=(args.labels.split("|") if args.labels else None),
+            title=args.title, sub=args.sub)
     elif args.case == "motor-fail-3d":
         paths = motor_fail_3d(args.coupled_result, args.baseline_result, args.output)
     elif args.case == "motor-fail":
