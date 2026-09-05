@@ -51,13 +51,42 @@ python3 Tools/mission_arc_check/mission_arc_check.py \
 | 倾角预算 | `v²/r ≤ g·tan(倾角上限 × 70%)` | `PSC_ANGLE_MAX`，为 0 则回退 `ANGLE_MAX` |
 | 偏航速率 | `v/r ≤ ψ̇_实测 × 50%` | **命令行必填**，不从参数推 |
 | 前段 lead-in | 入弧点前的航段 ≥ `plan_feasible()` 输出的 `lead_in_m` | 任务几何 |
+| 围栏 | 整条弧按 5° 采样，逐点过 `FENCE_*` | `FENCE_ENABLE`/`TYPE`/`RADIUS`/`ALT_MAX` |
 
 第三项在飞控里**不存在**。`plan_feasible()` 成功时输出 `lead_in_m`，含义是「前一段
 航段应当瞄过入弧点这么远、且不得在这段距离上减速」，但没有任何地方检查前一段本身
 是否长于它——它拿到的是一个转弯，不是整条任务，无从检查。作业段短、行距大时这个
 承诺物理上兑现不了：函数返回 `true`，飞机却飞不出计划的弧。
 
-**不判**围栏、地形、电量、喷洒，以及普通航点转弯的 SCurve 掉速。
+**不判**地形、电量、喷洒，以及普通航点转弯的 SCurve 掉速。
+
+### 围栏这一项为什么必须在地面做
+
+机上有一道：`Mode::arc_within_fence()`（`d77cb9757b`）在接受转弯前把整条弧按 5°
+采样过一遍围栏。但那条提交自己记着它**必要而不充分**：
+
+> **拒绝并不能阻止越界**：退回去的普通盘旋路径同样不受围栏约束，实测在拒绝后
+> 0.7 s 仍报 Polygon fence breached。……正确的处理是在任务上传时拒绝而不是飞到
+> 那里再说。记入待办。
+
+本工具做的就是那条待办。2026-09-05 实测复现（见下方验收表）：弧被机上拒绝之后，
+飞机走回退路径照样越界。**机上那道拦的是"用哪条路径越界"，不是"越不越界"。**
+
+采样与机上逐点一致——起点方位角起算、每 5° 一点、步数夹在 `[8, 360]`。不一致的话
+地面说栏内而机上说栏外，两边谁也不知道该信谁。
+
+三处口径：
+
+**采的是理想圆。** 与机上一样，回旋过渡段并不严格落在这个圆上（`d77cb9757b` 的
+"未做"里点了这一条）。余量很薄时，理想圆判栏内不等于实飞不出栏。
+
+**`FENCE_ALT_MIN` 永远不参与。** `check_destination_within_fence()` 里有下限分支，
+但 `_enabled_fences = FENCE_TYPE & ~AC_FENCE_TYPE_ALT_MIN`（`AC_Fence.cpp:174`、
+`:236`）先把它摘掉了。照源码字面读会以为下限也在管。
+
+**多边形围栏的顶点不在参数文件里**——它们经 MAVLink 上传、存在飞控中。`FENCE_TYPE`
+里开了多边形而顶点没给时，本工具**报「结论不完整」并判该转弯不通过**，不报"栏内"。
+"没查出越界"不等于"没有越界"。
 
 ## 三个容易搞错的口径
 
@@ -125,6 +154,11 @@ python3 Tools/mission_arc_check/tests/test_check.py        # 纯 Python，无需
 | :-- | :-- | :-- |
 | `--swath 12`，R=6 m | **可行**（余量 3.1%，偏航最紧） | `ARCN` 有记录；弧内最低速 **2.99 m/s**、掉速 **0.19%**、航向误差 4.51° |
 | `--swath 5`，R=2.5→2 m | **不可行**（倾角与偏航同时超标） | `ARCN` **无任何记录**——`set_arc()` 拒绝、AUTO 静默回退；进弧前速度掉到 **0.03 m/s**、弧内最低 0.15 m/s |
+| `--swath 12` + `FENCE_RADIUS=75` | **栏内**（最近处余 8.7 m） | `Arc r6.0 v3.0 sp1.50 y29`，`ARCN` **2716 条** |
+| `--swath 12` + `FENCE_RADIUS=62` | **越界 4.3 m** | `Arc: leaves fence, circling`，`ARCN` **0 条**，随后 **`Circle fence breached`** |
+
+后两行是 `d77cb9757b` 那次 SITL 对照的复现，两档结论逐档一致。**最后一格是关键**：
+弧被机上拒绝了，飞机走回退路径**照样越界**——这就是"必要而不充分"的实证。
 
 **反例那一行同时是两件事的证据**，第二件比第一件重要：
 
@@ -188,8 +222,10 @@ python3 Tools/mission_arc_check/mission_arc_check.py $d/mission.waypoints \
 | `arcnav.py` | `AC_ArcNav` 判定数学的地面镜像，float32 仿真，逐行对着 C++ 写 |
 | `inputs.py` | 任务文件（QGC WPL 110）与参数文件解析，参数→约束的换算与出处 |
 | `check.py` | 整条任务的遍历、判定、余量与改法 |
+| `fence.py` | 围栏采样，镜像 `Mode::arc_within_fence()` 与 `AC_Fence` 的启用规则 |
 | `mission_arc_check.py` | 命令行入口与报告渲染 |
 | `tests/test_crosscheck.py` | 单元层对拍，由 C++ 界定 |
 | `tests/test_check.py` | 遍历、解析、量化、改法的测试（C++ 里没有对应物） |
+| `tests/test_fence.py` | 围栏：启用规则、采样步数、以及「结论不完整不算通过」 |
 
 不支持 QGroundControl 的 `.plan`（JSON）。现场派工用的是 `.waypoints`。

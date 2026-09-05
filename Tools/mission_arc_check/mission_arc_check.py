@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import arcnav        # noqa: E402
 import check         # noqa: E402
+import fence as fence_mod  # noqa: E402
 import inputs        # noqa: E402
 
 # SITL 占位机型的实测可达偏航速率，供无真机数据时贯通流程用。
@@ -158,6 +159,24 @@ def render(mission_path, params_path, resolved, speed_ms, findings, out):
                 w("，当前第 %d 行 / 至少要第 %d 行，距下一档 %.3g m"
                   % (f.rows_skipped, f.rows_needed, f.step_margin_m))
             w("\n")
+        if f.fence is not None:
+            fv = f.fence
+            if fv.breached:
+                w("          围栏：**越界**（%s），最深 %.3g m\n"
+                  % (fence_mod.TYPE_NAMES.get(fv.breach_type, "?"), -fv.worst_margin_m))
+            elif not fv.conclusive:
+                w("          围栏：**结论不完整**——见下方说明，不可当作栏内\n")
+            elif fv.checked_types:
+                names = "、".join(fence_mod.TYPE_NAMES[t]
+                                  for t in (1, 2, 4, 8) if fv.checked_types & t)
+                extra = ("，最近处余 %.3g m（扫掠 %.0f°）"
+                         % (fv.worst_margin_m, fv.worst_at_deg or 0.0)
+                         ) if fv.worst_margin_m is not None else ""
+                w("          围栏：栏内（已查 %s）%s\n" % (names, extra))
+            for note in fv.unverifiable:
+                w("          围栏：%s\n" % note)
+            for note in fv.notes:
+                w("          围栏：%s\n" % note)
         if f.margin_pct is not None:
             # 可行不等于稳妥。余量薄的转弯要让人看见薄在哪。
             w("          余量 %.1f%%（%s 最紧）%s\n"
@@ -176,8 +195,10 @@ def render(mission_path, params_path, resolved, speed_ms, findings, out):
     w("\n" + "-" * 78 + "\n")
     w("共 %d 个转弯，%d 个不可行。\n" % (len(findings), n_bad))
     w("\n")
-    w("本报告只判 AC_ArcNav 的三项约束：倾角预算、偏航速率、前段 lead-in 长度。\n")
-    w("**不判**围栏、地形、电量、喷洒，以及普通航点转弯的 SCurve 掉速。\n")
+    w("本报告判四项：倾角预算、偏航速率、前段 lead-in 长度、整条弧的围栏采样。\n")
+    w("**不判**地形、电量、喷洒，以及普通航点转弯的 SCurve 掉速。\n")
+    w("围栏采的是**理想圆**，与机上 arc_within_fence() 同法；回旋过渡段并不严格落在\n")
+    w("那个圆上，所以余量很薄时理想圆判栏内不等于实飞不出栏。\n")
     w("报告说可行不等于飞得出来——判据是 SITL 或真机的实飞轨迹，不是本工具的输出。\n")
 
 
@@ -212,7 +233,8 @@ def main(argv=None):
         resolved.provenance["作业速度"] = inputs.Provenance(
             speed_ms, "m/s", "命令行 --speed", True, "覆盖 WPNAV_SPEED")
 
-    findings = check.check_mission(items, resolved.limits, speed_ms)
+    fence_cfg = fence_mod.from_params(params)
+    findings = check.check_mission(items, resolved.limits, speed_ms, fence_cfg)
     render(args.mission, args.params, resolved, speed_ms, findings, sys.stdout)
 
     if args.json:

@@ -13,6 +13,7 @@ import math
 from dataclasses import dataclass, field
 
 import arcnav
+import fence as fence_mod
 import inputs
 
 
@@ -40,6 +41,7 @@ class TurnFinding:
     prev_leg_m: float = 0.0
     lead_in_satisfied: bool = True
     row_spacing_m: float = None
+    fence: object = None        # FenceVerdict；None = 本次未做围栏校验
     margin_pct: float = None    # 最紧那一项还剩多少余量，判可行时才有意义
     margin_which: str = None
     rows_skipped: int = None    # 当前掉到第几行
@@ -50,7 +52,16 @@ class TurnFinding:
 
     @property
     def ok(self):
-        return self.feasible and self.lead_in_satisfied
+        """三项都过才算过。
+
+        围栏那项「结论不完整」（缺多边形顶点）时**不算过**——把"没查出问题"
+        当成"没问题"，正是这条工具线一路在防的那种错觉。
+        """
+        if not (self.feasible and self.lead_in_satisfied):
+            return False
+        if self.fence is not None and (self.fence.breached or not self.fence.conclusive):
+            return False
+        return True
 
 
 def _perp_distance(pt, line_a, line_b):
@@ -103,8 +114,14 @@ def max_feasible_speed_ms(lim, radius_m):
     return min(v_lean, v_yaw), v_lean, v_yaw
 
 
-def check_mission(items, lim, speed_ms):
-    """遍历任务，返回 [TurnFinding]。"""
+def check_mission(items, lim, speed_ms, fence_cfg=None):
+    """遍历任务，返回 [TurnFinding]。
+
+    fence_cfg 给了就逐条弧过一遍围栏；不给则该项不判，报告里也不会显示"通过"。
+    """
+    # 局部坐标以任务首项为原点。围栏的圆形项判的是**到 home 的距离**
+    # （AC_Fence.cpp:891 用 AP::ahrs().get_home()），而 .waypoints 的 seq 0
+    # 就是 home，所以原点即 home，两者对齐。
     ne = inputs.to_local_ne(items)
     # 只有 NAV 命令占位置；改速度、开喷之类夹在中间不构成航段端点。
     nav = [(i, it, ne[i]) for i, it in enumerate(items) if it.is_nav]
@@ -142,6 +159,26 @@ def check_mission(items, lim, speed_ms):
         # 从任务坐标量出来，不假设它等于 2×半径。
         if k >= 2 and k + 1 < len(nav):
             f.row_spacing_m = _perp_distance(nav[k + 1][2], nav[k - 2][2], entry_pos)
+
+        # 围栏：整条弧按 5° 采样过一遍，与机上 Mode::arc_within_fence() 同法。
+        # LOITER_TURNS 的位置是**圆心**（mode_auto.cpp 的 loc_from_cmd），
+        # 入弧点是前一个 NAV 航点，两者定出起始方位角。
+        if fence_cfg is not None:
+            f.fence = fence_mod.check_arc(
+                fence_cfg, home_ne=ne[0], centre_ne=_pos,
+                start_ne=entry_pos, radius_m=r_eff, sweep_rad=sweep,
+                alt_m=it.z)
+            if f.fence.breached:
+                name = fence_mod.TYPE_NAMES.get(f.fence.breach_type, "围栏")
+                f.notes.append(
+                    "整条弧有一段在%s围栏外（最深越界 %.3g m，出现在扫掠 %.0f° 处）。"
+                    "机上 Mode::arc_within_fence() 也会拒绝它，但**拒绝拦不住越界**——"
+                    "退回的普通盘旋路径同样不受围栏约束，实测拒绝后 0.7 s 仍报越界"
+                    "（d77cb9757b）。所以这条必须在派工前改掉。"
+                    % (name, -f.fence.worst_margin_m, f.fence.worst_at_deg or 0.0))
+                f.remedies.append(
+                    "把掉头挪进栏内，或放宽围栏——注意围栏还要另留刹车距离，"
+                    "AUTO 越界后实测冲出 5.9 m（基线 §7）")
 
         if not feasible:
             _add_infeasible_remedies(f, lim, r_eff, speed_ms)
