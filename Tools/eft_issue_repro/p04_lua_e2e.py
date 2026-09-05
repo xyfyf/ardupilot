@@ -27,6 +27,7 @@
     python3 Tools/eft_issue_repro/p04_lua_e2e.py --motor 6 --wind 4
 """
 import argparse
+import io
 import os
 import shutil
 import subprocess
@@ -98,6 +99,10 @@ def main():
     ap.add_argument("--watch", type=float, default=20.0, help="失效后观察秒数")
     ap.add_argument("--speedup", type=float, default=5.0)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--debug-lua", action="store_true",
+                    help="额外放一份带调试打印的脚本到 scripts/，用于定位链路断点。"
+                         "注意它与 ROMFS 那份竞争 param 表，谁先注册谁赢——"
+                         "是诊断手段，不是被测对象")
     ap.add_argument("--field-params", default=None,
                     help="现场参数文件路径；默认自动定位父仓库里的那一份")
     args = ap.parse_args()
@@ -110,7 +115,32 @@ def main():
     os.makedirs(out, exist_ok=True)
     # 脚本必须放进 SITL 的工作目录下的 scripts/，SCR_ENABLE 才找得到。
     os.makedirs(os.path.join(out, "scripts"), exist_ok=True)
-    shutil.copy(SCRIPT, os.path.join(out, "scripts"))
+    # **默认不往 scripts/ 拷脚本。** ArduPilot 同时扫描文件系统的 scripts/ 与
+    # @ROMFS/scripts，两处同名就会各加载一次；而脚本第 12 行的
+    # param:add_table(75,...) 第二次调用会返回 false、assert 打死那一份。
+    # 于是"哪一份在跑"取决于加载顺序，不可控。
+    #
+    # 真机上飞的是 ROMFS 那份，所以本测试就用它——测的必须是会飞的那份代码。
+    #
+    # 2026-09-05 实测这个坑：给拷贝注入了语法错误的调试代码，那份加载失败，
+    # 而 ROMFS 那份照常注册了 MOT_STOP_BITMASK，于是第 1 步断言"通过"了。
+    # 断言本身没错，错在它只能证明"有个脚本注册了参数"，不能证明是哪一份。
+    # 真正的证据是第 6 步：MOT_FAIL_IDX 被写成 N。
+    dst = os.path.join(out, "scripts", os.path.basename(SCRIPT))
+    if args.debug_lua:
+        shutil.copy(SCRIPT, dst)
+        # 让脚本自己报它读到的开关位置。装在运行目录的那份拷贝上，不动 ROMFS，
+        # 因此不需要重编固件。链路断在哪一环，靠它说话而不是靠推断。
+        src = io.open(dst, encoding="utf-8").read()
+        anchor = "  if switch:get_aux_switch_pos() == 2 then"
+        assert src.count(anchor) == 1, "锚点不唯一，脚本改过了"
+        dbg = ("  _dbg = (_dbg or 0) + 1\n"
+               "  if _dbg % 100 == 0 then\n"
+               "    gcs:send_text(6, string.format('DBG aux=%d mask=%d decl=%d chans=%d',\n"
+               "      switch:get_aux_switch_pos(), stop_motor_bitmask:get(),\n"
+               "      declare_to_mixer:get(), #(stop_motor_chan or {})))\n"
+               "  end\n")
+        io.open(dst, "w", encoding="utf-8").write(src.replace(anchor, dbg + anchor))
     shutil.copy(MODEL, out)
 
     fp = args.field_params or find_field_param()
@@ -173,7 +203,27 @@ def run(proc, args, out):
     pump(12)                       # 给 Lua 引擎启动与注册参数的时间
     if getparam("MOT_STOP_BITMASK") is None:
         _fail("参数表里没有 MOT_STOP_BITMASK —— 脚本没在跑（SCR_ENABLE / 脚本文件 / 堆）")
-    _ok("MOT_STOP_BITMASK 存在，脚本已注册参数")
+    _ok("MOT_STOP_BITMASK 存在——有脚本注册了它（哪一份见第 6 步）")
+
+    # MOT_STOP_* 是 Lua 运行时注册的：启动时解析参数文件那一刻它们还不存在，
+    # 文件里写了也会被静默忽略、随后由脚本按默认值 0 创建。所以必须在脚本起来
+    # **之后**再设——现场从地面站设，正是这个道理。
+    print("\n[1b] 脚本起来后再设 MOT_STOP_*（文件里设不进去）")
+    def setparam(name, val):
+        mav.mav.param_set_send(mav.target_system, mav.target_component,
+                               name.encode(), float(val),
+                               mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
+        end = time.time() + 5
+        while time.time() < end:
+            m = mav.recv_match(type="PARAM_VALUE", blocking=True, timeout=1)
+            if m and m.param_id.strip("\x00") == name:
+                return m.param_value
+        return None
+    for k, v in (("MOT_STOP_DECL", 1), ("MOT_STOP_BITMASK", 1 << (args.motor - 1))):
+        got = setparam(k, v)
+        if got is None or abs(got - v) > 0.5:
+            _fail("%s 设置失败：读回 %s，期望 %s" % (k, got, v))
+        _ok("%s = %g" % (k, got))
 
     print("\n[2] 解锁前 MOT_FAIL_IDX 必须为 0")
     idx0 = getparam("MOT_FAIL_IDX")
@@ -184,30 +234,60 @@ def run(proc, args, out):
     print("\n[3] 起飞到 %.0f m" % args.alt)
     mav.set_mode_apm("GUIDED")
     pump(2)
+    # 解锁前必须先送 RC 覆盖、且**油门压到最低**——与真实遥控器/地面站的解锁时序
+    # 一致。少了这一步飞机会解锁后立刻上锁，而 GUIDED 起飞看起来只是"没上升"。
+    for _ in range(20):
+        mav.mav.rc_channels_override_send(mav.target_system, mav.target_component,
+                                          1500, 1500, 1000, 1500,
+                                          65535, 65535, 65535, 65535)
+        pump(0.1)
     mav.mav.command_long_send(mav.target_system, mav.target_component,
                               mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
                               0, 1, 0, 0, 0, 0, 0, 0)
-    pump(3)
+    end = time.time() + 20
+    armed = False
+    while time.time() < end and not armed:
+        m = mav.recv_match(type="HEARTBEAT", blocking=True, timeout=1)
+        if m and (m.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+            armed = True
+    if not armed:
+        _fail("解锁失败")
+    _ok("已解锁")
+
     mav.mav.command_long_send(mav.target_system, mav.target_component,
                               mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
                               0, 0, 0, 0, 0, 0, 0, args.alt)
+    # 必须真的判到高度才算通过。上一版这里超时后拿最后一帧就 _ok()，于是飞机
+    # 压根没起飞（高度 0.0 m）也报"✓ 已到 0.0 m"——正是本脚本要抓的那类
+    # "判据永远不成立"的错误，我自己先犯了一次。
     end = time.time() + 90
+    alt = -1.0
     while time.time() < end:
         m = mav.recv_match(type="GLOBAL_POSITION_INT", blocking=True, timeout=1)
-        if m and m.relative_alt / 1000.0 >= args.alt * 0.9:
-            break
-    _ok("已到 %.1f m，稳定 5 s" % (m.relative_alt / 1000.0 if m else -1))
+        if m:
+            alt = m.relative_alt / 1000.0
+            if alt >= args.alt - 0.7:
+                break
+    if alt < args.alt - 0.7:
+        _fail("起飞超时：只到 %.2f m，目标 %.1f m" % (alt, args.alt))
+    _ok("已到 %.1f m，稳定 5 s" % alt)
     pump(5)
 
     print("\n[4] 拨杆（RC%d → 2000）" % AUX_CHAN)
     before = len(msgs)
-    ch = [65535] * 18
+    ch = [1500, 1500, 1000, 1500, 65535, 65535, 65535, 65535]
     ch[AUX_CHAN - 1] = 2000
-    for _ in range(20):
+    seen = {}
+    for _ in range(30):
         mav.mav.rc_channels_override_send(mav.target_system, mav.target_component,
-                                          *ch[:8])
+                                          *ch)
+        m = mav.recv_match(type="RC_CHANNELS", blocking=False)
+        if m:
+            seen[AUX_CHAN] = getattr(m, "chan%d_raw" % AUX_CHAN, None)
         pump(0.2)
     pump(4)
+    # 覆盖到底有没有落到飞控上——不落地就无从谈起脚本读不读得到。
+    print("    RC%d 实测 = %s（期望 2000）" % (AUX_CHAN, seen.get(AUX_CHAN)))
 
     new = msgs[before:]
     print("\n[5] 申报与降级")
@@ -237,8 +317,35 @@ def run(proc, args, out):
         _fail("姿态超出 25° 中止判据")
     _ok("姿态在中止判据内")
 
-    print("\n结果目录: %s" % out)
-    print("\n[8] 分配器是否真的在跑 —— 请查 MALC.Res（下面自动读）")
+    print("\n[8] 分配器是否真的在跑")
+    # 前七步即便 MOT_FAIL_ALLOC=0 也会全过：set_motor_failed() 不读那个参数，
+    # declared / degraded 两条消息照发，MOT_FAIL_IDX 照样被写。只有 MALC 能
+    # 分开"摘列成功"与"重分配求解器在工作"。
+    import glob as _glob
+    logs = sorted(_glob.glob(os.path.join(out, "logs", "*.EFT")) +
+                  _glob.glob(os.path.join(out, "logs", "*.BIN")))
+    if not logs:
+        _fail("没有 DataFlash 日志，无法确认分配器")
+    from pymavlink import DFReader
+    df = DFReader.DFReader_binary(logs[-1])
+    res = {}
+    n_malc = 0
+    while True:
+        x = df.recv_match(type="MALC")
+        if x is None:
+            break
+        n_malc += 1
+        res[int(x.Res)] = res.get(int(x.Res), 0) + 1
+    if n_malc == 0:
+        _fail("MALC 一条都没有——混控器没进降级路径，或 MOT_FAIL_ALLOC=0")
+    ok_frac = res.get(0, 0) / float(n_malc)
+    print("    MALC %d 条，Res 分布 %s" % (n_malc, res))
+    if ok_frac < 0.5:
+        _fail("求解成功率仅 %.1f%%，分配器多数周期在回退" % (ok_frac * 100))
+    _ok("求解成功率 %.1f%%（失败 %.1f%% 会静默回退前向混控）"
+        % (ok_frac * 100, (1 - ok_frac) * 100))
+
+    print("\n全部通过。结果目录: %s" % out)
 
 
 if __name__ == "__main__":
