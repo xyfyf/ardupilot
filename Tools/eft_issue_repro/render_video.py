@@ -7,6 +7,7 @@
 """
 
 import argparse
+import glob
 import json
 import math
 import os
@@ -140,7 +141,12 @@ def draw_hexa_side(frame, center, pitch_deg, scale=1.0, color=CYAN,
 
 
 def writer(path):
-    out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), FPS, (W, H))
+    # avc1 = H.264。原来用 mp4v（MPEG-4 Part 2）——容器是 .mp4，但浏览器、
+    # QuickTime 和多数在线播放器都不解这个编码，文件能生成、打不开。
+    # 本机 OpenCV 带 FFMPEG，avc1 可用；万一某天不可用再退回 mp4v。
+    out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"avc1"), FPS, (W, H))
+    if not out.isOpened():
+        out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), FPS, (W, H))
     if not out.isOpened():
         raise RuntimeError("无法创建 MP4: %s" % path)
     return out
@@ -585,16 +591,218 @@ def uturn_chart(result_path, outdir):
     return [path]
 
 
+
+# ── P04 单动力失效 ────────────────────────────────────────────────────
+# 混控因子对应的臂角（AP_MotorsMatrix::setup_hexa_matrix，HEXA/DJI_X）。
+# 角度按 AP 的约定：机头为 0，顺时针为正。输出通道 1..6 依次对应。
+HEXA_ARM_DEG = [30.0, -30.0, -90.0, -150.0, 150.0, 90.0]
+HEXA_SPIN = ["CCW", "CW", "CCW", "CW", "CCW", "CW"]
+AMBER = (40, 150, 220)
+
+
+def read_motor_fail_log(path):
+    """取姿态与逐电机输出。RCOU 是**实际发出去的 PWM**，比推力指令更贴近现场看到的。"""
+    att, rcou, malc = [], [], []
+    log = DFReader.DFReader_binary(path)
+    while True:
+        m = log.recv_match(type=["ATT", "RCOU", "MALC"])
+        if m is None:
+            break
+        t = m.TimeUS * 1.0e-6
+        k = m.get_type()
+        if k == "ATT":
+            att.append((t, m.Roll, m.Pitch, m.Yaw, m.DesRoll, m.DesPitch))
+        elif k == "RCOU":
+            rcou.append((t,) + tuple(getattr(m, "C%d" % i, 0) for i in range(1, 7)))
+        elif k == "MALC":
+            malc.append((t, getattr(m, "Res", 0)))
+    return {"att": np.asarray(att, float), "rcou": np.asarray(rcou, float),
+            "malc": np.asarray(malc, float)}
+
+
+def _unwrap_yaw(att, t_fail):
+    """累计转动。wrap180 的航向误差看不出转圈，而机头扫过多少度才是飞手感受到的。"""
+    if len(att) == 0:
+        return np.zeros(0), np.zeros(0)
+    ts, yaw = att[:, 0], att[:, 3]
+    out = [0.0]
+    for i in range(1, len(yaw)):
+        d = yaw[i] - yaw[i - 1]
+        while d > 180:
+            d -= 360
+        while d < -180:
+            d += 360
+        out.append(out[-1] + d)
+    out = np.asarray(out)
+    base = float(np.interp(t_fail, ts, out))
+    return ts, out - base
+
+
+def _draw_hexa_p04(frame, center, radius, yaw_deg, pwms, failed_idx, ceiling=1905.0):
+    """俯视六旋翼：每台电机的圆盘大小与颜色随实际 PWM 变，失效那台画叉。
+
+    尺寸用 (pwm-1050)/(ceiling-1050) —— 1050 是 MOT_PWM_MIN，1905 是有效上限
+    （1050+(1950-1050)*0.95）。之所以不用 1950：那不是能达到的值，用它会让所有
+    圆盘都偏小、看起来永远有余量。
+    """
+    cx, cy = center
+    yaw = math.radians(yaw_deg)
+    cv2.circle(frame, (int(cx), int(cy)), int(radius * 1.18), PANEL, -1, cv2.LINE_AA)
+    for i, arm in enumerate(HEXA_ARM_DEG):
+        a = yaw + math.radians(arm)          # 机头方向 + 臂角
+        x = cx + radius * math.sin(a)
+        y = cy - radius * math.cos(a)
+        pwm = pwms[i] if i < len(pwms) else 1050.0
+        frac = max(0.0, min(1.0, (pwm - 1050.0) / (ceiling - 1050.0)))
+        dead = (failed_idx is not None and i == failed_idx)
+        cv2.line(frame, (int(cx), int(cy)), (int(x), int(y)),
+                 GRID if dead else WHITE, 3, cv2.LINE_AA)
+        if dead:
+            r = int(radius * 0.16)
+            cv2.circle(frame, (int(x), int(y)), r, (60, 60, 70), -1, cv2.LINE_AA)
+            cv2.circle(frame, (int(x), int(y)), r, RED, 2, cv2.LINE_AA)
+            d = int(r * 0.6)
+            cv2.line(frame, (int(x - d), int(y - d)), (int(x + d), int(y + d)), RED, 3, cv2.LINE_AA)
+            cv2.line(frame, (int(x + d), int(y - d)), (int(x - d), int(y + d)), RED, 3, cv2.LINE_AA)
+        else:
+            r = int(radius * (0.11 + 0.16 * frac))
+            col = GREEN if frac < 0.55 else (AMBER if frac < 0.8 else RED)
+            cv2.circle(frame, (int(x), int(y)), r, col, -1, cv2.LINE_AA)
+            cv2.circle(frame, (int(x), int(y)), r, WHITE, 1, cv2.LINE_AA)
+    nose = (cx + radius * 0.62 * math.sin(yaw), cy - radius * 0.62 * math.cos(yaw))
+    arrow(frame, (cx, cy), nose, CYAN, 4)
+    cv2.circle(frame, (int(cx), int(cy)), 6, CYAN, -1, cv2.LINE_AA)
+
+
+def motor_fail_video(off_result, on_result, outdir, watch_s=24.0):
+    """左右对照：同一工况、同一时刻，唯一差别是降级重分配开不开。
+
+    这是 P04 全部工作的一句话总结——摘掉一列之后前向混控的力矩不再平衡，
+    而重分配把三个硬约束重新解回去。视频要让人不看数字也能看出这件事。
+    """
+    # **左右两栏由数据决定，不由参数顺序决定。** 上一版按位置贴标签，结果传参一颠倒
+    # 就把"不降级"扣在了降级那一栏上——而画面本身完全正常，只有把累计转动跟
+    # result.json 的总量对一下才会发现。标签错了的图比没有图更糟。
+    runs = []
+    for path in (off_result, on_result):
+        res = load_result(path)
+        ov = res.get("param_overrides") or {}
+        alloc = ov.get("MOT_FAIL_ALLOC")
+        if alloc is None:
+            alloc = 1.0 if res.get("degraded_mixer") else 0.0
+        on = float(alloc) > 0.5
+        title = "降级重分配" if on else "不降级"
+        sub = ("ALLOC = 1  YTRK = %g" % float(ov.get("MOT_FAIL_YTRK", 0))
+               if on else "MOT_FAIL_ALLOC = 0  前向混控")
+        log = os.path.join(os.path.dirname(path), "logs")
+        cands = sorted(glob.glob(os.path.join(log, "*.EFT")) +
+                       glob.glob(os.path.join(log, "*.BIN")))
+        if not cands:
+            raise SystemExit("找不到日志: %s" % log)
+        d = read_motor_fail_log(cands[-1])
+        t_fail = (res.get("fail_time_ms") or
+                  res.get("metrics", {}).get("fail_time_ms") or 0) / 1000.0
+        ts, unw = _unwrap_yaw(d["att"], t_fail)
+        runs.append({"res": res, "d": d, "t_fail": t_fail, "ts": ts, "unw": unw,
+                     "title": title, "sub": sub, "on": on,
+                     "failed": (res.get("failed_motor") or 6) - 1})
+    # 不降级在左、降级在右——阅读顺序是"问题→解决"。
+    runs.sort(key=lambda r: r["on"])
+    if len(runs) == 2 and runs[0]["on"] == runs[1]["on"]:
+        raise SystemExit("两个架次的 MOT_FAIL_ALLOC 相同，构不成对照")
+
+    path = os.path.join(outdir, "motor_fail_compare.mp4")
+    out = writer(path)
+    n = int(FPS * (watch_s + 3.0))
+    for f in range(n):
+        rel = f / float(FPS) - 3.0        # 失效前留 3 秒
+        frame = np.full((H, W, 3), BG, np.uint8)
+        texts = [("P04 单动力失效 — 摘掉一台电机之后", (40, 18), 30, WHITE, True),
+                 ("六旋翼 HEXA/DJI_X · 6 号电机 · 4 m/s 侧风 · 同一工况对照",
+                  (40, 56), 17, GRID, False)]
+        for side, r in enumerate(runs):
+            x0 = 40 + side * 620
+            cv2.rectangle(frame, (x0, 92), (x0 + 580, 632), PANEL, -1)
+            cv2.rectangle(frame, (x0, 92), (x0 + 580, 632), GRID, 1)
+            t = r["t_fail"] + rel
+            att, rcou = r["d"]["att"], r["d"]["rcou"]
+            # DataFlash 的 ATT.Roll/Pitch/Yaw **本来就是度**——不要再乘 57.3。
+            # （MAVLink 的 ATTITUDE 消息才是弧度，两者容易混。）
+            roll = interp(att, t, 1)
+            pitch = interp(att, t, 2)
+            yawd = interp(att, t, 3)
+            pwms = [interp(rcou, t, c) for c in range(1, 7)]
+            fired = rel >= 0.0
+            rot = float(np.interp(t, r["ts"], r["unw"])) if len(r["ts"]) else 0.0
+            _draw_hexa_p04(frame, (x0 + 290, 268), 122, yawd, pwms,
+                           r["failed"] if fired else None)
+            bad = abs(roll) > 10.0
+            texts += [
+                (r["title"], (x0 + 22, 104), 26, GREEN if r["on"] else RED, True),
+                (r["sub"], (x0 + 22, 138), 15, GRID, False),
+                ("滚转", (x0 + 40, 470), 16, GRID, False),
+                ("%+.1f°" % roll, (x0 + 40, 492), 34, RED if bad else WHITE, True),
+                ("累计转动", (x0 + 210, 470), 16, GRID, False),
+                ("%+.0f°" % rot, (x0 + 210, 492), 34, WHITE, True),
+                ("俯仰", (x0 + 410, 470), 16, GRID, False),
+                ("%+.1f°" % pitch, (x0 + 410, 492), 34, WHITE, True),
+            ]
+            # 逐电机输出条：一眼看出重分配把推力重新摊到了哪几台
+            for i in range(6):
+                bx = x0 + 40 + i * 88
+                frac = max(0.0, min(1.0, (pwms[i] - 1050.0) / 855.0))
+                dead = fired and i == r["failed"]
+                _bar(frame, (bx, 560, 70, 16), 0.0 if dead else frac,
+                     RED if dead else (GREEN if frac < 0.55 else AMBER))
+                texts.append(("%d" % (i + 1), (bx + 28, 580), 14,
+                              RED if dead else GRID, False))
+            texts.append(("逐电机输出 (PWM 1050→1905)", (x0 + 40, 536), 15, GRID, False))
+            # 滚转时间曲线。静止帧看不出差别——峰值只持续一瞬，而它正是问题本身。
+            gx, gy, gw, gh = x0 + 40, 408, 500, 54
+            cv2.rectangle(frame, (gx, gy), (gx + gw, gy + gh), (30, 22, 16), -1)
+            cv2.line(frame, (gx, gy + gh // 2), (gx + gw, gy + gh // 2), GRID, 1)
+            span, lim = watch_s, 18.0          # ±18° 铺满，10° 判据线画出来
+            for sgn in (1, -1):
+                yy = int(gy + gh / 2 - sgn * 10.0 / lim * gh / 2)
+                cv2.line(frame, (gx, yy), (gx + gw, yy), (60, 48, 38), 1)
+            pts = []
+            for k in range(gw):
+                tt = r["t_fail"] + (k / float(gw)) * span
+                if tt > t:
+                    break
+                v = interp(att, tt, 1)
+                pts.append((gx + k, int(gy + gh / 2 - max(-lim, min(lim, v)) / lim * gh / 2)))
+            if len(pts) > 1:
+                cv2.polylines(frame, [np.asarray(pts, np.int32)], False,
+                              GREEN if r["on"] else RED, 2, cv2.LINE_AA)
+            texts.append(("滚转 ±18°（细线 = 10° 判据）", (gx, gy - 20), 14, GRID, False))
+        # 时间轴
+        cv2.rectangle(frame, (40, 654), (1240, 686), PANEL, -1)
+        prog = max(0.0, min(1.0, (rel + 3.0) / (watch_s + 3.0)))
+        cv2.rectangle(frame, (40, 654), (40 + int(1200 * prog), 686), (90, 70, 55), -1)
+        mark = 40 + int(1200 * (3.0 / (watch_s + 3.0)))
+        cv2.line(frame, (mark, 648), (mark, 692), RED, 2, cv2.LINE_AA)
+        texts += [("注入", (mark - 20, 694), 14, RED, True),
+                  ("t = %+.1f s" % rel, (1100, 660), 20,
+                   WHITE if rel >= 0 else GRID, True)]
+        frame = add_text(frame, texts)
+        out.write(frame)
+    out.release()
+    return [path]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("case", choices=("landing", "reverse", "uturn"))
+    parser.add_argument("case", choices=("landing", "reverse", "uturn", "motor-fail"))
     parser.add_argument("coupled_result")
     parser.add_argument("baseline_result", nargs="?",
                         help="uturn 不需要基线架次")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     os.makedirs(args.output, exist_ok=True)
-    if args.case == "landing":
+    if args.case == "motor-fail":
+        paths = motor_fail_video(args.coupled_result, args.baseline_result, args.output)
+    elif args.case == "landing":
         paths = landing_video(args.coupled_result, args.baseline_result, args.output)
     elif args.case == "uturn":
         paths = uturn_video(args.coupled_result, args.output)
