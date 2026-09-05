@@ -129,6 +129,10 @@ public:
     // motor removed by set_motor_failed(), or -1
     int8_t              get_failed_motor() const { return _failed_motor; }
 
+    // 解锁检查。父类只看参数 MOT_FAIL_IDX，看不到**运行状态**——而自动检测路径
+    // 根本不写那个参数。见 .cpp 里的说明。
+    bool                arming_checks(size_t buflen, char *buffer) const override;
+
     // Last redistributed allocation, for the MALC log message.  Without demand
     // against achieved there is no way to tell, after the fact, whether a poor
     // post-failure response was the controller asking for the wrong thing or the
@@ -249,6 +253,10 @@ protected:
     void                normalise_rpy_factors();
 
     int8_t              _failed_motor = -1;
+
+    // 机架定义的电机数，init() 时记下。解锁时拿它和当前实际使能数比对：
+    // 少了就说明这次上电期间有电机被摘过，无论走的是哪条路径。
+    uint8_t             _frame_num_motors = 0;
 
     // seconds each motor has been commanded but not turning
     float               _fail_timer_s[AP_MOTORS_MAX_NUM_MOTORS];

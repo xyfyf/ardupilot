@@ -1293,6 +1293,52 @@ bool AP_MotorsMatrix::set_motor_failed(uint8_t motor_num, bool surrender_yaw)
     return true;
 }
 
+bool AP_MotorsMatrix::arming_checks(size_t buflen, char *buffer) const
+{
+    if (!AP_MotorsMulticopter::arming_checks(buflen, buffer)) {
+        return false;
+    }
+
+    // 父类那一条查的是**参数** MOT_FAIL_IDX，这一条查的是**运行状态**。
+    //
+    // 两者只在申报路径上同时变化：脚本写参数，混控器据此摘列。自动检测路径
+    // 根本不写参数——update_failure_detection() 判定成立后直接调
+    // set_motor_failed()，只置 _failed_motor（本文件唯一赋值点，初值 -1，
+    // 且没有任何地方复位它）。
+    //
+    // 于是在这条检查加上之前：自动检出一次失效 → 混控不可逆降级、MOT_FAIL_IDX
+    // 仍是 0 → 上锁 → 再解锁，检查全过 → 带着五电机混控静默起飞。屏幕上与正常
+    // 起飞毫无区别。手工把 MOT_FAIL_IDX 改回 0 也一样，因为清参数不会让电机回来。
+    //
+    // 降级是单向的，唯一的复位途径是重启，所以这里直接要求重启而不是提示清参数。
+    if (_failed_motor >= 0) {
+        hal.util->snprintf(buffer, buflen,
+                           "motor %d removed from mixer, reboot to fly",
+                           int(_failed_motor) + 1);
+        return false;
+    }
+
+    // 再核一次实际使能的电机数。上面那条依赖 _failed_motor，而任何绕过
+    // set_motor_failed() 直接改 motor_enabled[] 的路径它都看不见——比如
+    // MOT_FAIL_OPP 连带摘除的那一台，或将来新增的其它入口。数电机不依赖任何
+    // 一条具体路径，是兜底。
+    if (_frame_num_motors > 0) {
+        uint8_t live = 0;
+        for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
+            if (motor_enabled[i]) {
+                live++;
+            }
+        }
+        if (live < _frame_num_motors) {
+            hal.util->snprintf(buffer, buflen,
+                               "only %u of %u motors enabled, reboot to fly",
+                               (unsigned)live, (unsigned)_frame_num_motors);
+            return false;
+        }
+    }
+    return true;
+}
+
 void AP_MotorsMatrix::add_motors(const struct MotorDef *motors, uint8_t num_motors)
 {
     for (uint8_t i=0; i<num_motors; i++) {
@@ -2031,6 +2077,15 @@ void AP_MotorsMatrix::setup_motors(motor_frame_class frame_class, motor_frame_ty
 
     // normalise factors to magnitude 0.5
     normalise_rpy_factors();
+
+    // 机架定义的电机数，此刻才算数——setup_motors() 刚把这一机型该有的都加完。
+    // 解锁检查拿它与当时实际使能的数量比对；少了就说明本次上电期间摘过电机。
+    _frame_num_motors = 0;
+    for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
+        if (motor_enabled[i]) {
+            _frame_num_motors++;
+        }
+    }
 
     if (!success) {
         _frame_class_string = "UNSUPPORTED";
