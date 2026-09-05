@@ -229,7 +229,7 @@ SUITE = [
         metrics=lambda r: {"触地下降速度": "%.2f m/s" % _num(r, "touch_speed_m_s_down", -1),
                            "触地到上锁": "%.2f s" % _num(r, "touch_to_disarm_s", -1)},
         # 门限取自已复现的基线：正常降落触地约 0.43 m/s，明显变差即为回归
-        check=lambda r: (_m(r, "touch_speed_m_s_down") or 9) < 0.60,
+        check=lambda r: _num(r, "touch_speed_m_s_down", 9) < 0.60,
         why="触地速度超过 0.6 m/s 说明末段减速链路被破坏",
     ),
     dict(
@@ -313,7 +313,7 @@ SUITE = [
     dict(
         pid="P03", name="磁罗盘偏航未对准辨识", case="mag-align",
         args=["--set", "SIM_MAG1_ANGL_Z=30", "--set", "COMPASS_EXTERNAL=1"],
-        metrics=lambda r: {"辨识偏差": "%.2f°" % (_m(r, "mag_yaw_bias_deg") or -99),
+        metrics=lambda r: {"辨识偏差": "%.2f°" % _num(r, "mag_yaw_bias_deg", -99),
                            "样本数": str(_m(r, "mag_align_samples") or 0)},
         # 注入 30°，GSF 参考自带约 ±3° 偏置，故给 25~35 的窗口
         # 样本数一并判：少数几个点也可能凑巧落在窗口里，那不是辨识收敛。
