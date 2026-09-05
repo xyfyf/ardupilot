@@ -303,6 +303,9 @@ struct PACKED log_MotAlloc {
     float    ach_rll;
     float    ach_pit;
     float    ach_yaw;
+    uint8_t  result;        // AP_MotorsMatrix::AllocResult
+    uint8_t  passes;        // active-set iterations run
+    uint8_t  clamped;       // bitmask of motors that hit a limit
 };
 
 // Log the degraded allocation.  After a motor failure the mixer no longer does
@@ -313,17 +316,35 @@ struct PACKED log_MotAlloc {
 void Copter::Log_Write_MotAlloc()
 {
     const AP_MotorsMatrix *mat = AP_MotorsMatrix::get_singleton();
-    if (mat == nullptr || !mat->alloc_active()) {
+    if (mat == nullptr || mat->get_failed_motor() < 0) {
         return;
     }
+    // Log every cycle while degraded, not only when the solve committed.
+    //
+    // This used to return early unless alloc_active(), so a *failed* solve
+    // logged nothing at all - and the caller silently falls back to forward
+    // mixing, which flies. The result was that the record of a degraded flight
+    // has gaps, and a gap is indistinguishable from a healthy allocation that
+    // simply was not sampled. Exactly the case worth investigating leaves the
+    // least evidence.
+    //
+    // On a failure the demand/achieved snapshot is whatever the last successful
+    // solve left, so `result` is what tells them apart - do not read the floats
+    // without checking it.
+    const bool active = mat->alloc_active();
     const float *d = mat->get_alloc_demand();
     const float *a = mat->get_alloc_achieved();
     const struct log_MotAlloc pkt {
         LOG_PACKET_HEADER_INIT(LOG_MOTALLOC_MSG),
         time_us : AP_HAL::micros64(),
         failed  : mat->get_failed_motor(),
-        dem_thr : d[0], dem_rll : d[1], dem_pit : d[2], dem_yaw : d[3],
-        ach_thr : a[0], ach_rll : a[1], ach_pit : a[2], ach_yaw : a[3]
+        dem_thr : active ? d[0] : 0.0f, dem_rll : active ? d[1] : 0.0f,
+        dem_pit : active ? d[2] : 0.0f, dem_yaw : active ? d[3] : 0.0f,
+        ach_thr : active ? a[0] : 0.0f, ach_rll : active ? a[1] : 0.0f,
+        ach_pit : active ? a[2] : 0.0f, ach_yaw : active ? a[3] : 0.0f,
+        result  : (uint8_t)mat->alloc_result(),
+        passes  : mat->alloc_passes(),
+        clamped : mat->alloc_clamp_mask()
     };
     logger.WriteBlock(&pkt, sizeof(pkt));
 }
@@ -552,7 +573,7 @@ const struct LogStructure Copter::log_structure[] = {
 // @Field: APit: Pitch moment achieved
 // @Field: AYaw: Yaw moment achieved
     { LOG_MOTALLOC_MSG, sizeof(log_MotAlloc),
-      "MALC", "Qbffffffff",     "TimeUS,Fail,DThr,DRll,DPit,DYaw,AThr,ARll,APit,AYaw", "s#--------", "F---------" },
+      "MALC", "QbffffffffBBB", "TimeUS,Fail,DThr,DRll,DPit,DYaw,AThr,ARll,APit,AYaw,Res,Np,Clp", "s#-----------", "F------------" },
 
 #if FRAME_CONFIG != HELI_FRAME
     { LOG_VELFF_MSG, sizeof(log_VelFF),

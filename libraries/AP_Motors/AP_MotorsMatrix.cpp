@@ -829,8 +829,12 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
             idx[n++] = i;
         }
     }
+    _alloc_result = AllocResult::NOT_RUN;
+    _alloc_passes = 0;
+    _alloc_clamp_mask = 0;
     if (n < rows) {
         // Fewer effectors than demands: nothing to redistribute between.
+        _alloc_result = AllocResult::TOO_FEW_MOTORS;
         return false;
     }
 
@@ -848,6 +852,7 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
 
     // At most one clamp per motor, so this terminates.
     for (uint8_t pass = 0; pass <= n; pass++) {
+        _alloc_passes = pass + 1;
         // Demand still to be met by the motors that are free, after removing
         // what the already-clamped ones contribute.
         float rem[4];
@@ -929,6 +934,7 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
         // rules out the trivially impossible.
         float bbt_inv[16];
         if (!mat_inverse(bbt, bbt_inv, rows)) {
+            _alloc_result = AllocResult::SINGULAR;
             break;
         }
         // MOT_FAIL_YTRK moves the target of that same term off zero and onto
@@ -1016,6 +1022,7 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
             }
         }
         if (!finite) {
+            _alloc_result = AllocResult::NON_FINITE;
             break;
         }
         float err2 = 0.0f, mag2 = 0.0f;
@@ -1029,6 +1036,7 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
         // vehicle back to forward mixing, which is the failure this allocator
         // exists to avoid.
         if (err2 > AP_MOTORS_ALLOC_RESIDUAL_REL_SQ * MAX(mag2, 1.0f)) {
+            _alloc_result = AllocResult::RESIDUAL;
             break;
         }
 
@@ -1042,6 +1050,7 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
                 thrust[k] = constrain_float(t, 0.0f, 1.0f);
                 freed[k] = false;
                 clamped_any = true;
+                _alloc_clamp_mask |= (uint8_t)(1U << (idx[k] & 7));
             } else {
                 thrust[k] = t;
             }
@@ -1069,11 +1078,16 @@ bool AP_MotorsMatrix::allocate_redistributed(const float demand[4], bool include
             // No snapshot is needed: this branch breaks immediately, so
             // thrust[] at the exit is exactly the assignment being blessed.
             have_solution = true;
+            _alloc_result = AllocResult::OK;
             break;
         }
     }
 
     if (!have_solution) {
+        if (_alloc_result == AllocResult::NOT_RUN) {
+            // Loop ran out of passes with every round still clamping.
+            _alloc_result = AllocResult::NO_SOLUTION;
+        }
         // Never verified a solve.  thrust_out[] is still the zeroed array from
         // the top; reporting success on it commanded zero thrust on every motor
         // and dropped the vehicle.  Say so instead and let the caller fall back
@@ -1111,7 +1125,14 @@ void AP_MotorsMatrix::set_limits_from_allocation(const float demand[4], bool inc
         achieved[0] += thrust[i] * _throttle_factor[i];
         achieved[1] += thrust[i] * _roll_factor[i];
         achieved[2] += thrust[i] * _pitch_factor[i];
-        achieved[3] += thrust[i] * _yaw_factor[i];
+        // Yaw uses the *geometric* factors, not _yaw_factor[]: with the default
+        // MOT_FAIL_YAW=0 the live factors are scaled to zero at failure, so this
+        // sum was identically zero in every degraded flight - the log said the
+        // allocation produced no yaw moment while the rotors were producing
+        // enough of it to sweep the nose right round. The mixer stops
+        // *commanding* yaw; the rotors keep *making* it. Still a normalised
+        // allocation estimate, not a measured torque.
+        achieved[3] += thrust[i] * (_failed_motor >= 0 ? _yaw_geom[i] : _yaw_factor[i]);
     }
 
     // The throttle demand is per motor while the throttle row is a sum, the

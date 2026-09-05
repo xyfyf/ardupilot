@@ -138,6 +138,23 @@ public:
     const float        *get_alloc_demand() const { return _alloc_demand; }
     const float        *get_alloc_achieved() const { return _alloc_achieved; }
 
+    // Why the last solve ended the way it did.  Logged unconditionally while
+    // degraded, because a solve that fails logs nothing else: the caller falls
+    // back to forward mixing and the flight continues looking ordinary.  A gap
+    // in MALC and a healthy allocation are indistinguishable without this.
+    enum class AllocResult : uint8_t {
+        OK              = 0,
+        TOO_FEW_MOTORS  = 1,   // fewer effectors than rows
+        SINGULAR        = 2,   // B*B^T not invertible - rank deficient
+        NON_FINITE      = 3,   // NaN/Inf came out of the solve
+        RESIDUAL        = 4,   // B*t != rem beyond tolerance - ill conditioned
+        NO_SOLUTION     = 5,   // every pass needed clamping, none verified
+        NOT_RUN         = 6,   // allocator disabled or no failed motor
+    };
+    AllocResult         alloc_result() const { return _alloc_result; }
+    uint8_t             alloc_passes() const { return _alloc_passes; }
+    uint8_t             alloc_clamp_mask() const { return _alloc_clamp_mask; }
+
     // Redistributed-pseudoinverse control allocation.
     //
     // Solves for per-motor thrusts whose resulting moments come as close as
@@ -175,6 +192,13 @@ public:
     float               _alloc_demand[4];
     float               _alloc_achieved[4];
     bool                _alloc_active;
+
+    // Diagnostics from the last solve.  mutable because
+    // allocate_redistributed() is const - it computes thrusts and must not
+    // change control state, but it is the only place that knows why it gave up.
+    mutable AllocResult _alloc_result = AllocResult::NOT_RUN;
+    mutable uint8_t     _alloc_passes;        // active-set iterations run
+    mutable uint8_t     _alloc_clamp_mask;    // bit i = motor i hit a limit
 
     bool                allocate_redistributed(const float demand[4], bool include_yaw,
                                                float thrust_out[AP_MOTORS_MAX_NUM_MOTORS]) const;
