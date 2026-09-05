@@ -43,18 +43,31 @@ MODEL = os.path.join(HERE, "eft_hexa.json")
 HOME = (35.363261, 149.165230, 584.0, 0.0)
 ON_GROUND = mavutil.mavlink.MAV_LANDED_STATE_ON_GROUND
 IN_AIR = mavutil.mavlink.MAV_LANDED_STATE_IN_AIR
-SITL_LOCK = "/tmp/ardupilot-eft-issue-repro-sitl.lock"
+SITL_LOCK_FMT = "/tmp/ardupilot-eft-issue-repro-sitl-%d.lock"
 
 
-def acquire_sitl_lock():
-    """Refuse concurrent runs because all scenarios use the same SITL ports."""
-    lock = open(SITL_LOCK, "a+", encoding="utf-8")
+def sitl_port(instance):
+    """SITL 的 -I N 把所有端口偏移 10*N，见 SITL_cmdline.cpp:428-437。"""
+    return 5760 + 10 * int(instance)
+
+
+def acquire_sitl_lock(instance=0):
+    """同一实例号仍互斥，不同实例号放行。
+
+    原来是全机一把锁，因为每个场景都写死用 5760。加上 -I 之后端口不再冲突，
+    并行的唯一约束就变成"同一个实例号不能被两个进程同时用"——所以锁按实例分。
+
+    仍然是拒绝而不是排队：撞上说明调度器把同一个实例号发给了两个任务，那是
+    调度的 bug，排队只会把它藏起来。
+    """
+    lock = open(SITL_LOCK_FMT % int(instance), "a+", encoding="utf-8")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         lock.seek(0)
         owner = lock.read().strip() or "unknown"
-        raise SystemExit("已有 EFT SITL 场景占用固定端口（进程 %s）" % owner)
+        raise SystemExit("实例 %d 已被占用（进程 %s）——调度器把同一实例号发给了两个任务"
+                         % (int(instance), owner))
     lock.seek(0)
     lock.truncate()
     lock.write(str(os.getpid()))
@@ -200,7 +213,7 @@ def prepare_run(case, baseline, output, overrides=None, variant_name=None, model
     return out, model_path, variant, algo_path
 
 
-def start_sitl(out, model_path, speedup, algo_path=None):
+def start_sitl(out, model_path, speedup, algo_path=None, instance=0):
     runtime = os.path.join(out, "runtime.parm")
     with open(runtime, "w", encoding="utf-8") as f:
         f.write("SIM_SPEEDUP %g\n" % speedup)
@@ -215,14 +228,16 @@ def start_sitl(out, model_path, speedup, algo_path=None):
     cmd = [SITL_BIN, "--model", "hexa-dji:" + os.path.basename(model_path),
            "--speedup", str(speedup), "--home", home,
            "--defaults", defaults, "--wipe"]
+    if int(instance) != 0:
+        cmd += ["-I", str(int(instance))]
     stdout = open(os.path.join(out, "sitl_stdout.log"), "w", encoding="utf-8")
     print("SITL:", " ".join(cmd))
     proc = subprocess.Popen(cmd, cwd=out, stdout=stdout, stderr=subprocess.STDOUT)
     return proc, stdout
 
 
-def connect(process):
-    mav = mavutil.mavlink_connection("tcp:127.0.0.1:5760")
+def connect(process, instance=0):
+    mav = mavutil.mavlink_connection("tcp:127.0.0.1:%d" % sitl_port(instance))
     mav.wait_heartbeat(timeout=30)
     mon = Monitor(mav, process)
     for msg_id, hz in ((30, 50), (32, 25), (33, 10), (36, 25),
@@ -3007,6 +3022,9 @@ def main(argv=None):
                         help="U 型转弯形状：square 直角式 / arc 多点近似 / spline 样条平滑")
     parser.add_argument("--turn-deg", type=float, default=90.0,
                         help="route 场景的转角度数；掉速若随 cos(角/2) 走即为 SCurve 混合的几何必然")
+    parser.add_argument("--instance", type=int, default=0,
+                        help="SITL 实例号。端口 = 5760 + 10*N，用于并行跑多个场景。"
+                             "调度方必须保证同一实例号不被两个任务同时用")
     args = parser.parse_args(argv)
 
     overrides = {}
@@ -3028,7 +3046,7 @@ def main(argv=None):
     # lock open for this process lifetime so two regressions cannot connect to
     # each other's SITL instances and turn an infrastructure collision into a
     # false algorithm failure.
-    _sitl_lock = acquire_sitl_lock()  # keep the descriptor alive until main() returns
+    _sitl_lock = acquire_sitl_lock(args.instance)  # keep the descriptor alive until main() returns
     model_overrides = {}
     for item in args.model_set or []:
         if "=" not in item:
@@ -3040,13 +3058,13 @@ def main(argv=None):
             raise SystemExit("--model-set 的值必须是数字，收到 %r" % v)
     out, model_path, variant, algo_path = prepare_run(
         args.case, args.baseline, args.output, overrides, args.variant, model_overrides)
-    proc, stdout = start_sitl(out, model_path, args.speedup, algo_path)
+    proc, stdout = start_sitl(out, model_path, args.speedup, algo_path, args.instance)
     result = {"case": args.case, "variant": variant, "frame": "hexa-dji",
               "motor_count": 6, "output": out, "model_overrides": model_overrides,
               "physics": "nominal" if args.baseline else "problem",
               "param_overrides": overrides}
     try:
-        mon = connect(proc)
+        mon = connect(proc, args.instance)
         fence_poly = None
         if args.polyfence_radius or args.polyfence_points:
             # 必须在任务之前上传：路径规划器在任务开始时读取围栏，

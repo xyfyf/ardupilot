@@ -34,6 +34,7 @@ local declare_to_mixer = Parameter()
 assert(declare_to_mixer:init("MOT_STOP_DECL"), "could not find param")
 
 local declared = false
+local mask_refused = false   -- 多位掩码只告警一次，且此后整架次不再注入
 local warned_empty = false
 
 -- read spin min param, we set motors to this PWM to stop them
@@ -87,11 +88,20 @@ end
 -- it is rebooted.  That is what makes the arming refusal the right interlock - do
 -- not "helpfully" zero this on disarm, or the next takeoff starts degraded with
 -- nothing on screen to say so.
-local function declare_failure(bitmask)
-  if declared or declare_to_mixer:get() ~= 1 then
-    return
-  end
-
+-- Validate the mask **before anything acts on it**, and let one answer gate both
+-- the declaration and the injection.
+--
+-- This used to live inside declare_failure(), which meant a mask naming several
+-- motors was refused for declaration and then injected anyway: update() ran its
+-- override loop over stop_motor_chan regardless, and that array is filled from
+-- every bit in the mask.  With mask=3 the result was two motors genuinely
+-- stopped while the mixer knew nothing - a hexacopter down two rotors has no
+-- trim solution at all, so that outcome is worse than either stopping one or
+-- stopping none.  The only thing on screen was "not declaring", which reads
+-- like a safe refusal.
+--
+-- Returns the motor number when exactly one is named, otherwise nil.
+local function validate_mask(bitmask)
   local first, count = nil, 0
   for i = 1, 12 do
     if ((1 << (i-1)) & bitmask) ~= 0 then
@@ -112,21 +122,35 @@ local function declare_failure(bitmask)
       warned_empty = true
       gcs:send_text(4, "MotorFail: switch high, MOT_STOP_BITMASK empty - waiting")
     end
-    return
+    return nil
   end
   warned_empty = false
 
-  -- Several motors named: refuse, and latch.  MOT_FAIL_IDX takes one motor, so
-  -- degrading on a guess about which is meant would remove a healthy column -
-  -- the same reason update_failure_detection() warns instead of acting when
-  -- several ESCs read stopped.  Latching is deliberate here: the mask was set
-  -- wrong, and quietly acting on a later correction mid-flight is worse than
+  -- Several motors named: refuse the whole injection, and latch.  MOT_FAIL_IDX
+  -- takes one motor, so degrading on a guess about which is meant would remove a
+  -- healthy column - the same reason update_failure_detection() warns instead of
+  -- acting when several ESCs read stopped.  Latching is deliberate: the mask was
+  -- set wrong, and quietly acting on a later correction mid-flight is worse than
   -- making the operator land and fix it.
-  declared = true
   if count > 1 then
-    gcs:send_text(2, string.format("MotorFail: %d motors in mask, not declaring", count))
+    if not mask_refused then
+      mask_refused = true
+      gcs:send_text(2, string.format(
+        "MotorFail: %d motors in mask - injection BLOCKED, land and fix", count))
+    end
+    return nil
+  end
+
+  return first
+end
+
+
+local function declare_failure(first)
+  if declared or declare_to_mixer:get() ~= 1 then
     return
   end
+
+  declared = true
 
   -- param:set writes RAM only.  Saving it would leave the value across a reboot,
   -- and arming is refused while MOT_FAIL_IDX is non-zero, so a saved value would
@@ -148,7 +172,13 @@ function update()
   update_stop_motors(bitmask)
 
   if switch:get_aux_switch_pos() == 2 then
-    declare_failure(bitmask)
+    -- One validation gates both halves.  Anything but exactly one motor and
+    -- nothing happens at all - no declaration, and no output override either.
+    local target = validate_mask(bitmask)
+    if target == nil then
+      return update, 10
+    end
+    declare_failure(target)
     for i = 1, #stop_motor_chan do
       -- override for 15ms, called every 10ms
       -- using timeout means if the script dies the timeout will expire and all motors will come back

@@ -99,6 +99,13 @@ def main():
     ap.add_argument("--watch", type=float, default=20.0, help="失效后观察秒数")
     ap.add_argument("--speedup", type=float, default=5.0)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--mask", type=int, default=None,
+                    help="直接指定 MOT_STOP_BITMASK，覆盖 --motor 推出的值。"
+                         "用于验证非法掩码：多位时脚本必须**什么都不做**——"
+                         "既不申报也不注入（A01）")
+    ap.add_argument("--expect-blocked", action="store_true",
+                    help="期望注入被拒：不得出现 declared/degraded，"
+                         "MOT_FAIL_IDX 必须仍为 0，且必须出现 BLOCKED 告警")
     ap.add_argument("--debug-lua", action="store_true",
                     help="额外放一份带调试打印的脚本到 scripts/，用于定位链路断点。"
                          "注意它与 ROMFS 那份竞争 param 表，谁先注册谁赢——"
@@ -219,7 +226,8 @@ def run(proc, args, out):
             if m and m.param_id.strip("\x00") == name:
                 return m.param_value
         return None
-    for k, v in (("MOT_STOP_DECL", 1), ("MOT_STOP_BITMASK", 1 << (args.motor - 1))):
+    mask = args.mask if args.mask is not None else (1 << (args.motor - 1))
+    for k, v in (("MOT_STOP_DECL", 1), ("MOT_STOP_BITMASK", mask)):
         got = setparam(k, v)
         if got is None or abs(got - v) > 0.5:
             _fail("%s 设置失败：读回 %s，期望 %s" % (k, got, v))
@@ -290,6 +298,35 @@ def run(proc, args, out):
     print("    RC%d 实测 = %s（期望 2000）" % (AUX_CHAN, seen.get(AUX_CHAN)))
 
     new = msgs[before:]
+    if args.expect_blocked:
+        print("\n[5] 非法掩码：必须什么都不发生（A01）")
+        if any("declared motor" in t for t in new):
+            _fail("出现了申报——非法掩码没有拦住申报")
+        if any("mixer degraded" in t for t in new):
+            _fail("混控器降级了——非法掩码没有拦住降级")
+        if not any("BLOCKED" in t for t in new):
+            _fail("没有 BLOCKED 告警——脚本没有识别出非法掩码")
+        _ok("未申报、未降级，且给出了 BLOCKED 告警")
+        idx = getparam("MOT_FAIL_IDX")
+        if idx is None or abs(idx) > 0.5:
+            _fail("MOT_FAIL_IDX = %s，应仍为 0" % idx)
+        _ok("MOT_FAIL_IDX 仍为 0")
+        # 关键：输出有没有真的被压下去。A01 的原始缺陷正是"拒绝申报但照常注入"，
+        # 只查消息查不出来——必须看电机输出。
+        lo = None
+        end2 = time.time() + 5
+        while time.time() < end2:
+            m = mav.recv_match(type="SERVO_OUTPUT_RAW", blocking=True, timeout=1)
+            if m:
+                vals = [getattr(m, "servo%d_raw" % i) for i in range(1, 7)]
+                lo = min(vals) if lo is None else min(lo, min(vals))
+        print("    六路输出最低值 = %s" % lo)
+        if lo is not None and lo < 1100:
+            _fail("有电机被压到 %d —— 注入仍在执行，A01 未修复" % lo)
+        _ok("没有电机被压到最低——注入确实被整体阻断")
+        print("\n全部通过（非法掩码用例）。结果目录: %s" % out)
+        return
+
     print("\n[5] 申报与降级")
     if not any("declared motor" in t for t in new):
         _fail("没有 'declared motor …' —— 申报没发生（DECL/掩码/映射）")
