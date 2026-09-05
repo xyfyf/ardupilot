@@ -226,8 +226,8 @@ def _fence_check(r):
 SUITE = [
     dict(
         pid="P01", name="着陆末段触地速度", case="landing", args=[],
-        metrics=lambda r: {"触地下降速度": "%.2f m/s" % (_m(r, "touch_speed_m_s_down") or -1),
-                           "触地到上锁": "%.2f s" % (_m(r, "touch_to_disarm_s") or -1)},
+        metrics=lambda r: {"触地下降速度": "%.2f m/s" % _num(r, "touch_speed_m_s_down", -1),
+                           "触地到上锁": "%.2f s" % _num(r, "touch_to_disarm_s", -1)},
         # 门限取自已复现的基线：正常降落触地约 0.43 m/s，明显变差即为回归
         check=lambda r: (_m(r, "touch_speed_m_s_down") or 9) < 0.60,
         why="触地速度超过 0.6 m/s 说明末段减速链路被破坏",
@@ -239,9 +239,9 @@ SUITE = [
         args=["--motor", "6", "--detect", "--set", "SIM_WIND_SPD=4",
               "--set", "SIM_WIND_DIR=90"],
         metrics=lambda r: {"检测延迟": "%.2f s" % _detect_delay(r),
-                           "滚转误差峰值": "%.1f°" % (_m(r, "roll_err_max_deg") or -1),
-                           "滚转稳态": "%.1f°" % (_m(r, "roll_steady_deg") or -1),
-                           "水平漂移": "%.1f m/s" % (_m(r, "horiz_drift_max_m_s") or -1),
+                           "滚转误差峰值": "%.1f°" % _num(r, "roll_err_max_deg", -1),
+                           "滚转稳态": "%.1f°" % _num(r, "roll_steady_deg", -1),
+                           "水平漂移": "%.1f m/s" % _num(r, "horiz_drift_max_m_s", -1),
                            "掉高": "%.2f m" % _alt_loss(r)},
         # 6 号为最不利失效位置（正右，滚转力臂最大）
         # 判据落在**姿态**上。航向在单发失效后是被放弃的那一维——权限只够
@@ -274,7 +274,7 @@ SUITE = [
               "--set", "MOT_FAIL_TIME=200", "--set", "MOT_FAIL_THST=0.15",
               "--set", "MOT_FAIL_ROVR=1.4"],
         metrics=lambda r: {"误报次数": str(_motor_msgs(r)),
-                           "弧内最低速": "%.2f m/s" % (_m(r, "arc_speed_min_m_s") or -1)},
+                           "弧内最低速": "%.2f m/s" % _num(r, "arc_speed_min_m_s", -1)},
         # 「零误报」这种否定式判据最容易空过：一次根本没飞起来的架次同样是零条
         # 消息。所以要求这一趟确实飞到了作业速度——arc_speed_min_m_s 是航线里
         # 最慢的那一段，它上得去就说明检测器确实在有推力、有转速的工况下跑过。
@@ -289,17 +289,17 @@ SUITE = [
         # 弧会退化成航点式掉头（首轮回归即因此报出 53% 掉速）。
         args=["--swath", "24", "--speed", "5"] + YAW_CFG + ["--set", "WPNAV_SPEED=500"],
         # 用 arc_speed_dip_pct（按 ARCN.Prog 界定）而非场景脚本的粗窗口
-        metrics=lambda r: {"弧内掉速": "%.1f%%" % (_m(r, "arc_speed_dip_pct") or -1),
-                           "航向误差均值": "%.1f°" % (_m(r, "arc_hdg_err_mean_deg") or -1),
-                           "实飞半径": "%.1f m" % (_m(r, "flown_radius_mean_m") or -1)},
+        metrics=lambda r: {"弧内掉速": "%.1f%%" % _num(r, "arc_speed_dip_pct", -1),
+                           "航向误差均值": "%.1f°" % _num(r, "arc_hdg_err_mean_deg", -1),
+                           "实飞半径": "%.1f m" % _num(r, "flown_radius_mean_m", -1)},
         check=lambda r: bool(_m(r, "accepted")) and _num(r, "arc_speed_dip_pct", 99) < 10.0,
         why="匀速掉头的立身之本；航点式掉头在同条件下掉速 53%",
     ),
     dict(
         pid="P06", name="协调转弯-AUTO任务", case="uturn-auto",
         args=["--swath", "12"] + YAW_CFG,
-        metrics=lambda r: {"进弧前尾段最低速": "%.2f m/s" % (_m(r, "pre_arc_speed_min_m_s") or -1),
-                           "弧内最低速": "%.2f m/s" % (_m(r, "arc_speed_min_m_s") or -1)},
+        metrics=lambda r: {"进弧前尾段最低速": "%.2f m/s" % _num(r, "pre_arc_speed_min_m_s", -1),
+                           "弧内最低速": "%.2f m/s" % _num(r, "arc_speed_min_m_s", -1)},
         # 进弧前不减速是 AUTO 接入的核心难点：LOITER_TURNS 原本归在 always stop
         # reached_arc 是必要前提，不是锦上添花：arc_start() 现在会因倾角预算、
         # 偏航速率预算、径向一致性或入弧切向速度而拒绝，拒绝后 AUTO 回退到标准
@@ -323,8 +323,8 @@ SUITE = [
     ),
     dict(
         pid="P06", name="偏航能力辨识", case="yaw-step", args=[],
-        metrics=lambda r: {"悬停可达偏航速率": "%.1f °/s" % (_m(r, "yaw_rate_max_pos_degs") or -1),
-                           "混控输出峰值": "%.2f" % (_m(r, "yaw_out_peak") or -1)},
+        metrics=lambda r: {"悬停可达偏航速率": "%.1f °/s" % _num(r, "yaw_rate_max_pos_degs", -1),
+                           "混控输出峰值": "%.2f" % _num(r, "yaw_out_peak", -1)},
         check=lambda r: (_m(r, "yaw_rate_max_pos_degs") or 0) > 50.0,
         why="偏航能力是协调转弯的硬约束，掉了说明偏航通道被改坏",
     ),
