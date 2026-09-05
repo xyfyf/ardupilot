@@ -77,6 +77,7 @@ known_units = {
              'Hz'      : 'hertz'                 ,
              'kHz'     : 'kilohertz'             ,
              '1/s'     : 'per second'            , # Not SI but in some situations more user-friendly than hertz
+             'rpm'     : 'revolutions per minute' , # Not SI, but it is what ESC telemetry and motor datasheets are quoted in
 # distance
              'km'      : 'kilometers'                , # metre is the SI unit name, meter is the american spelling of it
              'm'       : 'meters'                    , # metre is the SI unit name, meter is the american spelling of it
