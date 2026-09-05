@@ -259,11 +259,11 @@ SUITE = [
         args=["--motor", "6", "--detect", "--shed", "--set", "SIM_WIND_SPD=4",
               "--set", "SIM_WIND_DIR=90"],
         metrics=lambda r: {"检测延迟": "%.2f s" % _detect_delay(r),
-                           "滚转稳态": "%.1f°" % (_m(r, "roll_steady_deg") or -1),
-                           "水平漂移": "%.1f m/s" % (_m(r, "horiz_drift_max_m_s") or -1),
+                           "滚转稳态": "%.1f°" % _num(r, "roll_steady_deg", -1),
+                           "水平漂移": "%.1f m/s" % _num(r, "horiz_drift_max_m_s", -1),
                            "掉高": "%.2f m" % _alt_loss(r)},
         check=lambda r: (bool(_m(r, "still_armed_after_watch")) and _detect_delay(r) < 0.5
-                         and abs(_m(r, "roll_steady_deg") or 999) < 10.0)
+                         and abs(_num(r, "roll_steady_deg", 999)) < 10.0)
                         and _alt_loss(r) < 2.0,
         why="掉桨须在 0.5 s 内检出并降级；判据与停转同为姿态可控，因为失去的是同一维",
     ),
