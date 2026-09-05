@@ -1049,12 +1049,23 @@ def run_fence(mon, mode="LOITER", skip_param_fence=False, fence_heading=None,
     """满杆冲向围栏，量各模式的实际围控能力。
 
     mode 决定被测的是哪条链路——这正是问题所在，不同模式的水平围控**机制不同**：
-      LOITER / POSHOLD / ZIGZAG   走 loiter_nav->update()，AC_Loiter 默认带避障
+      LOITER / ZIGZAG              走 loiter_nav->update()，AC_Loiter 默认带避障
       GUIDED                       avoid.adjust_velocity + 目标点校验
       AUTO / RTL / SMART_RTL       走 wp_nav，**需要 OA_TYPE**，默认关
+      ALT_HOLD / STABILIZE         杆量是姿态而非速度，走姿态层硬限
+      POSHOLD / DRIFT / FLOWHOLD   手动段同上（POSHOLD 自稳段走 loiter_nav）
       CIRCLE / BRAKE               直驱 pos_control，**没有**水平避障
-      ALT_HOLD / STABILIZE / SPORT 无位置控制，**原理上无法**主动围控
-    对最后两类，唯一的防线是 FENCE_ACTION——越界之后才动作。
+      SPORT                        **未接入任何主动围控**
+    最后两行唯一的防线是 FENCE_ACTION——越界之后才动作。
+
+    姿态层那条是 AC_Avoid::adjust_lean_for_fence_rad()，把杆量里指向栏外的分量
+    直接钳掉。它与 adjust_roll_pitch_rad() 的传感器避障不是一回事：后者刻意只压
+    到机体倾角上限的 75%，留给飞手翻越的余地；围栏是硬承诺，不留。接入点见
+    mode_{althold,stabilize,poshold,drift,flowhold}.cpp，回归见 regression.py 的
+    六条「姿态层围栏-*」。
+
+    **SPORT 是这一批里唯一漏下的**——它的杆量同样是姿态，本该一并接入，
+    mode_sport.cpp 里却没有这一调用。
 
     skip_param_fence=True 时不设 FENCE_RADIUS，改用外部上传的 polyfence，
     因为路径规划器只认后者。
