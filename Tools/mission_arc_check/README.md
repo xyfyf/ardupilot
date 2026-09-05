@@ -6,8 +6,7 @@
 分支 `feat/P06-smooth-route`。名字取自基线表的「文件简称」列（P06 = `smooth-route`），
 与 `feat/P04-motor-failure`（P04 = `motor-prop-failure`）同源——**命的是问题，不是这
 一块工作**。P06 的问题是全航程轨迹平滑与平滑避障，本工具只是其中一块；后续做避障或
-二级机上 pre-arm 时分支名不必改。工作目录仍叫 `UAV-work/p06`：路径与分支名不一致是
-历史原因，改目录要重建 worktree，代价大于收益。
+二级机上 pre-arm 时分支名不必改。工作目录 `UAV-work/P06-smooth-route`，与分支同名。
 
 ## 为什么需要它
 
